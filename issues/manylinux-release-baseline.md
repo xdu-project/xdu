@@ -1,5 +1,5 @@
 ---
-status: unshaped
+status: shaped on feature/manylinux-release-baseline (2026-09-11) — see spec/manylinux-release-baseline/GOAL.md
 kind: feature
 appetite: small
 ---
