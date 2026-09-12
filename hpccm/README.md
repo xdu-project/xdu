@@ -51,13 +51,11 @@ The top-level `Dockerfile` **compiles xdu from source**; this recipe
 seconds rather than minutes, and it also yields an Apptainer definition — but
 it can only install released tags, not an arbitrary commit.
 
-**Why trixie, not bookworm.** The released binaries are built on Ubuntu 24.04
-and currently need glibc 2.38 (`xdu-find`, `xdu-rm`) and 2.39 (`xdu-view`).
-Bookworm ships 2.36 and cannot run them; the top-level Dockerfile is unaffected
-because it compiles against bookworm's own glibc. The runtime stage guards this
-by running `--version` on all four binaries, so an incompatible base fails the
-build instead of producing an image that dies on first use. Should the release
-workflow move to an older glibc, `runtime_base` can go back to bookworm.
+**Why bookworm.** Releases built on the manylinux_2_28 baseline need at most glibc
+2.28, so bookworm (2.36) serves as the runtime. The previous Ubuntu 24.04 releases
+needed up to 2.39 and ran on trixie instead; the runtime stage still runs `--version`
+on all four binaries, so pointing the recipe at a pre-baseline tag fails the build
+loudly instead of producing an image that dies on first use.
 
 **Man pages and shell completions.** The release tarball ships them, so this
 recipe includes them; the top-level Dockerfile cannot, because `.dockerignore`

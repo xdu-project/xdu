@@ -1,7 +1,7 @@
 # NOTE: this definition file depends on features only available in
 # Singularity 3.2 and later.
 BootStrap: docker
-From: debian:trixie-slim
+From: debian:bookworm-slim
 Stage: build
 %post
     . /.singularity.d/env/10-docker*.sh
@@ -20,7 +20,7 @@ Stage: build
     expected=$(grep -F "xdu-v0.5.1-$(uname -m)-unknown-linux-gnu.tar.gz" /xdu-SHA256SUMS | cut -d" " -f1) && [ -n "$expected" ] && echo "$expected  /xdu-dist.tar.gz" | sha256sum -c - && rm -f /xdu-SHA256SUMS
 
 BootStrap: docker
-From: debian:trixie-slim
+From: debian:bookworm-slim
 %post
     . /.singularity.d/env/10-docker*.sh
 

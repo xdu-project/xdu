@@ -2,7 +2,7 @@
 
     https://github.com/xdu-project/xdu
 
-    hpccm --recipe xdu.py --format docker > Dockerfile
+    hpccm --recipe xdu.py --format docker > xdu.docker
     hpccm --recipe xdu.py --format singularity \
           --singularity-version=3.2 > xdu.def
 
@@ -17,17 +17,16 @@ Without it hpccm drops the second stage and emits a definition file that
 builds only the downloader, so the recipe refuses to generate rather than let
 that pass quietly.
 
-The release binaries are built on Ubuntu 24.04. Measured against v0.5.1, xdu
-needs glibc 2.34, xdu-find and xdu-rm need 2.38, and xdu-view needs 2.39,
-hence the Debian trixie runtime (2.41) for an image holding all four.
-Debian bookworm ships 2.36, so it runs xdu from a release tarball but not
-the other three.
+Built from a manylinux_2_28 baseline, the release binaries need at most glibc
+2.28, so Debian bookworm (2.36) serves as the runtime. The `--version` smoke
+runs below keep guarding this: point the recipe at a pre-baseline tag and an
+incompatible base fails the build instead of shipping a dead image.
 
 Options, as --userarg key=value:
 
     version=0.5.1                    release tag; v0.5.1 works too.
     prefix=/opt/xdu                  install prefix.
-    runtime_base=debian:trixie-slim  base image; needs glibc >= 2.39.
+    runtime_base=debian:bookworm-slim  base image; needs glibc >= 2.28.
 
 The architecture is resolved inside the container, so nothing needs passing
 when building on aarch64.
@@ -49,7 +48,7 @@ version = 'v' + USERARG.get('version', VERSION).lstrip('v')
 prefix = USERARG.get('prefix', '/opt/xdu').rstrip('/')
 bindir = prefix + '/bin'
 mandir = prefix + '/share/man'
-runtime_base = USERARG.get('runtime_base', 'debian:trixie-slim')
+runtime_base = USERARG.get('runtime_base', 'debian:bookworm-slim')
 
 release = '{}/releases/download/{}'.format(PROJECT, version)
 tarball = 'xdu-{}-$(uname -m)-unknown-linux-gnu.tar.gz'.format(version)

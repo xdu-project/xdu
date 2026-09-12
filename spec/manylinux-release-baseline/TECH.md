@@ -6,7 +6,7 @@ appetite: small
 status: in_progress
 branch: feature/manylinux-release-baseline
 base: main
-current_phase: P3
+current_phase: P4
 last_updated: '2026-09-12'
 phases:
 - id: P1
@@ -66,7 +66,7 @@ phases:
     contract ok")' .github/workflows/release.yaml
 - id: P3
   name: Retarget the HPCCM recipe to the new baseline
-  status: pending
+  status: done
   satisfies:
   - R5
   depends_on:
@@ -75,8 +75,10 @@ phases:
   hammerable: false
   hill: uphill
   verify: export PATH=/tmp/hpccm-bin:$PATH; cd hpccm && make check && grep -q 'bookworm-slim'
-    xdu.docker && grep -q 'bookworm-slim' xdu.def && docker run --rm ml-standin xdu
-    --version && docker run --rm --entrypoint /opt/xdu/bin/xdu-view ml-standin --version
+    xdu.docker && grep -q 'bookworm-slim' xdu.def && docker run --rm ml-standin-trixie
+    xdu --version && docker run --rm --entrypoint /opt/xdu/bin/xdu-view ml-standin-trixie
+    --version && if docker build -t ml-standin-bookworm - < /tmp/ml-standin/xdu-bookworm.docker
+    > /dev/null 2>&1; then echo UNEXPECTED-PASS; exit 1; else echo GUARD-RED-OK; fi
 - id: P4
   name: Deferral ledger and final consistency review
   status: pending
@@ -193,16 +195,22 @@ and a layout replication for R4's file-map half.
 **Goal:** the recipe default `runtime_base` returns to `debian:bookworm-slim` with both specs
 regenerated in the same change — valid only once P2 has proven the floor.
 
-- [ ] `runtime_base` default to `debian:bookworm-slim`; rewrite the trixie-rationale prose in
+- [x] `runtime_base` default to `debian:bookworm-slim`; rewrite the trixie-rationale prose in
   `xdu.py` and `README.md` as the new floor statement (per-binary numbers stay measured).
-- [ ] `make -B` regen; `make check` green; spec diff shows the runtime move and nothing else.
-- [ ] Stand-in proof (no new release tarball exists yet): regenerate with
-  `--userarg version=<latest published tag>` into a scratch directory, `docker build` it
-  (exercises the SHA256SUMS check), run all four entrypoints; tag the image `ml-standin`.
-- [ ] Recreate `/tmp/hpccm-bin/hpccm` (`uvx --from hpccm hpccm`) if absent — `make check`
+- [x] `make -B` regen; spec diff shows the runtime move and nothing else (`make check` stays
+  red until commit by construction — it diffs against HEAD — and goes green right after).
+- [x] Stand-in matrix (no new release tarball exists yet; recipe `VERSION` still names the
+  old tag, whose binaries need up to 2.39). Into scratch `/tmp/ml-standin`, generated twice:
+  old tag + `runtime_base` overridden to trixie → `docker build -t ml-standin-trixie`
+  succeeds and both probed entrypoints answer (machinery intact, SHA256SUMS path
+  exercised); old tag + new bookworm default → the build FAILS LOUD at the `--version`
+  smoke step with `GLIBC_2.38 not found` (guard intact — this is also the documented
+  pre-release window in which a default `make image` fails rather than shipping a dead
+  image).
+- [x] Recreate `/tmp/hpccm-bin/hpccm` (`uvx --from hpccm hpccm`) if absent — `make check`
   needs it on `PATH`.
-- **Verify:** frontmatter `verify:` — `make check`, bookworm in both specs, both stand-in
-  entrypoint runs answer.
+- **Verify:** frontmatter `verify:` — `make check`, bookworm in both specs, trixie
+  stand-in runs answer, bookworm stand-in build fails red.
 - **Touches:** `hpccm/xdu.py`, `hpccm/xdu.def`, `hpccm/xdu.docker`, `hpccm/README.md`.
 
 ## Phase P4 — Deferral ledger and final consistency review

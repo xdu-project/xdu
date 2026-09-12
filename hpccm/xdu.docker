@@ -1,4 +1,4 @@
-FROM debian:trixie-slim AS build
+FROM debian:bookworm-slim AS build
 
 RUN apt-get update -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -10,7 +10,7 @@ RUN curl -fsSL -o /xdu-dist.tar.gz "https://github.com/xdu-project/xdu/releases/
     curl -fsSL -o /xdu-SHA256SUMS "https://github.com/xdu-project/xdu/releases/download/v0.5.1/SHA256SUMS" && \
     expected=$(grep -F "xdu-v0.5.1-$(uname -m)-unknown-linux-gnu.tar.gz" /xdu-SHA256SUMS | cut -d" " -f1) && [ -n "$expected" ] && echo "$expected  /xdu-dist.tar.gz" | sha256sum -c - && rm -f /xdu-SHA256SUMS
 
-FROM debian:trixie-slim
+FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source=https://github.com/xdu-project/xdu \
     org.opencontainers.image.version=v0.5.1
