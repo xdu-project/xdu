@@ -9,10 +9,11 @@
 ## 1. Summary
 
 Move the two gnu legs of `.github/workflows/release.yaml` off `ubuntu-24.04` into
-`manylinux_2_28` containers on native runners, statically link the C++ runtime so the only
-dynamic floor left is glibc 2.28 itself, gate every release leg on a symbol-version scan that
-fails closed, and retarget the HPCCM recipe to a bookworm-class runtime once the floor is
-proven. No `src/` change: this is release topology plus a recipe default.
+`manylinux_2_28` containers on native runners, keep the C++ runtime dynamically linked
+(measured usage sits under RHEL8 stock ceilings, and a static-link attempt leaves the
+dynamic needs in place), gate every release leg on symbol-version scans that fail closed,
+and retarget the HPCCM recipe to a bookworm-class runtime once the floor is proven. No
+`src/` change: this is release topology plus a recipe default.
 
 ## 2. Design
 
@@ -30,24 +31,25 @@ paths do not map across the container boundary, and a warm cache is not worth a 
 vector on the publish path. The 90-minute timeout already covers a cold bundled-DuckDB
 compile.
 
-**Static C++ runtime.** The probe settled this: manylinux_2_28 ships glibc 2.28 but GCC 14,
-while its system libstdc++ caps at `GLIBCXX_3.4.25` (RHEL8 stock). DuckDB objects compiled
-under GCC 14 reference newer `GLIBCXX_*` versions, so a dynamically linked binary would trade
-a libc failure on RHEL8 for a libstdc++ failure. The legs therefore export
-`RUSTFLAGS="-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"`, which covers the
-Rust-collected link of both Rust and cc-rs-built DuckDB objects. The R3 gate below verifies
-the flags took effect rather than assuming it.
+**Dynamic C++ runtime (measured safe).** The original design statically linked
+libstdc++/libgcc, but the P2 proof overturned it two ways: a static-link attempt leaves
+`NEEDED libstdc++.so.6 libgcc_s.so.1` in place even through direct rustc invocation, while
+measured usage needs at most `GLIBCXX_3.4.22` against RHEL8 stock 3.4.25 and `GCC_4.2.0`
+against libgcc-8.5.0 — dynamic linkage with wide margin. So the legs carry no `RUSTFLAGS`,
+and the R3 gate below asserts the version ceilings instead of a linkage mechanism.
 
 **R3 symbol guard (release.yaml, post-build, pre-assemble).** One step per gnu leg, running
 inside the same container where `objdump` is confirmed present. For each of the four
-binaries it asserts two things and fails closed on both: the maximum `GLIBC_X.Y` version
+binaries it asserts version ceilings and fails closed on each: the maximum `GLIBC_X.Y`
 node (via `objdump -T`, pattern `GLIBC_[0-9.]*`, `sort -Vu`) is at most `GLIBC_2.28`, with an
-empty result treated as failure rather than a vacuous pass; and the `NEEDED` set names no
-`libstdc++` or `libgcc_s` (only baseline libc/libm/libdl/libpthread/loader), which proves
-the static-link mechanism held. `GLIBC_PRIVATE` nodes are excluded by the numeric pattern —
-they are intra-libc implementation detail, not a floor requirement. The adversarial review
-of this gate is recorded under rabbit holes; its verdict is that the gate fails closed in
-every examined case and has no known fail-green input.
+empty result treated as failure rather than a vacuous pass; `GLIBCXX_*` is at most the
+RHEL8-stock `3.4.25` and `GCC_*` at most `8.0.0` (libstdc++-8.5.0 / libgcc-8.5.0, measured
+on ubi8), with absent families passing (pure-Rust `xdu` needs no C++ symbols); and a
+`NEEDED` allowlist (libc, libm, libdl, libpthread, libgcc_s, libstdc++) catches any
+surprise new `.so`. `GLIBC_PRIVATE` nodes are excluded by the numeric pattern — they are
+intra-libc implementation detail, not a floor requirement. The adversarial review of this
+gate is recorded under rabbit holes; its verdict is that the gate fails closed in every
+examined case and has no known fail-green input.
 
 **HPCCM retarget (R5).** With the floor at 2.28, bookworm's 2.36 runs every binary, so the
 recipe default `runtime_base` returns to `debian:bookworm-slim` with both specs regenerated
@@ -102,17 +104,20 @@ No `research/` fan-out (lean path); each unknown below was closed with a direct 
   `quay.io/pypa/manylinux_2_28_aarch64:latest`, and
   `registry.access.redhat.com/ubi8/ubi-minimal:latest` all resolve via manifest inspect.
 - *Does manylinux_2_28's toolchain actually compile this tree, and what does it imply for
-  libstdc++?* → glibc 2.28, GCC 14.2.1, `objdump`/`readelf`/`curl`/`git`/`python3` present;
-  system libstdc++ caps at `GLIBCXX_3.4.25`. A GCC-14 DuckDB build therefore cannot
-  dynamically link libstdc++ and still run on RHEL8 — hence the static-link mechanism, not
-  as hardening but as a correctness requirement.
+  libstdc++?* → glibc 2.28, GCC 14.2.1, `objdump`/`readelf`/`curl`/`git`/`python3` present.
+  The P2 proof then overturned the static-link conclusion drawn here: measured linkage needs
+  at most `GLIBCXX_3.4.22` / `GCC_4.2.0` (RHEL8 stock carries 3.4.25 / 8.0.0), and a
+  static-link attempt leaves the dynamic needs in place — so the design keeps dynamic
+  linkage and guards the ceilings instead.
 - *Can the R3 gate pass while broken (fail-green)?* Adversarial pass over the drafted check:
   missing `objdump` errors under `set -eu` (fail-closed); fully static input yields no
   version nodes and the non-empty guard fails it (fail-closed); `GLIBC_PRIVATE` is correctly
-  excluded (not a floor); the `NEEDED` allowlist catches a silently dropped
-  `-static-libstdc++` flag, which a bare GLIBC-max comparison would miss; running the step
+  excluded (not a floor); the `NEEDED` allowlist is now inclusive (libc through libstdc++)
+  with the version ceilings doing the real work — a future DuckDB bump pulling
+  `GLIBCXX_3.4.30` trips the ceiling even though the `.so` name is allowed; running the step
   before assemble (ordering constraint recorded for P1) keeps a breach from reaching the
-  tarball. No fail-green input found; no fail-red input found given working flags.
+  tarball. Exercised for real in P2: the v0.5.1 floater trips both breach classes at once
+  (`GLIBC_2.38`/`2.39` and `GLIBCXX_3.4.29`). No fail-green input found.
 
 ## 5. Risks & open questions
 

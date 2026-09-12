@@ -102,12 +102,11 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             image: quay.io/pypa/manylinux_2_28_aarch64:latest
-    # Statically link the C++ runtime: manylinux ships GCC 14 while its system libstdc++
-    # caps at GLIBCXX_3.4.25 (RHEL8 stock), so a dynamically linked DuckDB build would fail
-    # on RHEL8 exactly the way glibc did. The glibc-floor step below verifies these flags
-    # held rather than assuming it.
-    env:
-      RUSTFLAGS: "-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"
+    # The C++ runtime stays dynamically linked. A static link was tried and measured to
+    # leave NEEDED libstdc++/libgcc_s in place even through direct rustc invocation, while
+    # measured usage needs at most GLIBCXX_3.4.22 against RHEL8 stock 3.4.25 — so static
+    # linking buys nothing here. The floor step below asserts the version ceilings instead
+    # of assuming them.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -131,11 +130,12 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      # Fail the leg when the glibc floor floats: the maximum GLIBC_* version node across
-      # the four binaries must not exceed 2.28, and libstdc++/libgcc_s must not appear as
-      # dynamic needs (the static-link flags above must have held). An empty maximum fails
-      # rather than passing vacuously; GLIBC_PRIVATE nodes are excluded by the numeric
-      # pattern (intra-libc detail, not a floor requirement). Runs before assembly so a
+      # Fail the leg when the runtime floor floats: the maximum GLIBC_* version node
+      # across the four binaries must not exceed 2.28, GLIBCXX_* must not exceed RHEL8
+      # stock 3.4.25, and GCC_* must not exceed 8.0.0 (libgcc-8.5.0, measured on ubi8).
+      # An empty GLIBC maximum fails rather than passing vacuously; absent C++ families
+      # (pure-Rust xdu needs none) pass. A final allowlist catches any surprise new .so
+      # beyond libc/libm/libdl/libpthread/libgcc_s/libstdc++. Runs before assembly so a
       # breach never reaches a tarball.
       - name: Assert glibc floor
         run: |
@@ -151,8 +151,16 @@ jobs:
             if [ "$(printf '%s\n%s\n' "$max" 'GLIBC_2.28' | sort -Vu | tail -n 1)" != 'GLIBC_2.28' ]; then
               echo "floor breach: $bin needs $max" >&2; fail=1
             fi
-            if objdump -p "$f" | grep -q 'NEEDED.*libstdc++\|NEEDED.*libgcc_s'; then
-              echo "dynamic C++ runtime in $bin" >&2; fail=1
+            for fam in 'GLIBCXX 3.4.25' 'GCC 8.0.0'; do
+              famname=${fam%% *}; ceiling=${fam##* }
+              need=$(objdump -T "$f" | grep -o "${famname}_[0-9.]*" | sort -Vu | tail -n 1)
+              if [ -n "$need" ] && [ "$(printf '%s\n%s\n' "$need" "${famname}_${ceiling}" | sort -Vu | tail -n 1)" != "${famname}_${ceiling}" ]; then
+                echo "runtime breach: $bin needs $need" >&2; fail=1
+              fi
+            done
+            bad=$(objdump -p "$f" | grep 'NEEDED' | awk '{print $2}' | grep -v -e '^libc\.so' -e '^libm\.so' -e '^libdl\.so' -e '^libpthread\.so' -e '^libgcc_s\.so' -e '^libstdc++\.so' -e '^ld-linux' || true)
+            if [ -n "$bad" ]; then
+              echo "unexpected dynamic needs in $bin: $bad" >&2; fail=1
             fi
           done
           [ "$fail" -eq 0 ]
