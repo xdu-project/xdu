@@ -3,7 +3,7 @@ slug: manylinux-release-baseline
 title: Portable Linux release baseline for RHEL8/9
 kind: feature
 appetite: small
-status: in_progress
+status: in_review
 branch: feature/manylinux-release-baseline
 base: main
 current_phase: P4
@@ -81,7 +81,7 @@ phases:
     > /dev/null 2>&1; then echo UNEXPECTED-PASS; exit 1; else echo GUARD-RED-OK; fi
 - id: P4
   name: Deferral ledger and final consistency review
-  status: pending
+  status: done
   satisfies:
   - R4
   depends_on:
@@ -91,10 +91,11 @@ phases:
   parallel: false
   hammerable: false
   hill: uphill
-  verify: 'test -z ''$(git status --porcelain)'' && git diff --name-only main...HEAD
-    && git diff main...HEAD -- .github/workflows/release.yaml | grep -q ''^+.*target:
-    x86_64-apple-darwin'' && git diff main...HEAD -- .github/workflows/release.yaml
-    | grep -q ''^+.*Assemble release tarball'''
+  verify: test -z "$(git status --porcelain)" && git diff --name-only main...HEAD
+    && git diff main...HEAD -- .github/workflows/release.yaml | grep -q '^+.*Assemble
+    release tarball' && if git diff main...HEAD -- .github/workflows/release.yaml
+    | grep -E '^[+-]' | grep -qi 'apple-darwin'; then echo MACOS-TOUCHED; exit 1;
+    else echo MACOS-UNTOUCHED; fi && echo P4-VERIFY-GREEN
 review:
   last_reviewed_commit: ''
   verdict: none
@@ -220,13 +221,19 @@ regenerated in the same change — valid only once P2 has proven the floor.
 mandated ledger walk: every "do not fix / known limitation / follow-up" phrase in P1–P3
 maps to an `issues/` file and ROADMAP entry, or is confirmed absent.
 
-- [ ] Confirm the release.yaml diff adds legs and the guard while the macOS matrix entries
-  and the assemble/publish stanzas are byte-identical to `main`.
-- [ ] Walk P1–P3 bodies for deferral phrases; file any found per `templates/ISSUE.md` plus a
-  ROADMAP entry, or record their confirmed absence in the commit body.
-- [ ] Known candidates that must resolve to either a filing or a written no: a PR-time
-  manylinux compile guardrail (rejected in PLAN as too costly per-PR — confirm that stands),
-  `CARGO_HOME`-on-workspace caching for release legs.
+- [x] Confirm the release.yaml diff adds legs and the guard while the macOS matrix entries
+  and the assemble/publish stanzas are byte-identical to `main` (verified: Apple legs
+  identical, assemble body duplicated intact, publish needs both jobs).
+- [x] Walk P1–P3 bodies for deferral phrases; file any found per `templates/ISSUE.md` plus a
+  ROADMAP entry, or record their confirmed absence in the commit body. Walked: the only
+  live phrases are PLAN §5 contingencies (cold-build timeout/CARGO_HOME, PR-time guardrail
+  rejection) plus the release-time R1 re-probe — all owned (retained PLAN record,
+  release-process rerun) with triggers stated; no `issues/` filing (nothing actionable
+  exists before its trigger fires).
+- [x] Known candidates resolve to written no: a PR-time manylinux compile guardrail
+  (rejected in PLAN as too costly per-PR — confirmed stands: a 15–30 min DuckDB compile
+  on every PR for a quarterly release event); `CARGO_HOME`-on-workspace caching for
+  release legs (contingency only — file if a leg ever nears the 90-minute timeout).
 - **Verify:** frontmatter `verify:` — clean tree plus the changed-file list plus positive
   greps for the untouched macOS and assemble stanzas in the workflow diff.
 - **Touches:** `issues/*.md`, `ROADMAP.md` only if the walk finds a live deferral.
