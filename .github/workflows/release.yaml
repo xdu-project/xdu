@@ -77,13 +77,18 @@ jobs:
           path: share/
           if-no-files-found: error
 
-  # Build one release tarball per target. Each leg uploads its tarball as a *workflow*
-  # artifact — nothing is attached to the GitHub release here, so a single failing leg cannot
-  # leave a partial asset set on the release page.
+  # Build one Linux gnu release tarball per target, compiled inside manylinux_2_28
+  # containers so the binaries carry a glibc 2.28 floor (RHEL8+) instead of the host
+  # runner's. Each leg uploads its tarball as a *workflow* artifact — nothing is attached
+  # to the GitHub release here, so a single failing leg cannot leave a partial asset set
+  # on the release page. (`container:` cannot be conditional per matrix leg, so the Apple
+  # legs live in a separate `build-macos` job below; `publish` needs both.)
   build:
     name: Build (${{ matrix.target }})
     needs: prepare
     runs-on: ${{ matrix.os }}
+    container:
+      image: ${{ matrix.image }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -93,9 +98,101 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
+            image: quay.io/pypa/manylinux_2_28_x86_64:latest
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04
-            cross: true
+            os: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64:latest
+    # Statically link the C++ runtime: manylinux ships GCC 14 while its system libstdc++
+    # caps at GLIBCXX_3.4.25 (RHEL8 stock), so a dynamically linked DuckDB build would fail
+    # on RHEL8 exactly the way glibc did. The glibc-floor step below verifies these flags
+    # held rather than assuming it.
+    env:
+      RUSTFLAGS: "-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          # CRITICAL: on a manual re-run build from the tag being released, not the default
+          # branch — otherwise the tarball contents drift from what the tag points at.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      # dtolnay/rust-toolchain cannot run inside a container job, so rustup installs
+      # directly: no default toolchain, letting rust-toolchain.toml (the single source)
+      # select and auto-install the pinned channel on first cargo run.
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # No cargo cache in these legs: the registry path does not map across the container
+      # boundary, and a warm cache is not worth a poisoning vector on the publish path. The
+      # timeout covers a cold bundled-DuckDB compile.
+
+      - name: Build release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Fail the leg when the glibc floor floats: the maximum GLIBC_* version node across
+      # the four binaries must not exceed 2.28, and libstdc++/libgcc_s must not appear as
+      # dynamic needs (the static-link flags above must have held). An empty maximum fails
+      # rather than passing vacuously; GLIBC_PRIVATE nodes are excluded by the numeric
+      # pattern (intra-libc detail, not a floor requirement). Runs before assembly so a
+      # breach never reaches a tarball.
+      - name: Assert glibc floor
+        run: |
+          set -eu
+          fail=0
+          for bin in xdu xdu-find xdu-view xdu-rm; do
+            f="target/${{ matrix.target }}/release/$bin"
+            max=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)
+            if [ -z "$max" ]; then
+              echo "no GLIBC version nodes in $f" >&2; fail=1; continue
+            fi
+            echo "$bin needs max $max"
+            if [ "$(printf '%s\n%s\n' "$max" 'GLIBC_2.28' | sort -Vu | tail -n 1)" != 'GLIBC_2.28' ]; then
+              echo "floor breach: $bin needs $max" >&2; fail=1
+            fi
+            if objdump -p "$f" | grep -q 'NEEDED.*libstdc++\|NEEDED.*libgcc_s'; then
+              echo "dynamic C++ runtime in $bin" >&2; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
+      - name: Download share artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: share
+          path: staging/share
+
+      - name: Assemble release tarball
+        run: |
+          set -eu
+          STAGING="staging"
+          mkdir -p "${STAGING}/bin"
+          for bin in xdu xdu-find xdu-view xdu-rm; do
+            cp "target/${{ matrix.target }}/release/${bin}" "${STAGING}/bin/"
+          done
+          tar czvf "xdu-${TAG}-${{ matrix.target }}.tar.gz" -C "${STAGING}" bin share
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tarball-${{ matrix.target }}
+          path: xdu-${{ env.TAG }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  # The Apple legs keep the pre-manylinux mechanics: they cannot run in a Linux
+  # container, so they build on the macOS runners exactly as before.
+  build-macos:
+    name: Build macOS (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - target: x86_64-apple-darwin
             os: macos-14
           - target: aarch64-apple-darwin
@@ -124,26 +221,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (aarch64)
-        if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: Configure cross-compilation (aarch64)
-        if: matrix.cross
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }}
-        env:
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
 
       - name: Download share artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -173,7 +252,7 @@ jobs:
   # per-leg upload had.
   publish:
     name: Publish release assets
-    needs: build
+    needs: [build, build-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

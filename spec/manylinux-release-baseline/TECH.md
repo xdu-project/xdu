@@ -1,57 +1,91 @@
 ---
 slug: manylinux-release-baseline
-title: "Portable Linux release baseline for RHEL8/9"
+title: Portable Linux release baseline for RHEL8/9
 kind: feature
 appetite: small
 status: in_progress
 branch: feature/manylinux-release-baseline
 base: main
-current_phase: P1
-last_updated: "2026-09-11"
+current_phase: P2
+last_updated: '2026-09-12'
 phases:
-  - id: P1
-    name: "Manylinux legs plus the symbol guard in release.yaml"
-    status: pending
-    satisfies: [R2, R3]
-    depends_on: []
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "uv run --with pyyaml python -c 'import yaml,sys; d=yaml.safe_load(open(sys.argv[1])); b=d['jobs']['build']; s=str(b); assert 'manylinux_2_28_x86_64' in s and 'manylinux_2_28_aarch64' in s and 'static-libstdc++' in s and 'static-libgcc' in s and 'GLIBC_2.28' in s, 'contract missing'; names=[x.get('name','') for x in b['steps']]; bi=[i for i,n in enumerate(names) if 'release binaries' in n.lower()]; gi=[i for i,n in enumerate(names) if 'glibc' in n.lower() or 'floor' in n.lower()]; assert bi and gi and gi[0]>bi[0], 'guard misplaced'; print('release.yaml contract ok')' .github/workflows/release.yaml"
-  - id: P2
-    name: "Local proof: manylinux build plus RHEL8 and bookworm probes"
-    status: pending
-    satisfies: [R1]
-    depends_on: [P1]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "set -eu; B=/tmp/ml-xdu/bin; for b in xdu xdu-find xdu-view xdu-rm; do test -x $B/$b; M=$(strings $B/$b | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1); test -n $M; docker run --rm --platform linux/amd64 -v $B:/mnt:ro registry.access.redhat.com/ubi8/ubi-minimal /mnt/$b --version; docker run --rm --platform linux/amd64 -v $B:/mnt:ro debian:bookworm-slim /mnt/$b --version; done; tar tzf /tmp/ml-xdu/xdu-layout-test.tar.gz | grep -q '^bin/xdu$'; tar tzf /tmp/ml-xdu/xdu-layout-test.tar.gz | grep -q '^share/man/man1/xdu.1$'; N=/tmp/ml-neg; mkdir -p $N; curl -fsSL -o $N/t.tar.gz 'https://github.com/xdu-project/xdu/releases/download/v0.5.1/xdu-v0.5.1-x86_64-unknown-linux-gnu.tar.gz'; tar xzf $N/t.tar.gz -C $N; docker run --rm --platform linux/amd64 -v $N:/m:ro quay.io/pypa/manylinux_2_28_x86_64:latest sh -c \"max=$(objdump -T /m/bin/xdu-find | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1); test $max = GLIBC_2.38 && test $(printf '%s\n%s\n' $max GLIBC_2.28 | sort -Vu | tail -n 1) != GLIBC_2.28 && echo NEGATIVE-RED-OK\""
-  - id: P3
-    name: "Retarget the HPCCM recipe to the new baseline"
-    status: pending
-    satisfies: [R5]
-    depends_on: [P2]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "export PATH=/tmp/hpccm-bin:$PATH; cd hpccm && make check && grep -q 'bookworm-slim' xdu.docker && grep -q 'bookworm-slim' xdu.def && docker run --rm ml-standin xdu --version && docker run --rm --entrypoint /opt/xdu/bin/xdu-view ml-standin --version"
-  - id: P4
-    name: "Deferral ledger and final consistency review"
-    status: pending
-    satisfies: [R4]
-    depends_on: [P1, P2, P3]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "test -z '$(git status --porcelain)' && git diff --name-only main...HEAD && git diff main...HEAD -- .github/workflows/release.yaml | grep -q '^+.*target: x86_64-apple-darwin' && git diff main...HEAD -- .github/workflows/release.yaml | grep -q '^+.*Assemble release tarball'"
+- id: P1
+  name: Manylinux legs plus the symbol guard in release.yaml
+  status: done
+  satisfies:
+  - R2
+  - R3
+  depends_on: []
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: uv run --with pyyaml python -c 'import yaml,sys; d=yaml.safe_load(open(sys.argv[1]));
+    b=d['jobs']['build']; s=str(b); assert 'manylinux_2_28_x86_64' in s and 'manylinux_2_28_aarch64'
+    in s and 'static-libstdc++' in s and 'static-libgcc' in s and 'GLIBC_2.28' in
+    s, 'contract missing'; names=[x.get('name','') for x in b['steps']]; bi=[i for
+    i,n in enumerate(names) if 'release binaries' in n.lower()]; gi=[i for i,n in
+    enumerate(names) if 'glibc' in n.lower() or 'floor' in n.lower()]; assert bi and
+    gi and gi[0]>bi[0], 'guard misplaced'; print('release.yaml contract ok')' .github/workflows/release.yaml
+- id: P2
+  name: 'Local proof: manylinux build plus RHEL8 and bookworm probes'
+  status: pending
+  satisfies:
+  - R1
+  depends_on:
+  - P1
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: 'set -eu; B=/tmp/ml-xdu/bin; for b in xdu xdu-find xdu-view xdu-rm; do test
+    -x $B/$b; M=$(strings $B/$b | grep -o ''GLIBC_[0-9.]*'' | sort -Vu | tail -n 1);
+    test -n $M; docker run --rm --platform linux/amd64 -v $B:/mnt:ro registry.access.redhat.com/ubi8/ubi-minimal
+    /mnt/$b --version; docker run --rm --platform linux/amd64 -v $B:/mnt:ro debian:bookworm-slim
+    /mnt/$b --version; done; tar tzf /tmp/ml-xdu/xdu-layout-test.tar.gz | grep -q
+    ''^bin/xdu$''; tar tzf /tmp/ml-xdu/xdu-layout-test.tar.gz | grep -q ''^share/man/man1/xdu.1$'';
+    N=/tmp/ml-neg; mkdir -p $N; curl -fsSL -o $N/t.tar.gz ''https://github.com/xdu-project/xdu/releases/download/v0.5.1/xdu-v0.5.1-x86_64-unknown-linux-gnu.tar.gz'';
+    tar xzf $N/t.tar.gz -C $N; docker run --rm --platform linux/amd64 -v $N:/m:ro
+    quay.io/pypa/manylinux_2_28_x86_64:latest sh -c "max=$(objdump -T /m/bin/xdu-find
+    | grep -o ''GLIBC_[0-9.]*'' | sort -Vu | tail -n 1); test $max = GLIBC_2.38 &&
+    test $(printf ''%s
+
+    %s
+
+    '' $max GLIBC_2.28 | sort -Vu | tail -n 1) != GLIBC_2.28 && echo NEGATIVE-RED-OK"'
+- id: P3
+  name: Retarget the HPCCM recipe to the new baseline
+  status: pending
+  satisfies:
+  - R5
+  depends_on:
+  - P2
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: export PATH=/tmp/hpccm-bin:$PATH; cd hpccm && make check && grep -q 'bookworm-slim'
+    xdu.docker && grep -q 'bookworm-slim' xdu.def && docker run --rm ml-standin xdu
+    --version && docker run --rm --entrypoint /opt/xdu/bin/xdu-view ml-standin --version
+- id: P4
+  name: Deferral ledger and final consistency review
+  status: pending
+  satisfies:
+  - R4
+  depends_on:
+  - P1
+  - P2
+  - P3
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: 'test -z ''$(git status --porcelain)'' && git diff --name-only main...HEAD
+    && git diff main...HEAD -- .github/workflows/release.yaml | grep -q ''^+.*target:
+    x86_64-apple-darwin'' && git diff main...HEAD -- .github/workflows/release.yaml
+    | grep -q ''^+.*Assemble release tarball'''
 review:
-  last_reviewed_commit: ""
+  last_reviewed_commit: ''
   verdict: none
-  blocked_reason: ""
+  blocked_reason: ''
   cycle: 0
 ---
-
 # TECH.md — Portable Linux release baseline for RHEL8/9
 
 The **context engine and finite-state machine** for building this feature. The YAML
@@ -92,16 +126,16 @@ exact command that proves the phase. `review.cycle` counts completed review pass
 statically linked C++ runtime, and every gnu leg fails before assembly when the glibc floor
 is breached.
 
-- [ ] Matrix: `x86_64-unknown-linux-gnu` leg in `manylinux_2_28_x86_64` on `ubuntu-24.04`;
+- [x] Matrix: `x86_64-unknown-linux-gnu` leg in `manylinux_2_28_x86_64` on `ubuntu-24.04`;
   `aarch64-unknown-linux-gnu` leg in `manylinux_2_28_aarch64` on `ubuntu-24.04-arm`.
-- [ ] Drop the `gcc-aarch64-linux-gnu` cross install and the `.cargo/config.toml` linker
+- [x] Drop the `gcc-aarch64-linux-gnu` cross install and the `.cargo/config.toml` linker
   stanza (compilation is native per arch inside the containers).
-- [ ] Install Rust in-leg via rustup, channel read from `rust-toolchain.toml` (same `sed`
+- [x] Install Rust in-leg via rustup, channel read from `rust-toolchain.toml` (same `sed`
   the current legs use); export
   `RUSTFLAGS="-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"`.
-- [ ] New step after the build, before assembly: the fail-closed GLIBC-max plus `NEEDED`
+- [x] New step after the build, before assembly: the fail-closed GLIBC-max plus `NEEDED`
   allowlist scan from `PLAN.md` §2 (non-empty guard, numeric-only pattern, `set -eu`).
-- [ ] Accept cold cargo registries (no `Swatinem/rust-cache` in these legs); keep the
+- [x] Accept cold cargo registries (no `Swatinem/rust-cache` in these legs); keep the
   90-minute timeout.
 - **Verify:** frontmatter `verify:` — YAML parses, both images, both static-link flags, the
   floor literal, and guard-after-build ordering all asserted from the parsed document.
