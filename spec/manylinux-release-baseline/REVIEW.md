@@ -93,3 +93,76 @@ authoritative path list; this copy may only ever **widen** to match it.)
 ## Optional completeness sub-pass (separate reviewer; may see TECH.md)
 
 - Not run — plain `/xdu-review`, no `completeness` argument.
+
+## Review cycle 2 — approved (2026-09-13)
+
+Mode: fresh blind pass over the full spec-excluded diff (`git diff main...HEAD -- .
+':(exclude)spec/'`), head `1ffa9f4b8fd28bd6fdee37f8cfaf38255498ef2c`, base `main`.
+Prior cycle 1 verdict was changes-requested on one LOW/CONFIRMED (F1 guard vacuous-pass);
+this cycle grades the F1 fix plus regressions. No `completeness` sub-pass (no argument).
+No contract drift: `git log main..HEAD -- spec/manylinux-release-baseline/GOAL.md`
+shows only the shaping commit `01cecf5`.
+
+### Verification run
+
+- Reviewer (blind): Ruby YAML parse — `build` matrix resolves exactly to the two
+  `manylinux_2_28` images via `container.image: ${{ matrix.image }}`; `Assert glibc
+  floor` ordered Build → Assert → Download → Assemble → Upload; `docker manifest
+  inspect` OK for both quay tags; aarch64 image executed → `ldd (GNU libc) 2.28`;
+  guard dependencies (`objdump` GNU 2.41, `curl`, `gcc`/`g++` 14.2.1, `sort`, `awk`)
+  resolved via executed `docker run`.
+- Reviewer (blind): full-harness guard simulation under `set -eu` — GLIBC 2.17/2.28 →
+  PASS, 2.29/2.34/2.39 → BREACH, empty → fail-loud, PRIVATE-only → empty → fail-loud
+  (F1 closed); GLIBCXX 3.4.22/3.4.25 → PASS, 3.4.29 → BREACH; GCC 8.0.0 → PASS,
+  12.0.0 → BREACH; absent C++ need → PASS; NEEDED allowlist passes the six known
+  libs + `ld-linux*` and catches synthetic `libcurl.so.4`; terminal
+  `[ "$fail" -eq 0 ]` propagates correctly. Class sweep: no remaining `_[0-9.]*`
+  loose pattern.
+- Reviewer (blind): macOS entries and assemble/upload/download/checkout bodies
+  byte-identical vs `git show main:...`; only removed steps are the gnu-aarch64
+  cross toolchain belonging to the moved leg; `publish` identical except
+  `needs: [build, build-macos]`.
+- Reviewer (blind): regenerated both hpccm specs with hpccm 26.5.0 — byte-identical
+  to committed `xdu.def`/`xdu.docker`; only `trixie` remnant is the intentional
+  historical sentence in `hpccm/README.md:56`.
+- Orchestrator: `git status --porcelain` → empty on hand-back; tight pattern
+  confirmed at `release.yaml:146` and `:156`
+  (`GLIBC_[0-9][0-9.]*`, `${famname}_[0-9][0-9.]*`); loose `_[0-9.]*` absent;
+  `printf 'DF *UND* GLIBC_PRIVATE foo' | grep -o 'GLIBC_[0-9][0-9.]*'` → empty
+  (`TIGHT-EMPTY-OK`) while `GLIBC_2.28` still matches; `cargo fmt --all -- --check`
+  → clean; `git diff main...HEAD -- src/` → empty.
+- Not observed (not defects): `cargo test`, `cargo clippy` — no `src/` change, so
+  the Rust suite is out of scope for this diff; CI rollup state — this session has
+  no `gh`, per skill; R1 end-to-end on RHEL8, cold bundled-DuckDB manylinux build,
+  post-release recipe smoke — impossible pre-release, fail-closed (red leg blocks
+  `publish`).
+
+### Requirement → evidence matrix (who verified each)
+
+| R-ID | Implemented by | Verified how (owner) | Status |
+|------|----------------|----------------------|--------|
+| R1 | `release.yaml` builder floor + guard-before-assembly; recipe `--version` smoke retained | Reviewer: builder `ldd` 2.28 + chain inspection; end-to-end impossible pre-release (recorded gap) | ✅ structurally |
+| R2 | `release.yaml` manylinux_2_28 legs | Reviewer: YAML parse + `ldd` 2.28 both arches + manifest | ✅ |
+| R3 | `release.yaml:140-166` Assert floor, pre-assembly fail-closed | Reviewer: full simulation incl. F1 PRIVATE case; Orchestrator: tight-pattern spot-check | ✅ (F1 closed) |
+| R4 | `build-macos` split; assemble/upload duplicated | Reviewer: byte-identity diff vs `main` | ✅ |
+| R5 | `hpccm/xdu.py` default → bookworm-slim; specs regen | Reviewer: hpccm 26.5.0 regen byte-identical | ✅ |
+
+Unmapped changes: `issues/manylinux-release-baseline.md` status flip (factory
+bookkeeping); `hpccm/xdu.py:5` usage comment `> Dockerfile` → `> xdu.docker`
+(accurate per `hpccm/Makefile:89`); macOS step dropping dead `CC/CXX_aarch64_*`
+env. All benign, none block. Non-goals clean: zero hunks under `src/`,
+`doc/*.scd`, `Cargo.toml`/`Cargo.lock`, top-level `Dockerfile`, `install.sh`; no
+`R#`/`P#` ids in the non-spec diff (reviewer grep clean).
+
+### Findings
+
+No CONFIRMED or PLAUSIBLE findings. Prior F1 LOW/CONFIRMED verified fixed and not
+re-reported: tightened patterns landed at both extraction sites, PRIVATE-only input
+now extracts empty and fails loud, `GLIBC_2.28` still matches.
+
+### Human-gate triggers
+
+Not triggered. No CONFIRMED finding touches the high-blast-radius core
+(`src/bin/xdu-rm.rs`, `src/bin/xdu.rs`, `src/crawl.rs`, `src/lib.rs`,
+`src/cli.rs`) or a §1/§2/§4/§5 invariant. No `src/` change at all. Proceed to
+`/xdu-publish` without mandatory sign-off.

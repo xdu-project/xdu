@@ -7,7 +7,7 @@ status: in_review
 branch: feature/manylinux-release-baseline
 base: main
 current_phase: P4
-last_updated: '2026-09-12'
+last_updated: '2026-09-13'
 phases:
 - id: P1
   name: Manylinux legs plus the symbol guard in release.yaml
@@ -95,11 +95,10 @@ phases:
     | grep -E '^[+-]' | grep -qi 'apple-darwin'; then echo MACOS-TOUCHED; exit 1;
     else echo MACOS-UNTOUCHED; fi && echo P4-VERIFY-GREEN
 review:
-  last_reviewed_commit: 366916d79de2c2fecadfae5e75af9916bd373a7e
-  verdict: changes-requested
-  blocked_reason: 'F1 LOW: floor guard vacuous-pass on GLIBC_PRIVATE-only output (one-line
-    pattern fix)'
-  cycle: 1
+  last_reviewed_commit: 1ffa9f4b8fd28bd6fdee37f8cfaf38255498ef2c
+  verdict: approved
+  blocked_reason: ''
+  cycle: 2
 ---
 # TECH.md — Portable Linux release baseline for RHEL8/9
 
