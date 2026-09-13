@@ -143,7 +143,7 @@ jobs:
           fail=0
           for bin in xdu xdu-find xdu-view xdu-rm; do
             f="target/${{ matrix.target }}/release/$bin"
-            max=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)
+            max=$(objdump -T "$f" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu | tail -n 1)
             if [ -z "$max" ]; then
               echo "no GLIBC version nodes in $f" >&2; fail=1; continue
             fi
@@ -153,7 +153,7 @@ jobs:
             fi
             for fam in 'GLIBCXX 3.4.25' 'GCC 8.0.0'; do
               famname=${fam%% *}; ceiling=${fam##* }
-              need=$(objdump -T "$f" | grep -o "${famname}_[0-9.]*" | sort -Vu | tail -n 1)
+              need=$(objdump -T "$f" | grep -o "${famname}_[0-9][0-9.]*" | sort -Vu | tail -n 1)
               if [ -n "$need" ] && [ "$(printf '%s\n%s\n' "$need" "${famname}_${ceiling}" | sort -Vu | tail -n 1)" != "${famname}_${ceiling}" ]; then
                 echo "runtime breach: $bin needs $need" >&2; fail=1
               fi

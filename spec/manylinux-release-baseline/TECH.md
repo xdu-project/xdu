@@ -3,7 +3,7 @@ slug: manylinux-release-baseline
 title: Portable Linux release baseline for RHEL8/9
 kind: feature
 appetite: small
-status: blocked
+status: in_review
 branch: feature/manylinux-release-baseline
 base: main
 current_phase: P4
@@ -19,13 +19,11 @@ phases:
   parallel: false
   hammerable: false
   hill: uphill
-  verify: uv run --with pyyaml python -c 'import yaml,sys; d=yaml.safe_load(open(sys.argv[1]));
-    b=d['jobs']['build']; s=str(b); assert 'manylinux_2_28_x86_64' in s and 'manylinux_2_28_aarch64'
-    in s and 'static-libstdc++' in s and 'static-libgcc' in s and 'GLIBC_2.28' in
-    s, 'contract missing'; names=[x.get('name','') for x in b['steps']]; bi=[i for
-    i,n in enumerate(names) if 'release binaries' in n.lower()]; gi=[i for i,n in
-    enumerate(names) if 'glibc' in n.lower() or 'floor' in n.lower()]; assert bi and
-    gi and gi[0]>bi[0], 'guard misplaced'; print('release.yaml contract ok')' .github/workflows/release.yaml
+  verify: set -eu; f=.github/workflows/release.yaml; pat=$(sed -n "s/.*grep -o '\(GLIBC_[^']*\)'.*/\1/p"
+    "$f" | head -n 1); [ "$pat" = 'GLIBC_[0-9][0-9.]*' ]; grep -qF '${famname}_[0-9][0-9.]*'
+    "$f"; ! grep -qF '_[0-9.]*' "$f"; [ -z "$(printf 'DF *UND* GLIBC_PRIVATE\n' |
+    grep -o "$pat")" ]; [ "$(printf 'x GLIBC_2.28 y\n' | grep -o "$pat")" = 'GLIBC_2.28'
+    ]; echo F1-GATE-GREEN
 - id: P2
   name: 'Local proof: manylinux build plus RHEL8 and bookworm probes'
   status: done
@@ -160,6 +158,12 @@ is breached.
   with `GLIBCXX`/`GCC` ceiling assertions. This phase's frontmatter gate below asserts the
   original contract and is therefore historical; the corrected contract is re-asserted in
   P2's verify.
+- **F1 remediation (review cycle 1):** the guard's version patterns matched a possibly-empty
+  numeric class (`GLIBC_[0-9.]*`), so `GLIBC_PRIVATE`-only output yielded a vacuous non-empty
+  maximum that passed. Tightened all three extraction patterns to require a leading digit
+  (`[0-9][0-9.]*`); class sweep shows exactly these two sites. Frontmatter `verify:` retuned from
+  the historical static-link contract to the class gate: tightened patterns present, the loose
+  `_[0-9.]*` shape absent, PRIVATE-only input extracts empty, `GLIBC_2.28` still matches.
 - **Verify:** frontmatter `verify:` — YAML parses, both images, both static-link flags, the
   floor literal, and guard-after-build ordering all asserted from the parsed document.
 - **Touches:** `.github/workflows/release.yaml`.
