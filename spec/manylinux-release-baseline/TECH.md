@@ -3,7 +3,7 @@ slug: manylinux-release-baseline
 title: Portable Linux release baseline for RHEL8/9
 kind: feature
 appetite: small
-status: in_review
+status: done
 branch: feature/manylinux-release-baseline
 base: main
 current_phase: P4
