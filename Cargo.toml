@@ -8,20 +8,20 @@ license = "MIT"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 rayon = "1.10"
-parquet = { version = "56", features = ["arrow"] }
-arrow = { version = "56", features = ["chrono-tz"] }
-jwalk = "0.8"
+parquet = { version = "59", features = ["arrow"] }
+arrow = { version = "59", features = ["chrono-tz"] }
+jwalk = "0.9"
 anyhow = "1"
-indicatif = "0.17"
-console = "0.15"
+indicatif = "0.18"
+console = "0.16"
 # `bundled` compiles DuckDB but does not link the Parquet reader; `parquet` does. Without it
 # the readers autoinstall a 12 MB extension on first use and cannot query an air-gapped host.
 duckdb = { version = "1", features = ["bundled", "parquet"] }
-infer = "0.19"
+infer = "0.22"
 # Runtime NSS (getpwnam/getgrnam) for --owner/--group resolution; also a dev-dep below.
 libc = "0.2"
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 [dev-dependencies]
 tempfile = "3"
