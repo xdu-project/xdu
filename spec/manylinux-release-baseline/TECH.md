@@ -3,7 +3,7 @@ slug: manylinux-release-baseline
 title: Portable Linux release baseline for RHEL8/9
 kind: feature
 appetite: small
-status: in_review
+status: blocked
 branch: feature/manylinux-release-baseline
 base: main
 current_phase: P4
@@ -97,10 +97,11 @@ phases:
     | grep -E '^[+-]' | grep -qi 'apple-darwin'; then echo MACOS-TOUCHED; exit 1;
     else echo MACOS-UNTOUCHED; fi && echo P4-VERIFY-GREEN
 review:
-  last_reviewed_commit: ''
-  verdict: none
-  blocked_reason: ''
-  cycle: 0
+  last_reviewed_commit: 366916d79de2c2fecadfae5e75af9916bd373a7e
+  verdict: changes-requested
+  blocked_reason: 'F1 LOW: floor guard vacuous-pass on GLIBC_PRIVATE-only output (one-line
+    pattern fix)'
+  cycle: 1
 ---
 # TECH.md — Portable Linux release baseline for RHEL8/9
 
