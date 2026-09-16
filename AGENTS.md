@@ -510,7 +510,11 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   per invocation), `scenarios.md` (the shape table + comparability rules), `HPC-PROTOCOL.md` (the
   protocol community operators run on real Lustre/GPFS/ZFS), and the committed
   `results/baseline.json` reference. `sh bench/run.sh smoke` is the fast non-rot check and asserts the
-  index holds exactly the generated files. **Comparing two builds requires an interleaved A/B in a
+  index holds exactly the generated files. **`bench/spikes/` is not part of that**: it holds
+  throwaway probes kept only because their answers became commitments, each traceable to a claim in
+  `research/`. They sit outside `tests/` because they need a container and a network and several
+  print failures rather than asserting them; `bench/spikes/run.sh` copies one in for a single run.
+  Retire the directory with the cycle it informed. **Comparing two builds requires an interleaved A/B in a
   single invocation** — `run.sh --compare-bin PATH` (build the older side in a `git worktree`, never
   a stash). Two separate invocations cannot resolve it: on the reference host the same binary drifts
   up to ~20% between invocations, and >2× on the flat-wide shape, so a two-document comparison

@@ -8,7 +8,9 @@
 
 Run 2026-09-15 on darwin/arm64, toolchain per `rust-toolchain.toml`, `duckdb` crate 1.4.4
 (`bundled`, `parquet`), MinIO on 127.0.0.1:19000, with a logging HTTP proxy on :19001 attributing
-every request to the query that issued it.
+every request to the query that issued it. The instruments are committed at
+[`bench/spikes/`](../bench/spikes/README.md), which maps each probe to the claims below; every
+number here is re-runnable from there.
 
 A first cycle on `feature/s3-index-target` built a staging read path on the verdict in its own
 `research/03-duckdb-s3-capability.md`, which closed by naming the deciding experiment as open work
