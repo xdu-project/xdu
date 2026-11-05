@@ -6,12 +6,12 @@ appetite: big
 status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: P1
+current_phase: P2
 last_updated: '2026-11-05'
 phases:
 - id: P1
   name: Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
-  status: in_progress
+  status: done
   satisfies:
   - R5
   - R7
@@ -20,7 +20,7 @@ phases:
   depends_on: []
   parallel: false
   hammerable: false
-  hill: crest
+  hill: downhill
   verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh harness_ 5; cargo test
     --locked --lib s3:: >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]*
     passed" target/p1-lib.log; cargo test --locked --test rm_tests --test offline_tests
@@ -258,7 +258,8 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
   httpfs load by a debug build on linux_amd64). In the release workflow (it runs because this phase
   touches `Cargo.toml` and `src/engine.rs`), jobs `Build (x86_64-unknown-linux-gnu)` and
   `Build (aarch64-unknown-linux-gnu)`: `extension-check: ok platform=linux_amd64 engine=v1.4.4`
-  and `extension-check: ok platform=linux_arm64 engine=v1.4.4`.
+  and `extension-check: ok platform=linux_arm64 engine=v1.4.4`. *Recorded by run B in
+  [`evidence/p1-ci.md`](evidence/p1-ci.md) (tests run 42003486290, release run 42003486169).*
 - **Verify:** see frontmatter (lib `s3::` unit tests, always-run suites, `harness_` wire tests with
   `verify/wire.sh`, no discarded `load_extension` result, the CI step present, clippy, fmt).
 - **Touches:** `src/s3.rs`, `src/lib.rs`, `src/engine.rs`, `src/bin/xdu-find.rs` (prologue only),
