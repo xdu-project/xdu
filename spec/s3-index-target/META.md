@@ -111,3 +111,37 @@ is skipped by the parser):
 - **Confidence:** high · **Effort:** small
 - **P3 run B:** on the foreman's ruling, P3's `verify:` was retuned this way (TECH, P3 gate
   amendment). The finding stays open for the gate-writing guidance itself.
+
+## F6 — The blind diff's `spec/` exclusion hides a CI gate kept under `spec/`
+`origin=xdu-review:step-2 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** `.github/workflows/test.yaml` runs `spec/s3-index-target/verify/wire.sh` as
+  the CI S3 gate. The blind diff's `':(exclude)spec/'` pathspec drops that script, and the skill
+  does not say whether a reviewer may read a `spec/` file that the non-spec diff runs. The
+  orchestrator granted a one-file exception on its own judgement.
+- **Skill cause:** the pathspec assumes `spec/` holds design records only. Once a branch puts a
+  standing gate there, a later change to the gate is invisible to every blind review, and the
+  skill gives no rule for that case.
+- **Recommended fix:** in Step 2, tell the orchestrator to grep the spec-excluded diff for paths
+  under `spec/`. Each file named there is executable gate code: hand it to the reviewer by name
+  and list it in `REVIEW.md`. Pair this with the rule `REVIEW.md` finding 5 asks for, that a
+  standing gate does not live under `spec/`. Blindness is unchanged, since PLAN, TECH,
+  `research/` and META stay barred.
+- **Confidence:** high · **Effort:** small
+
+## F7 — The human gate keys on paths, and its widening rule covers moved code but not new homes
+`origin=xdu-review:step-4 severity=high category=instruction status=open target=.agents/factory/review-rubric.md`
+- **What happened:** `src/s3.rs` is new, and it carries §2's finalize and prune for S3, §2b's
+  marker sequencing, and the credential resolver. Three CONFIRMED findings land in it. The gate
+  lists name `src/crawl.rs` and `src/bin/xdu.rs` for the same duties, but not `src/s3.rs`. The
+  rubric's "may only ever widen" rule is written for a diff that *relocates* code. So the skill
+  left open whether the gate applied, and the orchestrator recorded "not triggered by the letter,
+  triggered by the widening".
+- **Skill cause:** the gate is decided by path, and the obligation to widen it is tied to
+  relocation. A new file that takes on a listed duty, such as a second sink or a second reader
+  surface, escapes both. This is a gap in a non-negotiable gate.
+- **Recommended fix:** in the rubric and the skill's Step 4, key the gate to *duties*. A CONFIRMED
+  finding in any file implementing a duty a listed path is there for (atomic finalize and prune,
+  marker sequencing, reserved-name or partition-name refusal, reader SQL, the credential path)
+  triggers it. Add the rule "a diff that gives a listed duty a new home widens every list in the
+  same diff", worded for new code as well as moved code.
+- **Confidence:** high · **Effort:** small
