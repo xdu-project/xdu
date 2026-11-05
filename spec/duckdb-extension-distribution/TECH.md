@@ -6,7 +6,7 @@ appetite: small
 status: in_progress
 branch: feature/duckdb-extension-distribution
 base: main
-current_phase: P3
+current_phase: P4
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -44,7 +44,7 @@ phases:
 - id: P3
   name: Release legs fetch, check and ship the pinned set; CI off the retired macOS
     label
-  status: in_progress
+  status: done
   satisfies:
   - R1
   - R6
@@ -52,7 +52,7 @@ phases:
   - P2
   parallel: false
   hammerable: false
-  hill: crest
+  hill: downhill
   verify: sh spec/duckdb-extension-distribution/verify/p3.sh
 - id: P4
   name: Install channels and the recorded layout contract; deferral ledger
