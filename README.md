@@ -422,7 +422,9 @@ The proxy variables (`HTTP_PROXY` and friends) are not used by `xdu` or the read
 straight to the endpoint. Building needs no DuckDB extension; querying does. `xdu-rm` refuses an
 `s3://` index. Unreachable endpoints, refused credentials, a missing
 bucket or prefix, and an index without a readable completion marker each fail with the cause on
-stderr and print no rows.
+stderr and print no rows. The bucket must have a name S3 allows (3 to 63 lowercase letters, digits,
+dots and hyphens, beginning and ending with a letter or digit); any other, and a locator carrying
+credentials, is refused before a request is sent, without the locator being repeated.
 
 ### Querying with DuckDB
 

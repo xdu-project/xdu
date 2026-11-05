@@ -179,3 +179,19 @@ is skipped by the parser):
   committed files at the reviewed head, outside `spec/`, and have `REVIEW.md` record that it was
   used. Blindness is unchanged: the file holds only the three allowed texts.
 - **Confidence:** med · **Effort:** small
+
+## F10 — A command a remediation writes into the manual is never run in the form it was written
+`origin=xdu-build:remediation-cycle-2 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-build/SKILL.md`
+- **What happened:** cycle 1's remediation documented the wire gate in `AGENTS.md` as
+  `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 43`. Its own gate ran the script
+  with the variable unset, so the script's absolute default applied, and the documented relative
+  form failed 21 of 43 tests until review cycle 2 ran it.
+- **Skill cause:** Step 2.3 says to gate on the defect's predicate and to cite only enforcement
+  that survives the merge. It says nothing about a command the fix writes into the manual, whose
+  defining property is "runs as written". So the gate checked that the text was present, not
+  that it worked.
+- **Recommended fix:** in Step 2.3, add: a remediation that writes or changes a runnable command
+  in `AGENTS.md`, a man page or the README runs that command verbatim in its gate (or, when the
+  command needs a network or a destructive target, runs it with only that argument redirected,
+  and says so).
+- **Confidence:** high · **Effort:** small

@@ -213,7 +213,7 @@ assume `nightly` — use the pinned toolchain.
 cargo build --release                                   # all bins (bundled DuckDB C++ is the slow part)
 cargo test                                              # lib unit tests + tests/ integration
 cargo test --test rm_tests                              # one integration file
-XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 43   # S3 wire tier (see Testing)
+XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 45   # S3 wire tier (see Testing)
 cargo clippy --all-targets --all-features -- -D warnings   # lint gate (must be clean)
 cargo fmt --all -- --check                              # format gate
 
@@ -298,14 +298,16 @@ never appeared on the page, which is harmless for presence (at worst a false gre
 ```
 src/
   lib.rs         # shared core: get_schema() (THE index schema), SizeMode, parse_size,
-                 # SortMode, QueryFilters (DuckDB WHERE/ORDER BY builders), format_{count,bytes,speed}
+                 # SortMode, QueryFilters (DuckDB WHERE/ORDER BY builders), format_{count,bytes,speed},
+                 # the index globs and parquet_source, and the readers' completion-marker read
+                 # (local, and read_completion_marker_s3) with its version gate and warning
   cli.rs         # the SINGLE clap CLI definition (XduArgs/XduFindArgs/XduViewArgs/XduRmArgs) —
                  # gen-completions + man pages describe exactly this
   crawl.rs       # index-build hot path lifted out of the bin so it is unit-testable: work-queue
                  # construction (incl. the __root__ collision rejection), per-file record building,
-                 # PartitionBuffer + IndexSink/LocalSink (atomic finalize), completion-marker
-                 # read/write. Only the crawler
-                 # uses it; the reader tools never do. The concurrency scaffold stays in bin/xdu.rs.
+                 # PartitionBuffer + IndexSink/LocalSink (atomic finalize), the local completion
+                 # marker's clear/write. Only the crawler uses it; the readers' marker read and
+                 # gates live in lib.rs. The concurrency scaffold stays in bin/xdu.rs.
   engine.rs      # the ONLY place a DuckDB connection is opened: open_connection() turns extension
                  # autoinstall + autoload off; PINNED_EXTENSIONS (the shipped set), extension_dir()
                  # (XDU_EXTENSION_DIR, else <canonical exe>/../../lib/xdu/extensions) and
@@ -380,8 +382,12 @@ xdu ──walk (jwalk + shared rayon pool)──▶ PartitionBuffer ──.parti
                                     │                                                         │
                         on success  └──▶ <index>/.xdu-complete  (run-level attestation)        │
                                                      │                                         │
-xdu-find / xdu-view / xdu-rm ◀── warn if absent/errors ┘  ◀── DuckDB read_parquet('<index>/<part-or-*>/*.parquet') ◀┘
+xdu-find / xdu-view / xdu-rm ◀── refuse/warn by marker ┘  ◀── DuckDB read_parquet('<index>/<part-or-*>/*.parquet') ◀┘
 ```
+
+An `s3://` index has the same layout under its prefix. `s3::S3Sink` PUTs each chunk at its final
+key with no `.partial` stage, and `xdu-find` and `xdu-view` read the index in place through the
+pinned `httpfs`, with the glob a bound parameter (`lib::parquet_source`); `xdu-rm` refuses one.
 
 - **Index layout:** `<outdir>/<partition>/NNNNNN.parquet`, where `partition` is a top-level
   subdirectory name. Loose files directly under the indexed root go to the reserved partition
@@ -399,12 +405,18 @@ xdu-find / xdu-view / xdu-rm ◀── warn if absent/errors ┘  ◀── Duck
   the crawl is about to write, and **written only on the success path** — its presence attests to the
   whole run. Body is `key=value` lines (`xdu`, `completed_at`, `files`, `bytes`, `vanished`,
   `errors`, `lossy_paths`, `format`), so an `--allow-errors` run still records how much it skipped;
-  `format` carries the run-level index format version (`INDEX_FORMAT_VERSION`, `lib.rs`). All three
-  readers call `lib::index_version_error` first and refuse — no rows, no deletions — when the marker
-  states no version they understand, absent marker included; a versioned marker recording tolerated
-  errors still only earns a **soft stderr warning** via `lib::index_completion_warning`. Reads are
-  capped (`MARKER_READ_LIMIT`) and non-blocking, so a FIFO or huge file left at that path cannot
-  hang or exhaust a reader. **Known limitation:** the marker
+  `format` carries the run-level index format version (`INDEX_FORMAT_VERSION`, `lib.rs`). On a local
+  index all three readers call `lib::index_version_error` before `lib::index_completion_warning`; on
+  an `s3://` index `xdu-find` and `xdu-view` read the marker once with
+  `lib::read_completion_marker_s3`, then call `lib::marker_version_error` before
+  `lib::marker_completion_warning` on that read (the local pair are these two over the local read).
+  Either way a marker stating no version they understand, absent marker included, is a refusal — no
+  rows, no deletions — and a versioned marker recording tolerated errors still only earns a **soft
+  stderr warning**. Reads are capped (`MARKER_READ_LIMIT`) and non-blocking, so a FIFO or huge file
+  or object left at that path cannot hang or exhaust a reader. Locally that is one `stat` before any
+  open. Over S3 it is a LIST proving the prefix holds objects, then a HEAD for the marker's size (a
+  missing key is an absent marker), and a marker over the cap is refused as
+  `MarkerRead::Oversized` without its GET. **Known limitation:** the marker
   describes the whole index but its counts come from one run, so a `--partition`-scoped run rewrites it
   from its own stats — see `issues/marker-scoped-run-attestation.md`.
 - **Concurrency (indexer):** a **single** rayon pool (`Parallelism::RayonExistingPool`) backs **all**
@@ -422,6 +434,9 @@ xdu-find / xdu-view / xdu-rm ◀── warn if absent/errors ┘  ◀── Duck
   **per-file** atomic, **not** per-partition atomic — see invariants.
 - **Query:** `xdu-find`/`xdu-view`/`xdu-rm` open an in-memory DuckDB, glob the index, and apply a
   `QueryFilters` WHERE clause. `xdu-view` is a read-only TUI; `xdu-rm` unlinks the matched files.
+  For an `s3://` index, `xdu-find` and `xdu-view` open the connection with
+  `engine::open_s3_connection` (the pinned `httpfs` and one bound `CREATE SECRET`), pass the marker
+  gates above, and take their `FROM` from `lib::parquet_source`.
 
 ## CLI surface (`src/cli.rs` is the one definition)
 
@@ -525,8 +540,12 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   re-verify the criteria it claims to (atime/size today; min-size/newer-than/pattern are gaps); the
   confirm/dry-run/force gates are load-bearing.
 - **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
-  `index_glob` (the one place the index layout becomes SQL), and the `ROOT_PARTITION` /
-  `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list that guards both.
+  `index_glob` and `index_glob_s3` (which share the one tail that writes the index layout),
+  `parquet_source` (which puts that glob into `xdu-find`'s and `xdu-view`'s SQL, as text locally
+  and as a bound parameter for S3), the marker gates of `invariants.md` §2b on both transports
+  (`index_version_error`, `marker_version_error`, `read_completion_marker_s3`), and the
+  `ROOT_PARTITION` / `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list
+  that guards both.
 - **`src/engine.rs`** — the one place a DuckDB connection opens (autoload and autoinstall off), and
   `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5);
   `open_s3_connection` adds the reader's one bound `CREATE SECRET`.

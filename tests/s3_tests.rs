@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -513,6 +514,141 @@ fn local_tools_ignore_a_garbage_httpfs() {
         source.join("user1/a.log").exists(),
         "a dry run deleted a file"
     );
+    hermetic.assert_left_empty();
+}
+
+/// The three tools that take an `s3://` locator, each given `locator` where it takes one.
+fn locator_runs(source: &Path, locator: &OsString) -> [(&'static str, Vec<OsString>); 3] {
+    [
+        (
+            "xdu",
+            vec![
+                source.as_os_str().to_owned(),
+                OsString::from("-o"),
+                locator.clone(),
+            ],
+        ),
+        (
+            "xdu-find",
+            vec![
+                OsString::from("-i"),
+                locator.clone(),
+                OsString::from("--count"),
+            ],
+        ),
+        ("xdu-view", vec![OsString::from("-i"), locator.clone()]),
+    ]
+}
+
+/// A tool given a locator it must refuse, with credentials and an endpoint that would let it
+/// proceed if the locator were accepted.
+fn refused_locator_command(hermetic: &Hermetic, binary: &str, endpoint: &str) -> Command {
+    let mut cmd = hermetic.command(binary);
+    cmd.env("AWS_ACCESS_KEY_ID", ACCESS_KEY)
+        .env("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
+        .env("AWS_SESSION_TOKEN", SESSION_TOKEN)
+        .env("AWS_REGION", "us-east-1");
+    if !endpoint.is_empty() {
+        cmd.env("AWS_ENDPOINT_URL", endpoint);
+    }
+    cmd
+}
+
+/// A bucket name that would carry a host and port into the URL is refused before any request.
+/// With no endpoint override the writer addresses `https://<bucket>.s3.<region>.amazonaws.com`,
+/// so `127.0.0.1:<port>#` as the bucket once moved its signed requests to that listener, a host
+/// none of the resolver's sources named. No tool may connect anywhere for such a locator.
+#[test]
+fn a_bucket_that_names_a_host_and_port_reaches_no_host() {
+    let listener = common::s3::CountingListener::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    create_test_file(&source.join("alice/a.log"), 100).unwrap();
+    let hermetic = Hermetic::new();
+    let locator = OsString::from(format!("s3://{}#/idx", listener.addr()));
+    let mut problems = Vec::new();
+    for (binary, args) in locator_runs(&source, &locator) {
+        let mut cmd = refused_locator_command(&hermetic, binary, "");
+        cmd.args(&args);
+        let (out, err, ok) = run(&mut cmd);
+        if ok || !out.is_empty() || !err.contains("bucket contains ':'") {
+            problems.push(format!(
+                "{binary} (exit ok: {ok}) did not refuse the bucket's ':'\n{out}{err}"
+            ));
+        }
+    }
+    // Every connection the tools made is in by now: each child has exited.
+    let openings = listener.openings();
+    println!(
+        "bucket-authority: the listener saw {} connection(s); first bytes {openings:?}",
+        openings.len()
+    );
+    if !openings.is_empty() {
+        problems.push(format!(
+            "{} connection(s) reached the host the bucket named; first bytes {openings:?}",
+            openings.len()
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    hermetic.assert_left_empty();
+}
+
+/// Credentials typed into a locator are refused and never printed, whatever else is wrong
+/// with it: a byte that is not UTF-8, or a secret holding `/`, as AWS secret keys can, so that
+/// it spills past the bucket into the prefix, alone or with a glob metacharacter after it.
+#[test]
+fn a_locator_carrying_credentials_is_refused_without_printing_them() {
+    const TYPED_KEY: &str = "AKIDTYPEDEXAMPLE";
+    const TYPED_SECRET: &str = "typed-Secret-Zq9Lk3";
+    let listener = common::s3::CountingListener::start();
+    let endpoint = format!("http://{}", listener.addr());
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    create_test_file(&source.join("alice/a.log"), 100).unwrap();
+    let hermetic = Hermetic::new();
+    let cases = [
+        [
+            format!("s3://{TYPED_KEY}:{TYPED_SECRET}@bucket/p").into_bytes(),
+            b"\xff".to_vec(),
+        ]
+        .concat(),
+        format!("s3://{TYPED_KEY}:typed/{TYPED_SECRET}@bucket/p").into_bytes(),
+        format!("s3://{TYPED_KEY}:typed/{TYPED_SECRET}@bucket/p*").into_bytes(),
+    ];
+    let mut problems = Vec::new();
+    for raw in cases {
+        let locator = OsString::from_vec(raw);
+        for (binary, args) in locator_runs(&source, &locator) {
+            let mut cmd = refused_locator_command(&hermetic, binary, &endpoint);
+            cmd.args(&args);
+            let (out, err, ok) = run(&mut cmd);
+            if ok || !out.is_empty() {
+                problems.push(format!("{binary} accepted {locator:?}:\n{out}{err}"));
+            }
+            let printed: Vec<_> = [TYPED_KEY, TYPED_SECRET, "typed/"]
+                .into_iter()
+                .filter(|part| err.contains(part))
+                .collect();
+            if !printed.is_empty() {
+                problems.push(format!(
+                    "{binary} printed {printed:?} from {locator:?}: {err}"
+                ));
+            }
+        }
+    }
+    let openings = listener.openings();
+    println!(
+        "locator-credentials: {} refusal problem(s); the listener saw {} connection(s)",
+        problems.len(),
+        openings.len()
+    );
+    if !openings.is_empty() {
+        problems.push(format!(
+            "{} connection(s) were made for a locator carrying credentials",
+            openings.len()
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
     hermetic.assert_left_empty();
 }
 

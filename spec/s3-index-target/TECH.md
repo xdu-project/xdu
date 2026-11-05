@@ -3,15 +3,15 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: blocked
+status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: done
+current_phase: P1
 last_updated: '2026-11-05'
 phases:
 - id: P1
   name: Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
-  status: done
+  status: in_progress
   satisfies:
   - R5
   - R7
@@ -26,17 +26,22 @@ phases:
     for t in the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on
     the_secret_statement_addresses_by_endpoint the_writer_and_the_readers_address_the_same_host
     a_region_that_would_name_another_host_is_refused_for_aws a_comment_after_a_section_header_keeps_the_profiles_apart
-    a_malformed_section_header_takes_no_keys_from_or_into_another_profile section_headers_follow_the_shared_file_rules;
-    do grep -qF "test s3::tests::$t ... ok" target/p1-lib.log; done; if grep -nF ''sql.push_str(",
-    '' src/s3.rs; then echo "an optional CREATE SECRET clause is back" >&2; exit 1;
-    fi; cargo test --locked --test rm_tests --test offline_tests --test find_tests
-    --test s3_tests; if grep -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)"
-    src; then exit 1; fi; grep -qF "include-ignored" .github/workflows/test.yaml;
-    grep -qF "fetch.sh" .github/workflows/test.yaml; grep -qF ''sh tests/s3-wire.sh
-    ""'' .github/workflows/test.yaml; if grep -rnE ''(^|[^a-z])spec/'' .github/workflows/;
-    then echo "a workflow runs something under spec/" >&2; exit 1; fi; cargo clippy
-    --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
-    echo P1-GATE-GREEN'
+    a_malformed_section_header_takes_no_keys_from_or_into_another_profile section_headers_follow_the_shared_file_rules
+    userinfo_is_refused_without_echoing_it bucket_names_follow_s3s_rules no_character_outside_the_bucket_rules_reaches_the_host
+    no_locator_refusal_prints_the_credentials; do grep -qF "test s3::tests::$t ...
+    ok" target/p1-lib.log; done; if grep -nF ''sql.push_str(", '' src/s3.rs; then
+    echo "an optional CREATE SECRET clause is back" >&2; exit 1; fi; cargo test --locked
+    --test rm_tests --test offline_tests --test find_tests --test s3_tests >target/p1-int.log
+    2>&1; for t in a_bucket_that_names_a_host_and_port_reaches_no_host a_locator_carrying_credentials_is_refused_without_printing_them;
+    do grep -qF "test $t ... ok" target/p1-int.log; done; if sed -n -e ''/^impl S3Locator
+    {/,/^}/p'' -e ''/^fn bucket_name_problem/,/^}/p'' src/s3.rs | grep -nE ''\{(text|raw|rest|bucket|prefix|authority)[}:]|to_string_lossy|display\(\)'';
+    then echo "an S3 locator refusal prints the locator" >&2; exit 1; fi; if grep
+    -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)" src; then exit 1;
+    fi; grep -qF "include-ignored" .github/workflows/test.yaml; grep -qF "fetch.sh"
+    .github/workflows/test.yaml; grep -qF ''sh tests/s3-wire.sh ""'' .github/workflows/test.yaml;
+    if grep -rnE ''(^|[^a-z])spec/'' .github/workflows/; then echo "a workflow runs
+    something under spec/" >&2; exit 1; fi; cargo clippy --locked --all-targets --all-features
+    -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
 - id: P2
   name: xdu-find queries an s3:// index in place (demo path)
   status: done
@@ -107,7 +112,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: done
+  status: in_progress
   satisfies:
   - R9
   - R10
@@ -120,23 +125,33 @@ phases:
     s3-proxy-support; do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md;
     grep -qF "issues/$f.md" ROADMAP.md; done; listed=$(cargo test --locked --test
     s3_tests -- --list --include-ignored 2>/dev/null | grep -c '': test$''); grep
-    -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml; sh tests/s3-wire.sh
-    "" "$listed"; cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml;
-    for f in .agents/factory/invariants.md .agents/factory/review-rubric.md .agents/skills/xdu-review/SKILL.md
-    .agents/factory/templates/REVIEW.md; do for p in src/s3.rs src/view_query.rs src/engine.rs;
-    do grep -qF "$p" "$f" || { echo "$f does not name $p" >&2; exit 1; }; done; done;
-    risk=$(sed -n ''/^## High-risk files/,/^## Testing/p'' AGENTS.md); for p in src/s3.rs
-    src/view_query.rs src/engine.rs; do case "$risk" in *"$p"*) ;; *) echo "AGENTS.md
-    High-risk does not name $p" >&2; exit 1;; esac; done; testing=$(sed -n ''/^##
-    Testing/,/^## Packaging/p'' AGENTS.md); for w in tests/s3-wire.sh include-ignored
-    XDU_TEST_EXTENSION_DIR fetch.sh; do case "$testing" in *"$w"*) ;; *) echo "AGENTS.md
-    Testing does not name $w" >&2; exit 1;; esac; done; grep -qF ''read_completion_marker_s3''
-    .agents/factory/invariants.md; grep -qF ''marker_version_error'' .agents/factory/invariants.md;
-    grep -qF ''`xdu DIR -o/--outdir DIR|s3://'' AGENTS.md; grep -qF ''`xdu-find -i/--index
-    DIR|s3://'' AGENTS.md; grep -qF ''`xdu-view -i/--index DIR|s3://'' AGENTS.md;
-    if grep -nE "^[[:space:]]*[''.]" doc/*.scd; then exit 1; fi; cargo clippy --locked
-    --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo
-    P5-GATE-GREEN'
+    -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml; grep -qF "XDU_TEST_EXTENSION_DIR=target/test-ext
+    sh tests/s3-wire.sh \"\" $listed" AGENTS.md; XDU_TEST_EXTENSION_DIR=target/test-ext
+    sh tests/s3-wire.sh "" "$listed"; cargo test --locked; grep -qF "include-ignored"
+    .github/workflows/test.yaml; for f in .agents/factory/invariants.md .agents/factory/review-rubric.md
+    .agents/skills/xdu-review/SKILL.md .agents/factory/templates/REVIEW.md; do for
+    p in src/s3.rs src/view_query.rs src/engine.rs; do grep -qF "$p" "$f" || { echo
+    "$f does not name $p" >&2; exit 1; }; done; done; risk=$(sed -n ''/^## High-risk
+    files/,/^## Testing/p'' AGENTS.md); for p in src/s3.rs src/view_query.rs src/engine.rs;
+    do case "$risk" in *"$p"*) ;; *) echo "AGENTS.md High-risk does not name $p" >&2;
+    exit 1;; esac; done; testing=$(sed -n ''/^## Testing/,/^## Packaging/p'' AGENTS.md);
+    for w in tests/s3-wire.sh include-ignored XDU_TEST_EXTENSION_DIR fetch.sh; do
+    case "$testing" in *"$w"*) ;; *) echo "AGENTS.md Testing does not name $w" >&2;
+    exit 1;; esac; done; grep -qF ''read_completion_marker_s3'' .agents/factory/invariants.md;
+    grep -qF ''marker_version_error'' .agents/factory/invariants.md; grep -qF ''`xdu
+    DIR -o/--outdir DIR|s3://'' AGENTS.md; grep -qF ''`xdu-find -i/--index DIR|s3://''
+    AGENTS.md; grep -qF ''`xdu-view -i/--index DIR|s3://'' AGENTS.md; if grep -nE
+    "^[[:space:]]*[''.]" doc/*.scd; then exit 1; fi; arch=$(sed -n ''/^## Architecture/,/^##
+    CLI surface/p'' AGENTS.md); for s in lib::read_completion_marker_s3 lib::marker_version_error
+    lib::marker_completion_warning MarkerRead::Oversized lib::index_version_error
+    lib::parquet_source; do case "$arch" in *"$s"*) ;; *) echo "AGENTS.md Architecture
+    does not name $s" >&2; exit 1;; esac; done; if grep -nE ''readers call .lib::index_version_error.
+    first|warn if absent|# read/write\. Only the crawler|is the \*\*one\*\* place
+    this layout'' AGENTS.md .agents/factory/invariants.md; then echo "a local-only
+    marker or glob claim is back" >&2; exit 1; fi; for f in doc/xdu.1.scd doc/xdu-find.1.scd
+    doc/xdu-view.1.scd; do grep -qF "3 to 63 lowercase letters" $f; done; cargo clippy
+    --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+    echo P5-GATE-GREEN'
 review:
   last_reviewed_commit: ef4fedfb859756bb5a52f1461cd7cb5e48e9aeea
   verdict: changes-requested
@@ -299,6 +314,91 @@ ruling, though `xdu-build` Step 2.3 keeps harness changes off product branches (
   `evidence/p1-ci.md`, `p3-ci.md` and `p5-ci.md`. The P1, P3 and P5 gates were re-run and are
   green; every phase is done and the FSM is `in_review` for review cycle 2.
 
+## Review cycle 2 — remediation triage
+
+[`REVIEW.md`](REVIEW.md) (cycle 2, changes-requested at `ef4fedf`) raised four CONFIRMED findings:
+two MEDIUM in the manual and two LOW in `src/s3.rs`. Findings 3 and 4 sit on the high-blast list,
+which triggers the human gate, and the cycle is the second without convergence, which escalates.
+**The gate judge, under the maintainer's standing mandate, ruled on both: fix all four now.** The
+next review is cycle 3, the last before a human stop, so each fix covers its class and its
+siblings.
+
+- **F1 (MEDIUM) → P5.** `AGENTS.md`'s marker bullet now says what `invariants.md` §2b says: the
+  local pair (`index_version_error`, `index_completion_warning`), and on an `s3://` index
+  `read_completion_marker_s3`, then `marker_version_error` before `marker_completion_warning` on
+  that one read, with the S3 bound (LIST, HEAD for the size, `MarkerRead::Oversized` refused
+  without its GET). Sweep of `AGENTS.md` for marker, version and read text that is local-only,
+  four more sites: the data-flow diagram said readers "warn if absent" (an absent marker is a
+  refusal) and showed only the local path, so it now reads "refuse/warn by marker" with a
+  sentence on the S3 layout under it; the Query bullet gains the S3 connection, gates and
+  `parquet_source`; the repository map gave `crawl.rs` a marker *read* it does not have and gave
+  `lib.rs` no marker gates; and High-risk called `index_glob` "the one place the index layout
+  becomes SQL", which it is not for S3. One live site outside `AGENTS.md` made the same glob claim:
+  `invariants.md` §3, now naming `index_glob_s3` and `parquet_source` too. That is a product-fact
+  sweep site under Step 2.3, not a harness change. Invariant 1's "every reader refuses" and §2b
+  were already right.
+- **F2 (MEDIUM) → P1 (fixture) and P5 (manual).** `test_extension_dir()` resolves a relative
+  `XDU_TEST_EXTENSION_DIR` against the test process's working directory, read once, and returns
+  an absolute path, so the children, which run in an empty directory, find the file. Red first:
+  the documented `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 43` at `aafbeda`
+  exited 1 with `22 passed; 21 failed`, 19 of the failures naming `not found at
+  target/test-ext/httpfs.duckdb_extension`. Fixed, the same form passes `45 of 45`. Every
+  documented S3-tier command was run as written: `cargo build --locked --example extension-probe`
+  green; `fetch.sh` (to a scratch destination, so the pinned file was not rewritten) fetched a
+  file byte-identical to `target/test-ext/httpfs.duckdb_extension`; and the wire command. The
+  Commands line and the workflow carry the new minimum, 45.
+- **F3 (LOW) → P1.** `S3Locator::parse` takes S3's bucket naming rules as an allow-list: 3 to 63
+  characters, lowercase letters, digits, `.` and `-`, a letter or digit at each end, no `..`.
+  That refuses every character the review named (`:`, `#`, `/`, `?`, `@`, `\`, `%`, whitespace)
+  and every other. The loopback fixtures' buckets (`xdu-test`, `127.0.0`, `bucket`, `bkt`) pass.
+  Legacy names with capitals or `_` are refused too; the writer reaches AWS only virtual-hosted,
+  which cannot address them. Red first: the new always-run test
+  `a_bucket_that_names_a_host_and_port_reaches_no_host` drives `s3://127.0.0.1:<port>#/idx`
+  through `xdu`, `xdu-find` and `xdu-view` against an in-process loopback listener. On the old
+  parser the listener saw 4 connections, each opening with a TLS ClientHello (`22, 3, 1`), all
+  from the writer; fixed, 0, and each tool names the bucket's `:`. A unit predicate walks every
+  character below U+0300 through the parser and the writer's URL and asserts nothing outside the
+  allow-list reaches the host. Sweep of the other inputs to the authority: the region was
+  already held to `[a-z0-9-]`; the prefix follows the first `/`, so it cannot reach the
+  authority; and an endpoint override's host was not checked. A `\`, `%` or whitespace in it reads
+  as a separator, an escape or an end to one URL parser and as part of the name to another, so
+  the writer and the readers could reach different hosts from one value. `S3Endpoint::parse` now
+  holds the host to letters, digits, `.`, `-` and `_`, or a bracketed IPv6 address. Red first:
+  `bad_endpoints_are_named_errors_without_their_value`, given `http://good\evil.example:9000`,
+  resolved on the old code to an endpoint of that authority.
+- **F4 (LOW) → P1.** No refusal in `S3Locator::parse` prints any part of the locator now. The `@`
+  check runs first, on the bytes up to the first `/`, before the UTF-8 check. Every other error
+  names its problem alone, and the bucket rule names a character only after `:` has been checked
+  on its own. The sweep found a sibling worse than the finding: a secret holding `/`, as AWS
+  secret keys can, ends the bucket early, so `@` lands in the prefix, the old `@` check missed it,
+  and every later error printed the locator through `Display`: the glob refusal, and for the
+  writer the unreachable-endpoint error. The allow-list now refuses such a bucket for its `:`,
+  so a parsed locator's bucket can hold no user information and `Display` is safe in the errors
+  that follow. The resolver's errors take no locator; they name only variables, files and
+  profiles. `xdu-rm` refuses on the scheme and prints no locator. Red first: the reviewer's
+  `s3://AKIDEXAMPLE:topsecret-Zq9@bucket/p\xff` printed the secret from `xdu`, `xdu-find` and
+  `xdu-view` at `aafbeda`, and prints the credentials refusal with no secret now. The new
+  always-run test `a_locator_carrying_credentials_is_refused_without_printing_them` drives that
+  form and the two `/`-in-secret forms through all three tools: on the old parser 7 outputs
+  carried the key or secret and the writer made 4 connections, and now 0 and 0. The unit test
+  `no_locator_refusal_prints_the_credentials` covers ten forms.
+- **Man pages and README (R9).** `xdu.1`, `xdu-find.1` and `xdu-view.1` and the README's S3
+  section state the bucket rule, and that a refused locator is not repeated. No counted literal
+  changed. scdoc is not installed here, so the pages were not rendered.
+- **One commit for P1 and P5.** The workflow's minimum must equal the listed count the new P1
+  tests raise; the bucket refusal pairs with its man-page sentence; and the manual's command
+  carries the same minimum.
+- **Run A / run B.** The fix changes `src/` and `.github/workflows/`, so the evidence in
+  `evidence/p1-ci.md` and `p5-ci.md` no longer describes the head. This is run A: local gates
+  green, P1 and P5 left `in_progress`. Run B reads the CI run of the pushed head (the bullets
+  under each phase) and marks them done.
+- **Gates retuned (predicates).** P1 names the new unit and always-run tests and refuses any
+  locator-echoing format in `impl S3Locator` and `bucket_name_problem`. P5 runs the wire gate in
+  the documented relative form, requires `AGENTS.md`'s command to carry the listed count, requires
+  the Architecture section to name the S3 marker symbols, refuses the four old local-only phrases
+  in `AGENTS.md` and `invariants.md`, and requires the bucket rule on the three pages. Each new
+  negative predicate fired on `aafbeda`'s text and passes on this tree.
+
 ---
 
 ## Phase P1 — Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
@@ -403,6 +503,33 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
 >
 > **Run B evidence (cycle 1):** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
 > `s3-wire: '' 43 of 43 passed`. Record in `evidence/p1-ci.md` under a "Review cycle 1" heading.
+
+> **Amendment (P1, review cycle 2 remediation):** F2's fixture half, F3 with its endpoint-host
+> sibling, and F4 (triage above). Gate retuned: the new unit tests
+> (`bucket_names_follow_s3s_rules`, `no_character_outside_the_bucket_rules_reaches_the_host`,
+> `no_locator_refusal_prints_the_credentials`, and `userinfo_is_refused_without_echoing_it` by
+> name), the two new always-run tests by name, and a class predicate: no format in
+> `impl S3Locator` or `bucket_name_problem` interpolates the locator or any part of it.
+>
+> - [x] Red first, F3: `a_bucket_that_names_a_host_and_port_reaches_no_host` on the old parser:
+>   "the listener saw 4 connection(s)", each opening `[22, 3, 1, …]`. Fixed: 0.
+> - [x] Red first, F3 sibling: `bad_endpoints_are_named_errors_without_their_value` resolved
+>   `http://good\evil.example:9000` on the old code. Fixed: refused, naming the host rule.
+> - [x] Red first, F4: `a_locator_carrying_credentials_is_refused_without_printing_them` on the old
+>   parser: 7 outputs carried the typed key or secret, and 4 connections. Fixed: 0 and 0. The
+>   unit tests `bucket_names_follow_s3s_rules`, `no_character_outside_the_bucket_rules_reaches_the_host`,
+>   `no_locator_refusal_prints_the_credentials` and the retuned `glob_metacharacters_are_refused`
+>   failed on the old parser and pass.
+> - [x] Red first, F2: the documented relative command failed 21 of 43; it passes 45 of 45.
+> - [ ] Run B: record the evidence below.
+>
+> **Run B evidence (cycle 2):** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
+> `s3-wire: '' 45 of 45 passed`, and in that step's log
+> `test a_bucket_that_names_a_host_and_port_reaches_no_host ... ok` and
+> `test a_locator_carrying_credentials_is_refused_without_printing_them ... ok`; step "Test":
+> `s3_tests` reports `4 passed; 0 failed; 41 ignored`. If the release workflow runs on the head,
+> its four `extension-check: ok … engine=v1.4.4` lines. Record in `evidence/p1-ci.md` under a
+> "Review cycle 2" heading.
 
 ## Phase P2 — xdu-find queries an s3:// index in place (demo path)
 **Satisfies:** R2, R3, R4, R6, R9 · **Depends on:** P1 · **Size:** ~0.75 day
@@ -769,6 +896,21 @@ by count, and every deferral recorded.
 >   re-ran green.
 >
 > **Run B evidence (cycle 1):** both test legs' `s3-wire: '' 43 of 43 passed`, equal to the
+> workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published
+> man-page text"; the Lint job green. Record in `evidence/p5-ci.md`.
+
+> **Amendment (P5, review cycle 2 remediation):** F1, F2's manual half, and the bucket-rule
+> paragraph on three man pages and the README (triage above). Gate retuned: the wire gate runs in
+> the documented relative form at the listed count, and `AGENTS.md`'s command must carry that
+> count; the Architecture section must name the S3 marker read and gates and `parquet_source`;
+> four local-only phrases must be absent from `AGENTS.md` and `invariants.md`; the three pages
+> must state the bucket rule.
+>
+> - [x] Man pages: scdoc is not installed here, so the paragraph was not rendered. It adds no
+>   asserted literal (no `AWS_*`, `XDU_*` or `s3://` text) and no line opens with `.` or `'`.
+> - [ ] Run B: record the evidence below.
+>
+> **Run B evidence (cycle 2):** both test legs' `s3-wire: '' 45 of 45 passed`, equal to the
 > workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published
 > man-page text"; the Lint job green. Record in `evidence/p5-ci.md`.
 

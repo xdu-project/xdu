@@ -42,9 +42,54 @@ use crate::crawl::{IndexSink, TopEntry, chunk_final_name};
 /// relative local path, as it always was.
 pub const S3_SCHEME: &str = "s3://";
 
-/// Characters DuckDB's glob expansion treats as patterns. A bucket or prefix holding one would
-/// make the index glob match keys outside the index, so the parser refuses them.
+/// Characters DuckDB's glob expansion treats as patterns. A prefix holding one would make the
+/// index glob match keys outside the index, so the parser refuses them. A bucket cannot hold
+/// one: the bucket name rules admit none.
 const GLOB_METACHARACTERS: &[char] = &['*', '?', '[', ']', '{', '}'];
+
+/// The shortest and longest bucket names S3 allows.
+const BUCKET_NAME_LENGTH: std::ops::RangeInclusive<usize> = 3..=63;
+
+/// Why `bucket` is not a name S3 gives a bucket, or `None` when it is one.
+///
+/// S3's rules are the allow-list: 3 to 63 characters, only lowercase letters, digits, `.` and
+/// `-`, beginning and ending with a letter or digit, with no two `.` adjacent. The bucket
+/// becomes part of the host every client addresses (`<bucket>.s3.<region>.amazonaws.com`) or
+/// of the path under an endpoint override, so a character outside that set could move a
+/// request to a host no setting named: `:` adds a port, `/`, `?` and `#` end the authority,
+/// `@` turns what precedes it into user information, and `\`, `%` and whitespace are read as a
+/// separator, an escape or an end by one URL parser or another. Legacy bucket names with
+/// capitals or `_` are refused too; a virtual-hosted request, the only kind the writer sends
+/// to AWS, cannot reach such a bucket.
+///
+/// The answer never quotes the bucket. It names a character only when that character cannot
+/// belong to a credential: a `:` is named on its own, since in `key:secret@` it separates a
+/// key from its secret, and it is checked before any other character is named.
+fn bucket_name_problem(bucket: &str) -> Option<String> {
+    if bucket.contains(':') {
+        return Some(
+            "contains ':', which would name a port or separate a key from its secret; an \
+             endpoint's host and port come from AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL or the \
+             profile's endpoint_url"
+                .to_string(),
+        );
+    }
+    let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-';
+    if let Some(c) = bucket.chars().find(|&c| !allowed(c)) {
+        return Some(format!("contains {c:?}, which a bucket name cannot hold"));
+    }
+    if !BUCKET_NAME_LENGTH.contains(&bucket.len()) {
+        return Some(format!("is {} character(s) long", bucket.len()));
+    }
+    let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if !edge(bucket.chars().next()) || !edge(bucket.chars().last()) {
+        return Some("begins or ends with '.' or '-'".to_string());
+    }
+    if bucket.contains("..") {
+        return Some("holds two adjacent '.'".to_string());
+    }
+    None
+}
 
 /// The region AWS tools fall back to when no source names one.
 pub const DEFAULT_REGION: &str = "us-east-1";
@@ -94,36 +139,42 @@ pub struct S3Locator {
 impl S3Locator {
     /// Parse an `s3://BUCKET[/PREFIX]` locator.
     ///
-    /// Refused: bytes that are not UTF-8, an empty bucket, a `user:secret@` form (credentials
-    /// never travel in a locator, and the error does not echo it), and glob metacharacters in
-    /// the bucket or prefix.
+    /// Refused: a `user:secret@` form (credentials never travel in a locator), bytes that are
+    /// not UTF-8, an empty bucket, a bucket S3 would not name, and glob metacharacters in the
+    /// prefix. No refusal prints any part of the locator. Until the bucket is known to be a
+    /// bucket name, whatever precedes the first `/` may hold user information, and a secret
+    /// with a `/` in it spills past that into the prefix. So each error names its problem
+    /// alone, and the `@` check runs first, on the bytes.
     pub fn parse(raw: &OsStr) -> Result<Self> {
-        let Some(text) = raw.to_str() else {
-            bail!("S3 locator is not valid UTF-8: {}", raw.to_string_lossy());
+        let Some(rest) = raw.as_bytes().strip_prefix(S3_SCHEME.as_bytes()) else {
+            bail!("the argument is not an S3 locator; expected s3://BUCKET/PREFIX");
         };
-        let Some(rest) = text.strip_prefix(S3_SCHEME) else {
-            bail!("{text} is not an S3 locator; expected s3://BUCKET/PREFIX");
-        };
-        let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
-
-        // Checked before anything that would print the locator: the part before `@` may be
-        // a secret.
-        if bucket.contains('@') {
+        let authority = rest.split(|&b| b == b'/').next().unwrap_or_default();
+        if authority.contains(&b'@') {
             bail!(
                 "an S3 locator must not carry credentials before the bucket; give them through \
                  the AWS_* variables or the shared credentials file"
             );
         }
+        let Some(rest) = raw.to_str().and_then(|text| text.strip_prefix(S3_SCHEME)) else {
+            bail!("the S3 locator is not valid UTF-8");
+        };
+        let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+
         if bucket.is_empty() {
-            bail!("S3 locator {text} names no bucket; expected s3://BUCKET/PREFIX");
+            bail!("the S3 locator names no bucket; expected s3://BUCKET/PREFIX");
         }
-        if let Some(c) = text[S3_SCHEME.len()..]
-            .chars()
-            .find(|c| GLOB_METACHARACTERS.contains(c))
-        {
+        if let Some(problem) = bucket_name_problem(bucket) {
             bail!(
-                "S3 locator {text} contains the glob metacharacter '{c}', which would let the \
-                 index glob match keys outside the index"
+                "the S3 locator's bucket {problem}; a bucket name has 3 to 63 characters, only \
+                 lowercase letters, digits, '.' and '-', and begins and ends with a letter or \
+                 digit"
+            );
+        }
+        if let Some(c) = prefix.chars().find(|c| GLOB_METACHARACTERS.contains(c)) {
+            bail!(
+                "the S3 locator's prefix contains the glob metacharacter '{c}', which would let \
+                 the index glob match keys outside the index"
             );
         }
 
@@ -222,6 +273,24 @@ impl S3Endpoint {
         let (host, port) = authority.split_at(host_end);
         if host.is_empty() || host == "[]" {
             return Err("names no host");
+        }
+        // Only characters every URL parser reads alike. A `\`, `%` or whitespace in a host is a
+        // separator, an escape or an end to one parser and part of the name to another, so the
+        // writer and the readers could reach different hosts from the one value.
+        let host_holds_only_host_characters = match host.strip_prefix('[') {
+            Some(v6) => v6
+                .trim_end_matches(']')
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.'),
+            None => host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'),
+        };
+        if !host_holds_only_host_characters {
+            return Err(
+                "has a host holding a character other than letters, digits, '.', '-' and '_' \
+                 (or, in brackets, an IPv6 address)",
+            );
         }
         if let Some(port) = port.strip_prefix(':') {
             if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
@@ -1180,11 +1249,134 @@ mod tests {
             "s3://bucket/a?b",
             "s3://bucket/[ab]",
             "s3://bucket/{a,b}",
-            "s3://buck*et/p",
             "s3://bucket/p]",
         ] {
             let err = locator(raw).unwrap_err().to_string();
             assert!(err.contains("glob metacharacter"), "{raw}: {err}");
+        }
+        // In the bucket, the bucket name rules refuse them first.
+        for c in GLOB_METACHARACTERS {
+            let raw = format!("s3://buck{c}et/p");
+            let err = locator(&raw).unwrap_err().to_string();
+            assert!(err.contains("bucket"), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn bucket_names_follow_s3s_rules() {
+        let longest = "a".repeat(63);
+        for bucket in [
+            "xdu-test",
+            "abc",
+            "a.b-c",
+            "127.0.0",
+            "0bucket9",
+            longest.as_str(),
+        ] {
+            assert_eq!(s3(&format!("s3://{bucket}/p")).bucket(), bucket);
+        }
+        let too_long = "a".repeat(64);
+        for (bucket, expected) in [
+            ("127.0.0.1:9000#", "contains ':'"),
+            ("bucket#", "contains '#'"),
+            ("bucket?x", "contains '?'"),
+            ("buck\\et", "contains '\\\\'"),
+            ("buck%2fet", "contains '%'"),
+            ("buck et", "contains ' '"),
+            ("bucket\t", "contains '\\t'"),
+            ("bucket\n", "contains '\\n'"),
+            ("Bucket", "contains 'B'"),
+            ("buck_et", "contains '_'"),
+            ("bück", "contains 'ü'"),
+            ("ab", "is 2 character(s) long"),
+            (too_long.as_str(), "is 64 character(s) long"),
+            ("-bucket", "begins or ends"),
+            ("bucket.", "begins or ends"),
+            ("buck..et", "two adjacent '.'"),
+        ] {
+            let err = locator(&format!("s3://{bucket}/p"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{bucket:?}: {err}");
+        }
+    }
+
+    /// Every character the parser lets into a bucket is one S3 allows, so none can carry the
+    /// writer's or a reader's request to a host the resolver did not name.
+    #[test]
+    fn no_character_outside_the_bucket_rules_reaches_the_host() {
+        let settings = S3Settings {
+            access_key_id: "id".to_string(),
+            secret_access_key: SECRET.to_string(),
+            session_token: None,
+            region: DEFAULT_REGION.to_string(),
+            endpoint: None,
+            path_style: false,
+        };
+        let suffix = format!(".{}", settings.endpoint_authority());
+        for c in (0u32..0x300).filter_map(char::from_u32) {
+            let bucket = format!("ab{c}cd");
+            let raw = format!("s3://{bucket}/p");
+            let allowed = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-';
+            match locator(&raw) {
+                Ok(IndexLocator::S3(l)) => {
+                    assert!(allowed, "{c:?} was let into a bucket");
+                    let url = settings.client_endpoint_url(l.bucket());
+                    let host = url.strip_prefix("https://").unwrap();
+                    assert!(host.ends_with(&suffix), "{c:?}: {url}");
+                    assert!(
+                        host[..host.len() - suffix.len()]
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase()
+                                || b.is_ascii_digit()
+                                || b == b'.'
+                                || b == b'-'),
+                        "{c:?}: {url}"
+                    );
+                }
+                Ok(other) => panic!("{raw:?} parsed as {other:?}"),
+                // A `/` ends the bucket, so `ab/cd` names the bucket `ab`, which is too short.
+                Err(_) => assert!(!allowed, "{c:?} was refused"),
+            }
+        }
+    }
+
+    /// Credentials typed into a locator never reach an error, whatever else is wrong with it:
+    /// not valid UTF-8, a secret holding `/` (as AWS secret keys can) so it spills past the
+    /// bucket, or a refusal that comes after the credentials check would have run.
+    #[test]
+    fn no_locator_refusal_prints_the_credentials() {
+        const KEY: &str = "AKIDEXAMPLE";
+        let cases: Vec<OsString> = vec![
+            OsString::from_vec(format!("s3://{KEY}:{SECRET}@bucket/p\u{0}").into_bytes()),
+            OsString::from_vec(
+                [format!("s3://{KEY}:{SECRET}@bucket/p").as_bytes(), b"\xff"].concat(),
+            ),
+            OsString::from_vec(
+                [format!("s3://{KEY}:{SECRET}").as_bytes(), b"\xff@bucket/p"].concat(),
+            ),
+            OsString::from(format!("s3://{KEY}:{SECRET}@bucket/p")),
+            OsString::from(format!("s3://{KEY}:sec/{SECRET}@bucket/p")),
+            OsString::from(format!("s3://{KEY}:sec/{SECRET}@bucket/p*")),
+            OsString::from(format!("s3://{KEY}:sec/{SECRET}@bucket/p\u{0}")),
+            OsString::from_vec(
+                [
+                    format!("s3://{KEY}:sec/{SECRET}@bucket/p").as_bytes(),
+                    b"\xff",
+                ]
+                .concat(),
+            ),
+            OsString::from(format!("s3://:sec/{SECRET}@bucket/p")),
+            OsString::from(format!("s3://{KEY}:@bucket/{SECRET}")),
+        ];
+        for raw in &cases {
+            let err = format!("{:#}", IndexLocator::parse(raw).unwrap_err());
+            for part in [KEY, SECRET, "sec/", "@bucket"] {
+                assert!(
+                    !err.contains(part),
+                    "{raw:?}: the error printed {part:?}: {err}"
+                );
+            }
         }
     }
 
@@ -1620,6 +1812,11 @@ s3 =
             ("http://user:pw-Kd93hQ@host", "carries user information"),
             ("http://", "names no host"),
             ("http://host:port", "port that is not a number"),
+            ("http://good\\evil.example:9000", "a host holding"),
+            ("http://good evil.example", "a host holding"),
+            ("http://good\tevil.example", "a host holding"),
+            ("http://g%6Fod.example", "a host holding"),
+            ("http://[::1%25en0]:9000", "a host holding"),
         ] {
             let err = resolve_err(&files.env(&[("AWS_ENDPOINT_URL_S3", raw)]));
             assert!(err.contains("AWS_ENDPOINT_URL_S3"), "{raw}: {err}");

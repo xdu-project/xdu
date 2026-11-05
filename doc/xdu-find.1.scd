@@ -105,6 +105,12 @@ an S3-compatible store. The proxy variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
 are not used: requests go straight to the endpoint. *xdu-rm*(1) refuses S3
 indices.
 
+The bucket must have a name S3 allows: 3 to 63 lowercase letters, digits, dots
+and hyphens, beginning and ending with a letter or digit, with no two dots
+together. A locator naming any other bucket is refused before a request is
+sent, and so is one carrying credentials before the bucket; give those through
+the variables below. No such refusal repeats the locator.
+
 # ENVIRONMENT
 
 *XDU_INDEX*

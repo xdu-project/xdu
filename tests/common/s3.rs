@@ -20,7 +20,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -60,7 +60,16 @@ pub const READ_ONLY_SECRET_KEY: &str = "xdu-read-only-secret-Wc5Gt7Mb2Xq9";
 /// injected in the middle of a run.
 pub const REFUSED_PARTITION: &str = "refuse-writes";
 
-/// The directory holding the pinned `httpfs`. Panics when it is unset or lacks the file.
+/// The working directory the test process runs in, read once. Nothing in the tests changes
+/// it, so it is where the process started, and a relative `XDU_TEST_EXTENSION_DIR` resolves
+/// against it as the shell that set it would.
+static START_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The directory holding the pinned `httpfs`, as an absolute path. Panics when it is unset or
+/// lacks the file.
+///
+/// Absolute because it is handed on: every spawned binary gets it as `XDU_EXTENSION_DIR` and
+/// runs in an empty working directory of its own, where a relative path names nothing.
 pub fn test_extension_dir() -> PathBuf {
     let Some(dir) = std::env::var_os(EXTENSION_DIR_VAR).filter(|d| !d.is_empty()) else {
         panic!(
@@ -68,7 +77,9 @@ pub fn test_extension_dir() -> PathBuf {
              packaging/extensions/fetch.sh and point {EXTENSION_DIR_VAR} at it"
         );
     };
-    let dir = PathBuf::from(dir);
+    let start = START_DIR
+        .get_or_init(|| std::env::current_dir().expect("the test's working directory is readable"));
+    let dir = start.join(dir);
     let file = dir.join("httpfs.duckdb_extension");
     assert!(
         file.is_file(),

@@ -86,6 +86,12 @@ expand (\*, ?, [, ], {, }) or the S3 client would percent-encode: anything
 outside ASCII, a control character, or one AWS advises against in object keys,
 such as ~, %, # or |. Rename the directory to index it.
 
+The bucket must have a name S3 allows: 3 to 63 lowercase letters, digits, dots
+and hyphens, beginning and ending with a letter or digit, with no two dots
+together. A locator naming any other bucket is refused before a request is
+sent, and so is one carrying credentials before the bucket; give those through
+the variables below. No such refusal repeats the locator.
+
 Credentials, region and endpoint come from the AWS variables and shared files
 listed below, the same sources *xdu-find*(1) reads, so the same invocation
 reaches AWS S3 or, with an endpoint set, an S3-compatible store. The proxy

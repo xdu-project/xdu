@@ -135,8 +135,10 @@ ordering is load-bearing:
     (it is a dotfile), and this guard is what stops a partition being written *over* the marker. When
     reviewing a diff that adds a reserved on-disk name, ask both questions.
 - Chunk ids are zero-padded sequential; readers glob `*/*.parquet`.
-- `lib::index_glob(index, partition)` is the **one** place this layout becomes a `read_parquet` glob;
-  all three readers go through it. Do not hand-build the glob in a reader.
+- `lib::index_glob(index, partition)`, and `lib::index_glob_s3` for an `s3://` index, are the
+  **only** places this layout becomes a `read_parquet` glob, and both write it through one shared
+  tail. Every reader goes through them; `xdu-find` and `xdu-view` by way of `lib::parquet_source`,
+  which binds the S3 glob. Do not hand-build the glob in a reader.
 
 ## 4. `xdu-rm` destructive safety — read before touching `src/bin/xdu-rm.rs`
 
