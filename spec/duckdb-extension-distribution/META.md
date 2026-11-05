@@ -23,6 +23,9 @@ nothing stands out.
   forced found two high-severity false greens in the drafted R1/R6 gates (an empty manifest that
   makes every check vacuous, and a boundary query on a second connection that never crosses the
   boundary).
+- `xdu-review` Step 2's artifact-deliverable split: naming the CI-outcome evidence as
+  orchestrator-owned kept the blind reviewer on the mechanism, where a local negative control found
+  that the release check passes a tarball whose `xdu-view` cannot run.
 
 ## Friction findings
 
@@ -64,3 +67,33 @@ is skipped by the parser):
   `set -e` a `!` command or a non-final `&&` member never fails the gate. Write
   `if cmd; then exit 1; fi`, and capture command output by assignment, not inside `for … in $(…)`."
 - **Confidence:** high · **Effort:** small
+
+## F2 — Reviewer is told to run `verify` commands it is blinded to
+`origin=xdu-review:2 severity=low category=instruction status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** Step 2 tells the delegated reviewer to "run the relevant `verify` commands".
+  Every `verify:` lives in `TECH.md` or `spec/{slug}/verify/`, which the same step forbids the
+  reviewer to read and the spec-excluded diff strips. I left the instruction out of the delegation,
+  had the reviewer run the repo's own gates and its own drives, and ran `verify/p3.sh` myself.
+- **Skill cause:** the instruction and the blindness rule contradict each other, and nothing says
+  which wins or whether the orchestrator owns the planned gates.
+- **Recommended fix:** in Step 2, replace "run the relevant `verify` commands" with "run the repo's
+  gates (fmt, clippy, test) and drive the CLI". In Step 3, add that the orchestrator may re-run the
+  `spec/{slug}/verify/` gates as its own evidence, recorded in REVIEW.md's verification run and kept
+  out of the reviewer's prompt.
+- **Confidence:** high · **Effort:** small
+
+## F3 — Contract-drift check assumes a human is reachable before grading
+`origin=xdu-review:1 severity=low category=missing-guidance status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** `GOAL.md` carries an R6 amendment made at the PLAN gate, before any build
+  commit, and recorded as a dated Clarification by the gate judge. Step 1 says to confirm such
+  commits with the human before grading. The review was dispatched by the factory foreman with no
+  human channel, and the portability fallback ("ask in plain text and STOP") would halt the cycle on
+  an amendment the dispatcher itself recorded. I graded the amended text and listed the commit in
+  REVIEW.md.
+- **Skill cause:** Step 1 treats a pre-build amendment recorded in Clarifications the same as a
+  silent change during build, and says nothing about a run dispatched without a human in the loop.
+- **Recommended fix:** in Step 1, an amendment committed before the first build commit and
+  recorded as a dated Clarification is graded as written and listed in REVIEW.md. Only a `GOAL.md`
+  change after the first build commit, or one with no Clarification entry, needs confirmation
+  before grading.
+- **Confidence:** med · **Effort:** small

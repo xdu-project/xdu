@@ -3,7 +3,7 @@ slug: duckdb-extension-distribution
 title: Ship DuckDB extensions instead of downloading them
 kind: feature
 appetite: small
-status: in_review
+status: blocked
 branch: feature/duckdb-extension-distribution
 base: main
 current_phase: done
@@ -66,10 +66,10 @@ phases:
   hill: downhill
   verify: sh spec/duckdb-extension-distribution/verify/p4.sh
 review:
-  last_reviewed_commit: ''
-  verdict: none
-  blocked_reason: ''
-  cycle: 0
+  last_reviewed_commit: 9cd2582
+  verdict: changes-requested
+  blocked_reason: 'review F1-F3: R6(b) xdu-view unrun, map drift, probe rel dir'
+  cycle: 1
 ---
 # TECH.md — Ship DuckDB extensions instead of downloading them
 
