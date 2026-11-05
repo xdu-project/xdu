@@ -88,25 +88,26 @@ downloaded at run time, and a missing extension or a missing credential says wha
   bounded: a marker object larger than the cap is refused without being fetched whole.
 - **R3** — Every request a query issues for a chunk object SHALL be a ranged read, and bytes
   received SHALL scale with what the query selects, not with the index's size: on a test index of
-  at least [NEEDS CLARIFICATION: fixture floor — proposed 10 MiB] stored across several partitions,
-  `xdu-find --count` over all partitions SHALL receive under [NEEDS CLARIFICATION: ceiling —
-  proposed 5%] of the index's stored bytes. A test SHALL measure this on every CI run, so a
+  at least 10 MiB stored across several partitions, `xdu-find --count` over all partitions SHALL
+  receive under 5% of the index's stored bytes. A test SHALL measure this on every CI run, so a
   regression to a staging read fails the build.
 - **R4** — IF the endpoint is unreachable, credentials are missing or rejected, the bucket or prefix
   is absent, or (for a reader) the marker is missing or states a format version the reader does not
   understand, THEN the tool SHALL exit non-zero with the cause on stderr and SHALL emit no rows. For
   `xdu`, such a failure SHALL write no marker, and one detected before the marker is removed SHALL
   leave an existing index and its marker as they were.
-- **R5** — Credentials, region and endpoint SHALL be resolved from [NEEDS CLARIFICATION: which
-  standard sources the pilot honors — proposed: the `AWS_*` environment variables and the shared
-  credentials/config files with profile selection], by one resolver in the library that serves
-  both the writer and the readers. An explicit endpoint override SHALL let the same invocation
-  target AWS S3 or an S3-compatible store with no provider-specific option visible to the operator.
-  No secret SHALL appear in SQL text, on the command line the tools require, or in any output.
-- **R6** — In `xdu-find` and `xdu-view`, for local and S3 indices alike, the index locator and
-  partition names SHALL reach DuckDB as bound parameters, and credentials through its configuration
-  API, never as text interpolated into SQL. This retires invariant §5's raw-`format!` note for those
-  two readers.
+- **R5** — Credentials, region and endpoint SHALL be resolved from the `AWS_*` environment
+  variables and from the shared credentials and config files, selected by `AWS_PROFILE` and located
+  through `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` when set. One resolver in the library,
+  written in Rust, SHALL serve both the writer and the readers, and the readers SHALL receive its
+  result through DuckDB's `Config` API, with no `aws` extension. An endpoint override from those
+  sources SHALL let the same invocation target AWS S3 or an S3-compatible store with no
+  provider-specific option visible to the operator. No secret SHALL appear in SQL text, on the
+  command line the tools require, or in any output.
+- **R6** — WHEN `xdu-find` or `xdu-view` queries an `s3://` index, the locator and any partition
+  name that reaches SQL SHALL be bound parameters, and credentials SHALL reach DuckDB only through
+  its `Config` API, never as text interpolated into SQL. Reader SQL for a local-path index stays as
+  it is, and invariant §5's raw-`format!` note for local paths stands.
 - **R7** — WHEN a reader opens an S3 index, it SHALL load the pinned `httpfs` through `#31`'s loader,
   from the install location or `XDU_EXTENSION_DIR`, with no download and no write under `$HOME`. IF
   the extension is absent, THEN the tool SHALL fail naming the path it looked in and both remedies:
@@ -131,9 +132,9 @@ downloaded at run time, and a missing extension or a missing credential says wha
   over an S3 index (the seed's draft R3) is a follow-up seed, filed as `issues/s3-index-rm.md` with
   a `ROADMAP.md` entry when this cycle publishes.
 - **Credential sources beyond R5's set**, such as instance metadata, SSO, web identity and
-  `credential_process`, and shipping the `aws` extension for `credential_chain`. A follow-up seed is
-  filed at publish if the demo or an operator needs one. Adding `aws` to the pinned set stays a
-  one-entry change (`#31` R1).
+  `credential_process`, and shipping the `aws` extension for `credential_chain`. A follow-up seed,
+  `issues/s3-credential-chain.md`, is filed with a `ROADMAP.md` entry when this cycle publishes.
+  Adding `aws` to the pinned set stays a one-entry change (`#31` R1).
 - **Any local copy of index objects**: staging, a per-query temp directory, or a persistent cache
   across queries. Ranged reads are the design (R2, R3).
 - **Uploading an existing local index** to a bucket, or syncing one index between locations. An
@@ -151,9 +152,14 @@ downloaded at run time, and a missing extension or a missing credential says wha
   `issues/opt-in-deeper-partitioning.md`.
 - **Other object stores and transports** (GCS and Azure native APIs, plain HTTP indices).
 - **Throughput tuning** of the write or read path beyond what R3 requires.
-- **Bumping `duckdb`**, changing the pinned extension set (unless the R5 clarification adds `aws`),
-  or changing the release tarball layout.
-- **A CI job against a real cloud account.** See the clarification on verification.
+- **Bound parameters for local-path reader SQL** (retiring invariant §5's raw-`format!` note for
+  local paths). R6 binds only what an `s3://` index sends to SQL. The local widening rewrites reader
+  SQL on a high-blast path for a gain the pilot does not need; it becomes a follow-up seed,
+  `issues/local-reader-bound-parameters.md`, filed with a `ROADMAP.md` entry when this cycle
+  publishes.
+- **Bumping `duckdb`**, changing the pinned extension set, or changing the release tarball layout.
+- **A real-provider check as an acceptance gate**, whether manual or a CI job against a cloud
+  account. The loopback endpoint (R10) is the whole acceptance; see *Notes*.
 
 ## Clarifications
 
@@ -164,21 +170,35 @@ downloaded at run time, and a missing extension or a missing credential says wha
 - **Q:** Do the `XDU_EXTENSION_DIR` man-page entry and the `cargo install` caveat deferred from `#31`
   land here? — **A:** Yes, with the first CLI consumer of the loader (R7, R9). Recorded in the seed
   (resolved 2026-11-05).
-- **Q:** Which credential, region and endpoint sources must the pilot honor? —
-  [NEEDS CLARIFICATION: (a) the `AWS_*` environment variables only; (b) (a) plus the shared
-  credentials and config files with `AWS_PROFILE` selection, endpoint included; (c) the full AWS
-  default chain, including instance metadata and SSO. Proposed: (b), resolved in Rust, no `aws`
-  extension. (c) means shipping `aws` or a Rust SDK chain, which the appetite does not cover.]
-- **Q:** What are R3's fixture floor and byte ceiling? — [NEEDS CLARIFICATION: the spike measured
-  0.16% for `--count` on 80.1 MiB over 4 partitions, about 33 KiB per chunk object, so the ratio
-  depends on chunk count more than index size. Candidates: (a) floor 10 MiB, ceiling 5%; (b) floor
-  50 MiB, ceiling 1%, closer to the spike but slower to build in CI; (c) an absolute ceiling per
-  chunk object read (say 64 KiB per object), independent of fixture size. Proposed: (a).]
-- **Q:** Beyond the local endpoint, must the pilot be verified against a real S3 provider? —
-  [NEEDS CLARIFICATION: (a) no, the loopback endpoint in R10 is the whole acceptance; (b) (a) for
-  the contract, plus a manual run against a real provider recorded in the PR before merge, as demo
-  preparation outside the review gate; (c) a CI job against a cloud account, with secrets. Proposed:
-  (b).]
+- **Q:** Which credential, region and endpoint sources must the pilot honor? — **A:** The `AWS_*`
+  environment variables, plus the shared credentials and config files selected by `AWS_PROFILE`,
+  with region and endpoint taken from the same sources. `AWS_SHARED_CREDENTIALS_FILE` and
+  `AWS_CONFIG_FILE` are honored so tests can point at fixtures. Resolved in Rust and passed through
+  the `Config` API, with no `aws` extension. Instance metadata, SSO and the full default chain go to
+  the follow-up seed (R5, Non-goals). Ruled by the foreman as gate judge (resolved 2026-11-05).
+- **Q:** What are R3's fixture floor and byte ceiling? — **A:** A fixture of at least 10 MiB, and
+  `--count` over all partitions receives under 5% of stored bytes, measured on every CI run. The
+  spike measured 0.16% on 80.1 MiB over 4 partitions, about 33 KiB per chunk object, so the bound
+  leaves room for a smaller fixture with more chunks per MiB. Ruled by the foreman as gate judge
+  (resolved 2026-11-05).
+- **Q:** Beyond the local endpoint, must the pilot be verified against a real S3 provider? — **A:**
+  No. The loopback endpoint (R10) is the whole acceptance. A real-provider run is demo preparation
+  after merge and does not block it (see *Notes*). Ruled by the foreman as gate judge (resolved
+  2026-11-05).
+- **Q:** Does R6 bind the locator and partition names for local-path indices too? — **A:** No, S3
+  locators only. Binding local-path reader SQL rewrites a high-blast path for a gain the pilot does
+  not need inside a 2–3 day box; it becomes a follow-up seed (Non-goals). Ruled by the foreman as
+  gate judge, as a pre-emptive cut (resolved 2026-11-05).
+- **Q:** Does `xdu-view` stay in the pilot? — **A:** Yes, in R2 and R9, phased last (see *Notes*).
+  Ruled by the foreman as gate judge (resolved 2026-11-05).
+
+## Notes
+
+- **Phase `xdu-view` last.** `/xdu-plan` should order the phases so `xdu-view`'s part of R2 and R9
+  comes after everything else, so that if the build runs long it is a clean first cut. Any cut goes
+  back through the GOAL gate as an amendment here; it is never a silent drop.
+- **A real-provider run is expected as demo preparation** after merge, against the endpoint the
+  demo uses. It is not an acceptance gate.
 
 ## Related materials
 
