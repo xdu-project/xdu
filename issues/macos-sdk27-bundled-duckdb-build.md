@@ -53,7 +53,7 @@ runner image moving to SDK 27 does not break the macOS legs.
   the macOS legs pinned to an SDK 26 image, which only buys time.
 - The release legs build natively on `macos-15` and `macos-15-intel`; watch their runner-image
   release notes for the SDK move.
-- Related: [`duckdb-extension-distribution.md`](duckdb-extension-distribution.md) (pins the
-  extensions to the engine version, so an engine bump re-pins them);
+- Related: `spec/duckdb-extension-distribution/` (on `main` since #31; pins the extensions to the
+  engine version, so an engine bump re-pins them);
   [`ci-gates-are-advisory.md`](ci-gates-are-advisory.md).
 - Found by: `duckdb-extension-distribution` build, recorded in P4.
