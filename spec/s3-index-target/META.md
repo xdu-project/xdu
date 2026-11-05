@@ -63,3 +63,17 @@ is skipped by the parser):
 - **Recommended fix:** Accept a detached `HEAD` equal to `origin/main` after the fetch as "on main",
   and branch from `HEAD` in that case rather than from the local `main`.
 - **Confidence:** med · **Effort:** small
+
+## F3 — The adversarial-review rule for gate-shaped work reads as lean-path only
+`origin=xdu-plan:step3 severity=medium category=instruction status=open target=.agents/skills/xdu-plan/SKILL.md`
+- **What happened:** This big-appetite plan makes test infrastructure carry an R-ID (a byte meter
+  for a cost bound, an opt-in test tier with a "nothing ignored" CI guard). Step 3's "gate-shaped
+  deliverables" exception, which requires an adversarial reviewer, sits under the lean-path bullet
+  and says the fan-out "is not skippable on the lean path", so it was unclear whether the big path
+  owes the same review. The planner ran one anyway.
+- **Skill cause:** The rule's placement and wording scope it to the path where research is skipped,
+  while the failure it guards (a gate that fails green) does not depend on appetite.
+- **Recommended fix:** Lift the gate-shaped rule out of the lean-path bullets into its own
+  appetite-independent paragraph: any phase whose deliverable is a test, meter or CI guard that an
+  R-ID rests on gets an adversarial reviewer before `PLAN.md` is committed.
+- **Confidence:** med · **Effort:** small
