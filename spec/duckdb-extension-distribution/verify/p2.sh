@@ -10,6 +10,7 @@ T=$(rustc -vV | sed -n 's/^host: //p')
 TD=${CARGO_TARGET_DIR:-target}
 cargo build --release --locked --target "$T" --bins --example extension-probe
 P="$TD/$T/release/examples/extension-probe"
+case $P in /*) ;; *) P="$(pwd -P)/$P" ;; esac
 
 S=$(mktemp -d "${TMPDIR:-/tmp}/xdu-p2.XXXXXX")
 trap 'rm -rf "$S"' EXIT
@@ -40,6 +41,21 @@ N=$("$P" manifest | grep -c '^extension=')
 f="$S/staging/lib/xdu/extensions/httpfs.duckdb_extension"
 sh packaging/extensions/footer.sh "$f" "$E" "$PL" > /dev/null
 
+# A relative XDU_EXTENSION_DIR is taken as given; the loader resolves it against the working
+# directory, and the probe must accept a load from there. The probe's own unit tests hold the
+# other side: a path outside the directory, or a sibling sharing its name prefix, stays refused.
+mkdir -p "$S/rel/cwd/ext" "$S/rel/home"
+cp "$S/staging/lib/xdu/extensions/"*.duckdb_extension "$S/rel/cwd/ext/"
+relcwd=$(cd "$S/rel/cwd" && pwd -P)
+relout=$(cd "$relcwd" && env -i PATH="$PATH" HOME="$S/rel/home" XDU_EXTENSION_DIR=ext "$P" load)
+printf '%s\n' "$relout"
+printf '%s\n' "$relout" | grep -qxF "loaded=httpfs $relcwd/ext/httpfs.duckdb_extension"
+[ -z "$(ls -A "$S/rel/home")" ]
+ut=$(cargo test --locked --example extension-probe 2>&1)
+printf '%s\n' "$ut" | grep -qE 'test result: ok\. [1-9][0-9]* passed'
+printf '%s\n' "$ut" | grep -qxF 'test tests::a_load_outside_the_dir_is_refused ... ok'
+printf '%s\n' "$ut" | grep -qxF 'test tests::relative_dir_matches_its_absolute_load_path ... ok'
+
 red() { echo "P2 control passed when it must fail: $1" >&2; exit 1; }
 
 # footer.sh must refuse each rewritten field, a short file, a non-extension, a wrong engine and
@@ -60,13 +76,29 @@ if sh packaging/extensions/footer.sh "$S/staging/bin/xdu" "$E" "$PL" > /dev/null
 if sh packaging/extensions/footer.sh "$f" '' '' > /dev/null 2>&1; then red 'empty arguments'; fi
 
 # check.sh must refuse a tarball with no extensions, one whose extension set differs from the
-# manifest, and one carrying a tampered file.
+# manifest, one whose xdu-view cannot execute, and one carrying a tampered file.
 tar czf "$S/no-lib.tar.gz" -C "$S/staging" bin share
 if sh packaging/extensions/check.sh "$S/no-lib.tar.gz" "$P" > /dev/null 2>&1; then red 'tarball without lib/'; fi
 cp -R "$S/staging" "$S/extra"
 cp "$f" "$S/extra/lib/xdu/extensions/unpinned.duckdb_extension"
 tar czf "$S/extra.tar.gz" -C "$S/extra" bin share lib
 if sh packaging/extensions/check.sh "$S/extra.tar.gz" "$P" > /dev/null 2>&1; then red 'extension outside the pinned set'; fi
+# check.sh must run every shipped binary, not only test its mode bits and grep its bytes: an
+# xdu-view that carries the engine source_id but cannot execute must fail the leg, and fail it
+# for that reason.
+cp -R "$S/staging" "$S/negview"
+sid=$("$P" manifest | sed -n 's/^source_id=//p')
+[ -n "$sid" ]
+printf '#!/nonexistent/interpreter\n%s\n' "$sid" > "$S/negview/bin/xdu-view"
+chmod +x "$S/negview/bin/xdu-view"
+grep -qF "$sid" "$S/negview/bin/xdu-view"
+if "$S/negview/bin/xdu-view" --version > /dev/null 2>&1; then red 'the xdu-view stand-in executed'; fi
+tar czf "$S/negview.tar.gz" -C "$S/negview" bin share lib
+if err=$(sh packaging/extensions/check.sh "$S/negview.tar.gz" "$P" 2>&1); then red 'an xdu-view that cannot execute'; fi
+if ! printf '%s\n' "$err" | grep -qF 'bin/xdu-view --version did not run'; then
+    echo "P2 control failed, but not on the unexecutable xdu-view: $err" >&2
+    exit 1
+fi
 cp "$S/bad-platform" "$f"
 tar czf "$S/bad.tar.gz" -C "$S/staging" bin share lib
 if sh packaging/extensions/check.sh "$S/bad.tar.gz" "$P" > /dev/null 2>&1; then red 'tampered extension'; fi

@@ -47,6 +47,11 @@ path = "src/bin/xdu-rm.rs"
 name = "gen-completions"
 path = "src/bin/gen-completions.rs"
 
+# Examples are built but not tested by default; this one's unit tests run with `cargo test`.
+[[example]]
+name = "extension-probe"
+test = true
+
 [profile.release]
 lto = true
 codegen-units = 1

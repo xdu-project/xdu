@@ -3,10 +3,10 @@ slug: duckdb-extension-distribution
 title: Ship DuckDB extensions instead of downloading them
 kind: feature
 appetite: small
-status: blocked
+status: in_progress
 branch: feature/duckdb-extension-distribution
 base: main
-current_phase: done
+current_phase: P3
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -44,7 +44,7 @@ phases:
 - id: P3
   name: Release legs fetch, check and ship the pinned set; CI off the retired macOS
     label
-  status: done
+  status: in_progress
   satisfies:
   - R1
   - R6
@@ -52,7 +52,7 @@ phases:
   - P2
   parallel: false
   hammerable: false
-  hill: downhill
+  hill: crest
   verify: sh spec/duckdb-extension-distribution/verify/p3.sh
 - id: P4
   name: Install channels and the recorded layout contract; deferral ledger
@@ -109,6 +109,34 @@ nothing here departs from it.
 - **No push, no `gh`.** No phase pushes, opens a PR, or calls `gh`. P3's external wait is handed
   back to the foreman (run A / run B below).
 - **No `spec/` ids in source, comments, scripts or workflow files.**
+
+## Review cycle 1 — remediation triage
+
+[`REVIEW.md`](REVIEW.md) (cycle 1, changes-requested at 9cd2582) raised three findings. Triage:
+
+- **F1 (MEDIUM), fix now → P2.** `check.sh` runs every shipped binary under the cold `HOME`,
+  `xdu-view` included (`--version`, stdin `/dev/null`, stdout a pipe). P2's gate gains the
+  review's control: a tarball whose `bin/xdu-view` is `#!/nonexistent/interpreter` plus the engine
+  `source_id` must fail `check.sh`, on that binary. No existing control is weakened.
+- **F2 (MEDIUM), fix now → P4.** `AGENTS.md`'s Repository map gains `src/engine.rs`,
+  `examples/extension-probe.rs`, `clippy.toml` (its `disallowed-methods` rule and what it
+  enforces) and `packaging/extensions/`, in the map's existing style. P4 owns the `AGENTS.md`
+  contract text.
+- **F3 (LOW), folded into F1's phase → P2.** The probe compares the loaded path against the
+  extension directory made absolute the same way the loader makes the file absolute, so a relative
+  `XDU_EXTENSION_DIR` that loads correctly passes. The loader is unchanged: R3 takes the override
+  as given. Unit tests in the probe hold a relative directory green and a genuinely outside path
+  (and a sibling sharing the directory's name prefix) red; P2's gate drives the relative case.
+- **Contract drift note.** R6 was amended at the PLAN gate (f3f09c2). The gate judge confirmed the
+  amendment; it stands and is not reverted.
+- **P3 reopened.** F1 and F3 change release-path inputs (`packaging/extensions/`, `examples/`,
+  `Cargo.toml`), so the four-leg evidence at ab0f7d9 no longer describes the release path. P3
+  runs again in two runs, as its body says: this remediation is run A; run B refreshes
+  `evidence/p3-pr-run.md` from a CI run of the post-fix head.
+- **One commit for P2, P3 run A and P4.** The reopened phases share a same-commit obligation:
+  `AGENTS.md` (P4) now states what `check.sh` (P2) proves, and the tightened `verify/p3.sh` (P3)
+  is what turns the stale evidence red once the release-path change lands. Split, one commit
+  would carry a false manual or a green P3 gate over stale evidence.
 
 ---
 
@@ -185,6 +213,21 @@ red does.
     tampered extension.
 - **Touches:** `examples/extension-probe.rs`, `packaging/extensions/{footer,fetch,check}.sh`.
 
+> **Amendment (P2, review cycle 1 remediation):** F1 — `check.sh` tested `bin/xdu-view` only for
+> its mode bits and the `source_id` bytes, so a tarball whose `xdu-view` could not execute passed.
+> It now runs `--version` for all four binaries under the cold `HOME` and requires `<name>
+> <version>` back. F3 — the probe's containment check compared the loader's absolute result
+> against the override as given; it now makes the directory absolute first (`loaded_within`), with
+> unit tests, and `Cargo.toml` sets `test = true` on the example so `cargo test` runs them in CI.
+> **Gate retuned (controls added, none weakened):** `verify/p2.sh` adds a twelfth must-fail
+> control (an unexecutable `xdu-view` carrying the `source_id`, which must fail `check.sh` with
+> `bin/xdu-view --version did not run`), a relative-override drive that must load from
+> `<cwd>/ext`, and the probe's unit tests with the outside-path case named.
+>
+> - [x] `check.sh` executes every shipped binary (F1).
+> - [x] The probe resolves the extension directory as the loader does (F3), with unit tests.
+> - [x] `verify/p2.sh` holds the F1 control and the F3 drive, each seen red first.
+
 ## Phase P3 — Release and CI workflows
 **Satisfies:** R1, R6 · **Depends on:** P2
 **Goal:** every release leg fetches, ships and checks the pinned set before upload; the workflows
@@ -235,6 +278,15 @@ calls `gh`.**
 - **Touches:** `.github/workflows/{release,test,docker}.yaml`; run B adds
   `spec/duckdb-extension-distribution/evidence/p3-pr-run.md`.
 
+> **Amendment (P3, review cycle 1 remediation):** P3 is reopened because F1 and F3 changed
+> release-path inputs after the evidence head (ab0f7d9). The remediation's code is this cycle's
+> **run A**: no workflow changes, `p3.sh structural` green, P3 left `in_progress` at `crest`.
+> **Run B** works exactly as above, against a CI run of the post-fix head.
+> **Gate tightened:** the full `verify/p3.sh` checked only that the evidence head is an ancestor
+> of `HEAD`, which stale evidence still satisfies. It now also requires that no release-path input
+> (`release.yaml`'s `pull_request` paths) differs between the evidence head and `HEAD`. Until run B
+> lands, the full gate is red on that check, as it should be.
+
 ## Phase P4 — Install channels, the contract, the deferral ledger
 **Satisfies:** R2 · **Depends on:** P2
 **Goal:** every channel R2 names puts `lib/xdu/extensions/` where the canonical executable looks,
@@ -283,6 +335,22 @@ and the new layout is the recorded contract.
   *Gate fix in the build:* the fixture staged an empty `share/man/man1/`, which no release tarball
   has, and `install.sh`'s existing `cp share/man/man1/*.1` failed on the unmatched glob. The
   fixture now stages one stub page; no control changed.
+
+> **Amendment (P4, review cycle 1 remediation):** F2 — the Repository map now lists
+> `src/engine.rs` (the one place a connection opens), `examples/extension-probe.rs`, `clippy.toml`
+> and its `disallowed-methods` rule, and `packaging/extensions/`. The Packaging layout bullet says
+> what `check.sh` proves, since F1 changed it. The enforcement it cites is CI's own: `cargo clippy
+> --all-targets -D warnings` and the release legs' `check.sh` step. `invariants.md` §13 names no
+> `check.sh` behaviour, so nothing there changes.
+> **Class sweep, scope widened by one site:** the defect is "a path the map should name, it does
+> not". `verify/p4.sh` now evaluates that predicate over the tree: every `src/*.rs`,
+> `src/bin/*.rs`, `examples/*.rs` and `packaging/*/` path, and `clippy.toml`, must appear in the
+> map block. Against the pre-fix `AGENTS.md` it is red on `src/engine.rs`; it then found
+> `packaging/rpm/`, missing since before this cycle, so the map names it too. No existing check
+> changed.
+>
+> - [x] Repository map entries for the four paths (F2), plus `packaging/rpm/` (sweep).
+> - [x] `verify/p4.sh` asserts the map predicate, seen red first.
 - **Touches:** `install.sh`, `Dockerfile`, `.dockerignore` (if needed), `hpccm/xdu.py`, `AGENTS.md`,
   `.agents/factory/invariants.md`, `README.md`, `ROADMAP.md`, `issues/s3-index-target.md`,
   `issues/native-os-packages-deb-rpm.md`, `issues/hpccm-extension-guard.md` (new).

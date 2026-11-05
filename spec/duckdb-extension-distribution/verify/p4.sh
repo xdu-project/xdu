@@ -83,4 +83,16 @@ grep -qF 'XDU_EXTENSION_DIR' issues/s3-index-target.md
 grep -qF 'test -f' issues/hpccm-extension-guard.md
 grep -qF 'issues/hpccm-extension-guard.md' ROADMAP.md
 
+# AGENTS.md's Repository map names every source module, example, packaging directory and lint
+# config, so an agent working from the map meets the connection rule and the release probe.
+# Evaluated over the tree, not over a list of names, so a module added later is caught too.
+M="$S/map"
+awk '/^## Repository map$/ { m = 1; next } m && /^```$/ { if (++fence == 2) exit; next } m && fence == 1' AGENTS.md > "$M"
+[ "$(wc -l < "$M" | tr -d ' ')" -gt 10 ]
+for f in src/*.rs; do grep -qF "  ${f#src/} " "$M" || { echo "map lacks $f" >&2; exit 1; }; done
+for f in src/bin/*.rs; do grep -qF "  ${f#src/} " "$M" || { echo "map lacks $f" >&2; exit 1; }; done
+for f in examples/*.rs; do grep -qF "$f " "$M" || { echo "map lacks $f" >&2; exit 1; }; done
+for d in packaging/*/; do grep -qF "$d " "$M" || { echo "map lacks $d" >&2; exit 1; }; done
+for f in clippy.toml; do grep -qE "^$f +#" "$M" || { echo "map lacks $f" >&2; exit 1; }; done
+
 echo P4-GATE-GREEN

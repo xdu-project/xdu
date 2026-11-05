@@ -20,6 +20,7 @@
 //! Everything runs on one connection: each `open_connection` is a separate in-memory
 //! database, so a check made on a second connection would never see what the first loaded.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -136,7 +137,7 @@ fn load() -> Result<()> {
             loaded.display()
         );
         ensure!(
-            loaded.starts_with(&dir),
+            loaded_within(&loaded, &dir)?,
             "{name} loaded from {}, outside {}",
             loaded.display(),
             dir.display()
@@ -145,6 +146,22 @@ fn load() -> Result<()> {
     }
 
     cross_extension_boundary(&conn)
+}
+
+/// Whether `loaded` lies inside the extension directory `dir`.
+///
+/// The loader takes an override as given, which may be relative, and returns the file it loaded
+/// made absolute against the working directory. `dir` is made absolute the same way before the
+/// comparison, so a relative override that loaded from the right place passes, and the
+/// comparison stays component-wise: `ext2/x` is not inside `ext`.
+fn loaded_within(loaded: &Path, dir: &Path) -> Result<bool> {
+    let dir = std::path::absolute(dir).with_context(|| {
+        format!(
+            "cannot make extension directory absolute: {}",
+            dir.display()
+        )
+    })?;
+    Ok(loaded.starts_with(dir))
 }
 
 fn is_loaded(conn: &Connection, name: &str) -> Result<bool> {
@@ -183,4 +200,40 @@ fn cross_extension_boundary(conn: &Connection) -> Result<()> {
     );
     println!("boundary=ok {}", message.lines().next().unwrap_or_default());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE: &str = "httpfs.duckdb_extension";
+
+    #[test]
+    fn relative_dir_matches_its_absolute_load_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let loaded = cwd.join("rel").join(FILE);
+        assert!(loaded_within(&loaded, Path::new("rel")).unwrap());
+        assert!(loaded_within(&loaded, Path::new("./rel")).unwrap());
+    }
+
+    #[test]
+    fn absolute_dir_matches_a_load_inside_it() {
+        let dir = Path::new("/opt/xdu/lib/xdu/extensions");
+        assert!(loaded_within(&dir.join(FILE), dir).unwrap());
+    }
+
+    #[test]
+    fn a_load_outside_the_dir_is_refused() {
+        let elsewhere = Path::new("/elsewhere").join(FILE);
+        assert!(!loaded_within(&elsewhere, Path::new("rel")).unwrap());
+        assert!(!loaded_within(&elsewhere, Path::new("/opt/xdu/lib/xdu/extensions")).unwrap());
+        let cwd = std::env::current_dir().unwrap();
+        assert!(!loaded_within(&cwd.join("other").join(FILE), Path::new("rel")).unwrap());
+    }
+
+    #[test]
+    fn a_sibling_sharing_a_name_prefix_is_outside() {
+        let dir = Path::new("/opt/ext");
+        assert!(!loaded_within(&Path::new("/opt/ext2").join(FILE), dir).unwrap());
+    }
 }

@@ -27,6 +27,13 @@ grep -qE '^run: https://github[.]com/xdu-project/xdu/actions/runs/[0-9]+$' "$E"
 sha=$(sed -n 's/^head: \([0-9a-f]\{7,40\}\)$/\1/p' "$E")
 [ -n "$sha" ]
 git merge-base --is-ancestor "$sha" HEAD
+# Ancestry alone lets evidence go stale: the run must have built the release path HEAD holds. These
+# are release.yaml's pull_request paths, which verify/p3.py requires.
+if ! git diff --quiet "$sha" HEAD -- .github/workflows/release.yaml packaging/extensions examples \
+    src/engine.rs .cargo Cargo.toml Cargo.lock rust-toolchain.toml; then
+    echo "release-path inputs changed since the evidence head ${sha}; refresh $E from a run on HEAD" >&2
+    exit 1
+fi
 
 for leg in x86_64-unknown-linux-gnu:linux_amd64 aarch64-unknown-linux-gnu:linux_arm64 \
     x86_64-apple-darwin:osx_amd64 aarch64-apple-darwin:osx_arm64; do

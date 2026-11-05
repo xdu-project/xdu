@@ -101,6 +101,15 @@ for b in xdu-find xdu-view xdu-rm; do
     if ! grep -a -q -F "$source_id" "$x/bin/$b"; then die "bin/$b does not carry engine source_id $source_id"; fi
 done
 
+# Every shipped binary must execute, not merely carry the right bytes: a loader, libc or C++
+# runtime floor the runner cannot meet shows only when the binary runs. `--version` needs no
+# index and no terminal, so it runs the same way for the TUI as for the batch tools; stdin is
+# /dev/null and stdout a pipe.
+for b in xdu xdu-find xdu-view xdu-rm; do
+    if ! v=$(cold_run "$x/bin/$b" --version < /dev/null 2>&1); then die "bin/$b --version did not run: $v"; fi
+    if ! printf '%s\n' "$v" | grep -Eqx "$b [0-9]+\.[0-9]+\.[0-9]+.*"; then die "bin/$b --version printed '$v', expected '$b <version>'"; fi
+done
+
 # The shipped tools themselves, under the same cold HOME.
 tree="$s/tree"
 mkdir -p "$tree/user1" "$tree/user2"

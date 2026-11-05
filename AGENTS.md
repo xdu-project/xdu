@@ -301,6 +301,10 @@ src/
                  # construction (incl. the __root__ collision rejection), per-file record building,
                  # PartitionBuffer + atomic finalize, completion-marker read/write. Only the crawler
                  # uses it; the reader tools never do. The concurrency scaffold stays in bin/xdu.rs.
+  engine.rs      # the ONLY place a DuckDB connection is opened: open_connection() turns extension
+                 # autoinstall + autoload off; PINNED_EXTENSIONS (the shipped set), extension_dir()
+                 # (XDU_EXTENSION_DIR, else <canonical exe>/../../lib/xdu/extensions) and
+                 # load_extension() (load by absolute path, or fail naming it; never download)
   bin/xdu.rs     # indexer: shared-rayon-pool concurrent walk, driver threads, thread::scope error
                  # propagation, progress — the scaffold around lib::crawl
   bin/xdu-find.rs   # DuckDB query CLI
@@ -308,9 +312,20 @@ src/
   bin/xdu-rm.rs     # destructive bulk delete (safe mode, confirm, dry-run, parallel)
   bin/gen-completions.rs   # emits share/ completions from cli.rs
 tests/           # crawl_tests.rs, rm_tests.rs, offline_tests.rs (integration); common/ = shared helpers
+examples/extension-probe.rs   # release-time probe, never installed: `manifest` prints engine version,
+                 # platform, source_id + pinned set; `load` loads that set from the extension
+                 # directory on one engine connection. Built in the same `cargo build` as the bins;
+                 # its unit tests run under `cargo test` (`test = true` in Cargo.toml)
+clippy.toml      # `disallowed-methods`: duckdb::Connection::{open,open_in_memory,*_with_flags} fail
+                 # clippy -D warnings everywhere but src/engine.rs, so no connection skips the refusal
 doc/*.scd        # scdoc man page SOURCES (authored); render to share/man/man1/*.1
 share/           # GENERATED (man + completions); git-ignored; built in CI / by /xdu-release
 build.sh install.sh Dockerfile   # packaging / ops scripts
+packaging/extensions/   # footer.sh (check an extension's engine/platform footer), fetch.sh (download the
+                 # probe's pinned set), check.sh (the release gate: runs every shipped binary and
+                 # loads the set from the extracted tarball under a cold HOME, before upload)
+packaging/rpm/   # xdu.spec: ad-hoc / COPR-style EL build from the source tag; no workflow runs it
+                 # (see issues/native-os-packages-deb-rpm.md)
 .agents/         # the spec-driven "software factory" (see below)
 spec/{slug}/     # committed, dated per-feature design records the factory produces (retained on merge)
 issues/{slug}.md # deferred code work, pre-shaped (status: unshaped); /xdu-feature promotes one to a GOAL
@@ -539,7 +554,8 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   directory the binaries went to, since the tools look in `<canonical exe>/../../lib/xdu/extensions`
   unless `XDU_EXTENSION_DIR` names another directory. The container image and the HPCCM recipe keep
   the same layout under their prefix. Every release leg runs `packaging/extensions/check.sh` on the
-  exact tarball it uploads, under a cold `HOME`, before the upload. `cargo install` builds carry no
+  exact tarball it uploads, under a cold `HOME`, before the upload; it executes every shipped binary
+  and loads the pinned set from the extracted layout. `cargo install` builds carry no
   extensions. `/xdu-release` cuts versions (bump `Cargo.toml` + `Cargo.lock`, gate, tag, publish);
   see its skill.
 - **Pre-release gate (mirrored by CI and `/xdu-release`):** `cargo fmt --all -- --check`,
