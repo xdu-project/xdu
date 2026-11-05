@@ -45,11 +45,8 @@ follows then adds a transport, not an installer.
 - **R1** — Each release tarball SHALL carry the pinned DuckDB extension set, built for the same
   engine version and platform as the binaries beside it, and the release workflow SHALL fail rather
   than publish a tarball whose extension does not match on either count. The pinned set for this
-  cycle is `httpfs` on every platform leg the release builds.
-  [NEEDS CLARIFICATION: does the pinned set also include `aws` (for `PROVIDER credential_chain`),
-  or only `httpfs`, leaving credential resolution to the S3 cycle in Rust?]
-  [NEEDS CLARIFICATION: does every platform leg (Linux and macOS, both arches) ship the same set,
-  or is the set per-target?]
+  cycle is `httpfs` alone, identical on all four platform legs (Linux and macOS, x86_64 and
+  aarch64). The set SHALL be a list, so a later cycle adds an extension as one more entry.
 - **R2** — The new tarball layout SHALL be recorded as the contract in `AGENTS.md`, and every
   channel that installs from or builds an image of xdu — `install.sh`, the HPCCM recipe, and the
   `Dockerfile` image — SHALL place the extensions where the installed tools find them with no
@@ -66,9 +63,6 @@ follows then adds a transport, not an installer.
   leg's tarball, extracted, load the shipped extension with a cold `HOME` and autoinstall disabled.
   This closes the spike's one inferred claim (the `linux_amd64` glibc floor was read from symbols,
   never exercised in a manylinux build) on every leg rather than one.
-  [NEEDS CLARIFICATION: with no S3 consumer yet, should this cycle add any operator-visible surface
-  for extension loading (a diagnostic naming the location in effect), or stay library-only, verified
-  by tests and this release check?]
 
 ## Non-goals (no-gos)
 
@@ -77,6 +71,7 @@ follows then adds a transport, not an installer.
 - Full-text search and the `fts` extension — `issues/duckdb-fts-evaluation.md`. The mechanism must
   admit another entry in the pinned set; adding one is not this cycle.
 - Any runtime download path, including an opt-in one. An absent extension is an error (R4).
+- An operator-visible diagnostic for extension loading. The loader is library-only this cycle.
 - Building extensions from source, or patching the vendored amalgamation to link `httpfs` statically.
 - Bumping the `duckdb` crate or moving the engine version.
 - Native OS packages (`.deb`/`.rpm`) — `issues/native-os-packages-deb-rpm.md`, which inherits the
@@ -87,14 +82,17 @@ follows then adds a transport, not an installer.
 ## Clarifications
 
 - **Q:** Does the pinned set include `aws` for `PROVIDER credential_chain`, or only `httpfs`?
-  — **A:** [NEEDS CLARIFICATION: open. The seed defers the trade to the S3 cycle but notes it decides
-  how many binaries ship here; the spike (claim 11) showed credentials can reach DuckDB through the
-  crate's `Config` API without SQL or `aws`.]
+  — **A:** `httpfs` only. The S3 cycle resolves credentials in Rust and passes them through the
+  crate's `Config` API (spike claim 11). If that cycle later picks `credential_chain`, adding `aws`
+  is one more entry in the pinned set, so the mechanism stays open to it (R1). Answered by the
+  foreman as gate judge (resolved 2026-11-04).
 - **Q:** Does every platform leg ship the same set, or is it per-target? `httpfs` alone is 24 MiB
-  raw, 8.8 MiB gzipped for `linux_amd64`. — **A:** [NEEDS CLARIFICATION: open; the seed flags it as a
-  promotion question.]
+  raw, 8.8 MiB gzipped for `linux_amd64`. — **A:** The same set on all four legs. Answered by the
+  foreman as gate judge (resolved 2026-11-04).
 - **Q:** Library-only, or an operator-visible diagnostic for extension loading, given no CLI
-  consumer lands this cycle? — **A:** [NEEDS CLARIFICATION: open.]
+  consumer lands this cycle? — **A:** Library-only, verified by integration tests and R6's release
+  check. No operator-visible diagnostic this cycle. Answered by the foreman as gate judge (resolved
+  2026-11-04).
 
 ## Related materials
 
