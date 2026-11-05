@@ -462,7 +462,8 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
     panic (Drop guard / panic hook, not sequential code — `panic="abort"` is set); previewed file
     bytes are `strip_ansi`-sanitized before rendering.
 13. **Project conventions.** Version single-sourced from `Cargo.toml`; `share/` generated + ignored +
-    CI-asserted; tarball layout (`bin/` + `share/{man,bash-completion,zsh}`) matches `install.sh`;
+    CI-asserted; tarball layout (`bin/` + `share/{man,bash-completion,zsh}` +
+    `lib/xdu/extensions/`) matches `install.sh`;
     non-TTY runs keep stdout clean/pipeable (progress → stderr); reuse shared helpers; **no `spec/`
     R#/P# ids in source** (they restart per feature and collide across branches); prose, comment and
     commit-message voice per § *Prose and comments*, which is hygiene rather than a review finding.
@@ -499,9 +500,13 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   suite to mean a case actually ran.
 - **`offline_tests.rs` guards air-gapped operation.** The readers must answer a query with an empty
   DuckDB extension cache and write nothing into it; the test redirects `HOME` and asserts that
-  directory stays empty. This is why `Cargo.toml` asks `duckdb` for `parquet` alongside `bundled` —
-  `bundled` alone leaves the Parquet reader to autoinstall a 12 MB extension at runtime. Dropping the
-  feature restores a product defect on air-gapped HPC login nodes, not just a slow first run.
+  directory stays empty. That now holds by refusal: every connection opens through
+  `engine::open_connection`, which turns extension autoload and autoinstall off, so a query that
+  needs an unlinked extension fails instead of downloading one. `Cargo.toml` still asks `duckdb` for
+  `parquet` alongside `bundled`, because `bundled` alone leaves the Parquet reader unlinked, and with
+  autoload refused that is a reader that cannot read its own index. Any other extension ships as a
+  file in `lib/xdu/extensions/` and loads by path (`XDU_EXTENSION_DIR` overrides the directory);
+  nothing is ever fetched at runtime.
 - **Verify by driving the CLI, not just tests.** Use `.agents/factory/bin/temp_index.sh` so a drive
   hits a throwaway index, never a real one. Exit 0 is necessary but not sufficient — assert a concrete
   post-condition (row count, a stdout token, files actually gone/kept).
@@ -527,9 +532,16 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   touch them — they change only when the CLI changes.
 - Release profile (`Cargo.toml`): `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - Release tarball layout is a contract: `bin/{xdu,xdu-find,xdu-view,xdu-rm}` +
-  `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}`; `install.sh`'s
-  extraction mirrors it exactly. `/xdu-release` cuts versions (bump `Cargo.toml` + `Cargo.lock`,
-  gate, tag, publish); see its skill.
+  `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}` +
+  `lib/xdu/extensions/{name}.duckdb_extension` (the pinned DuckDB extensions, one per entry, built
+  for that tarball's engine version and platform; flat, no version or platform directories).
+  `install.sh`'s extraction mirrors it exactly, placing `lib/xdu/extensions/` beside the physical
+  directory the binaries went to, since the tools look in `<canonical exe>/../../lib/xdu/extensions`
+  unless `XDU_EXTENSION_DIR` names another directory. The container image and the HPCCM recipe keep
+  the same layout under their prefix. Every release leg runs `packaging/extensions/check.sh` on the
+  exact tarball it uploads, under a cold `HOME`, before the upload. `cargo install` builds carry no
+  extensions. `/xdu-release` cuts versions (bump `Cargo.toml` + `Cargo.lock`, gate, tag, publish);
+  see its skill.
 - **Pre-release gate (mirrored by CI and `/xdu-release`):** `cargo fmt --all -- --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` must all pass clean.
 

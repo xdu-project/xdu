@@ -238,8 +238,12 @@ ordering is load-bearing:
   (`.partial suffix`, never bare `.partial`). Adding, removing or re-counting a literal carries the
   same three-place same-commit obligation as the normalization above.
 - Release tarball layout — `bin/{xdu,xdu-find,xdu-view,xdu-rm}` +
-  `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}` — matches `install.sh`
-  extraction exactly; keep them in lockstep.
+  `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}` +
+  `lib/xdu/extensions/{name}.duckdb_extension` — matches `install.sh` extraction exactly; keep them
+  in lockstep. The extensions land beside the *physical* install directory of the binaries
+  (`<canonical exe>/../../lib/xdu/extensions`, overridable with `XDU_EXTENSION_DIR`), and the
+  installer replaces each by copy-then-rename, never an in-place copy. Connections refuse
+  autoload/autoinstall, so a missing file fails naming its path; nothing downloads at runtime.
 - Non-TTY runs keep **stdout** clean/pipeable (progress and status go to **stderr**).
 - Reuse shared helpers; do not duplicate logic across bins or reimplement production logic in tests.
 - **Never embed `spec/` `R#`/`P#` ids in source** (they restart per feature and collide across

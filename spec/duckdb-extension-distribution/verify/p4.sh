@@ -15,6 +15,8 @@ P="$TD/$T/release/examples/extension-probe"
 S=$(mktemp -d "${TMPDIR:-/tmp}/xdu-p4.XXXXXX")
 trap 'rm -rf "$S"' EXIT
 mkdir -p "$S/staging/bin" "$S/staging/share/man/man1" "$S/srv" "$S/shim"
+# A release tarball always carries its man pages, and install.sh copies share/man/man1/*.1.
+printf '.TH XDU 1\n' > "$S/staging/share/man/man1/xdu.1"
 for b in xdu xdu-find xdu-view xdu-rm; do cp "$TD/$T/release/$b" "$S/staging/bin/"; done
 sh packaging/extensions/fetch.sh "$P" "$S/staging/lib/xdu/extensions"
 A="xdu-vtest-$T.tar.gz"

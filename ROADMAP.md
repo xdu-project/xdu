@@ -491,6 +491,30 @@ that would fix them.
 *Horizon: near-term · Depends on: the man-page gate and container-image fixes above must land first (enforcement would otherwise block its own remediation) · Refs: `spec/readers-autoload-parquet-at-runtime/META.md` F6 covers the factory-skill half*
 **Seed:** [`issues/ci-gates-are-advisory.md`](issues/ci-gates-are-advisory.md)
 
+## HPCCM recipe: assert the image carries the shipped extensions
+
+Release tarballs now carry the pinned DuckDB extensions in `lib/xdu/extensions/`, and the HPCCM
+recipe puts them beside `bin/` by extracting the whole tarball, but nothing in the recipe checks
+it. The repository's own `Dockerfile` and every release leg fail when the extension is missing; the
+HPCCM image would build green and fail at its first S3 query. The guard is one `test -f` in the
+existing smoke step, and it cannot land early: the recipe pins a release with no `lib/`, so the
+guard would break it on `main`. It belongs in the release commit that first moves the recipe's
+`VERSION` to a tarball carrying `lib/`.
+
+*Horizon: near-term · Depends on: the first release that ships `lib/xdu/extensions/` · Refs: —*
+**Seed:** [`issues/hpccm-extension-guard.md`](issues/hpccm-extension-guard.md)
+
+## The bundled DuckDB does not build against the macOS 27 SDK
+
+The vendored DuckDB 1.4.4 amalgamation fails to compile against the libc++ in the macOS 27
+command-line tools SDK: its thrift `TEnumIterator` has no `operator==`, and the error surfaces in
+libc++'s `__tree` header. A macOS host builds today only with `SDKROOT` pointed at a 26.x SDK, and
+the CI macOS legs pass only because their runner images still ship an older SDK. When those images
+move to SDK 27, every macOS leg, the release build included, goes red without a change here.
+
+*Horizon: near-term · Depends on: — (an engine bump re-pins the shipped extensions) · Refs: —*
+**Seed:** [`issues/macos-sdk27-bundled-duckdb-build.md`](issues/macos-sdk27-bundled-duckdb-build.md)
+
 ## Native OS packages (DEB / RPM)
 
 Installation today is a release tarball plus `install.sh`. Native `.deb` and `.rpm` packages would

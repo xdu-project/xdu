@@ -3,10 +3,10 @@ slug: duckdb-extension-distribution
 title: Ship DuckDB extensions instead of downloading them
 kind: feature
 appetite: small
-status: in_progress
+status: in_review
 branch: feature/duckdb-extension-distribution
 base: main
-current_phase: P4
+current_phase: done
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -56,14 +56,14 @@ phases:
   verify: sh spec/duckdb-extension-distribution/verify/p3.sh
 - id: P4
   name: Install channels and the recorded layout contract; deferral ledger
-  status: pending
+  status: done
   satisfies:
   - R2
   depends_on:
   - P2
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: downhill
   verify: sh spec/duckdb-extension-distribution/verify/p4.sh
 review:
   last_reviewed_commit: ''
@@ -240,12 +240,12 @@ calls `gh`.**
 **Goal:** every channel R2 names puts `lib/xdu/extensions/` where the canonical executable looks,
 and the new layout is the recorded contract.
 
-- [ ] `install.sh` (PLAN §2.6): install `lib/xdu/extensions/*` into
+- [x] `install.sh` (PLAN §2.6): install `lib/xdu/extensions/*` into
       `$(cd "$INSTALL_DIR" && pwd -P)/../lib/xdu/extensions` when present. Copy each file to a
       temporary name in that directory, then `mv` it over the old one, never `cp` in place.
       Tarballs without `lib/` install as before. Keep `rm` where AGENTS.md says the installer keeps
       it.
-- [ ] `Dockerfile`: builder gets `curl` and copies `examples/` + `packaging/extensions/`, builds the
+- [x] `Dockerfile`: builder gets `curl` and copies `examples/` + `packaging/extensions/`, builds the
       probe in the same `cargo build`, stages `/out/{bin,lib/xdu/extensions}`, runs `fetch.sh` then
       `check.sh` on a tarball of the staging. The runtime stage takes the checked tree whole
       (`COPY --from=builder /out/ /usr/local/`) and then runs
@@ -253,14 +253,14 @@ and the new layout is the recorded contract.
       `.dockerignore` lets both new paths in. No container
       runtime is on the planning host, so `docker.yaml`'s PR validate job is this change's
       build evidence.
-- [ ] `hpccm/xdu.py`: docstring says the tarball's `lib/xdu/extensions/` lands in the prefix beside
+- [x] `hpccm/xdu.py`: docstring says the tarball's `lib/xdu/extensions/` lands in the prefix beside
       `bin/`. Run `make check` (regenerated specs must not drift).
-- [ ] `AGENTS.md`: the Packaging layout bullet, the §13 summary line, and the `offline_tests.rs`
+- [x] `AGENTS.md`: the Packaging layout bullet, the §13 summary line, and the `offline_tests.rs`
       bullet (autoload is now refused at `open_connection`, and the cold-`HOME` test holds by
       refusal). Mirror the layout in `.agents/factory/invariants.md` §13 in the **same commit**.
-- [ ] `README.md` Installation: where extensions live, `XDU_EXTENSION_DIR`, and that
+- [x] `README.md` Installation: where extensions live, `XDU_EXTENSION_DIR`, and that
       `cargo install` builds carry none.
-- [ ] **Deferral ledger.** Walk P1–P4 for "defer", "follow-up", "known limitation", "not this
+- [x] **Deferral ledger.** Walk P1–P4 for "defer", "follow-up", "known limitation", "not this
       cycle" and confirm each has an `issues/` home with a ROADMAP entry. The known ones:
       `issues/s3-index-target.md` gets the `XDU_EXTENSION_DIR` man-page entry, due when a CLI path
       first loads an extension, and the `cargo install` caveat.
@@ -271,10 +271,18 @@ and the new layout is the recorded contract.
       carrying `lib/`. Adding the guard earlier would break the recipe on `main`. If the PR run shows
       `linux_amd64` mixed C++ runtimes need a `.cargo/config.toml` change, that goes to a new
       `issues/` file plus a ROADMAP entry, never to `META.md`.
+      *Amended in the build:* the PR run showed no abort on `linux_amd64` (P3 evidence), so no
+      `.cargo/config.toml` deferral was filed. A foreman ruling added
+      `issues/macos-sdk27-bundled-duckdb-build.md` plus a ROADMAP entry: the macOS 27 SDK's libc++
+      rejects the vendored DuckDB 1.4.4 build, so host builds need a 26.x `SDKROOT`, and CI
+      images will meet it when they move to SDK 27.
 - **Verify:** `sh spec/duckdb-extension-distribution/verify/p4.sh`. It runs `install.sh` through a
   `curl` shim with `XDU_INSTALL` outside `XDU_PREFIX` and again through a symlinked install
   directory, plus a second install over the first, then loads under a cold `HOME` from each, and
   greps the contract and deferral records.
+  *Gate fix in the build:* the fixture staged an empty `share/man/man1/`, which no release tarball
+  has, and `install.sh`'s existing `cp share/man/man1/*.1` failed on the unmatched glob. The
+  fixture now stages one stub page; no control changed.
 - **Touches:** `install.sh`, `Dockerfile`, `.dockerignore` (if needed), `hpccm/xdu.py`, `AGENTS.md`,
   `.agents/factory/invariants.md`, `README.md`, `ROADMAP.md`, `issues/s3-index-target.md`,
   `issues/native-os-packages-deb-rpm.md`, `issues/hpccm-extension-guard.md` (new).
