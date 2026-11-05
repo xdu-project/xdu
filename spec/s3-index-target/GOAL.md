@@ -42,14 +42,16 @@ Evidence carried from the seed, confirmed against `3ed22d5`:
 
 - Invariant §5 records that partition names and index paths reach `read_parquet` through raw
   `format!`. The spike showed `read_parquet(?)` accepts a bound parameter and S3 credentials can be
-  set through the `duckdb` crate's `Config` API without appearing in any SQL (claims 10, 11), so this
-  seam can be closed rather than widened.
+  set without appearing in any SQL text (claims 10, 11), so this seam can be closed rather than
+  widened. The plan's probe D2 found claim 11's `Config` route works only with autoload on; see
+  Clarifications.
 - Invariant §2b requires the marker read to be size-capped (`MARKER_READ_LIMIT`). Over S3,
   `read_text`/`read_blob` fetch the whole object and `glob()` exposes only the file name, so the cap
   has no direct DuckDB equivalent. The FIFO hazard the cap guards cannot occur in an object store; a
   large object at the marker key can.
 - `PROVIDER credential_chain` requires the separate `aws` extension. `#31`'s gate ruled that
-  credentials are resolved in Rust and passed through the `Config` API instead (spike claim 11).
+  credentials are resolved in Rust instead (spike claim 11), and passed to DuckDB without the
+  `aws` extension.
 - The readers need no S3 client: DuckDB does their I/O, and the marker reads through
   `read_text('s3://…/.xdu-complete')` (claim 7). The crawler does need one, because it must PUT
   bytes, and re-encoding chunks through `COPY` on the crawl hot path is not an acceptable price. One
@@ -77,8 +79,10 @@ downloaded at run time, and a missing extension or a missing credential says wha
   hold: an existing marker is removed only after pre-flight passes, including reaching the
   destination with accepted credentials, and the marker is written only after every partition has
   finalized. A re-run into the same prefix SHALL leave no stale chunk in any partition it wrote, as
-  a local re-run does. Any argument that is not an `s3://` locator SHALL keep meaning a local path
-  exactly as today.
+  a local re-run does. Before the marker is removed, `xdu` SHALL refuse any top-level source
+  directory whose name is not valid UTF-8, or would not survive unchanged as an S3 key segment and
+  as a DuckDB glob, exiting non-zero and naming the directory. Any argument that is not an `s3://`
+  locator SHALL keep meaning a local path exactly as today.
 - **R2** — WHEN `xdu-find` or `xdu-view` is given an `s3://bucket/prefix` index locator, through
   `-i` or `XDU_INDEX`, it SHALL query the index in place through DuckDB's native ranged reads and
   return the same results it returns for the same index on local disk, across filters, `--count`,
@@ -91,23 +95,26 @@ downloaded at run time, and a missing extension or a missing credential says wha
   at least 10 MiB stored across several partitions, `xdu-find --count` over all partitions SHALL
   receive under 5% of the index's stored bytes. A test SHALL measure this on every CI run, so a
   regression to a staging read fails the build.
-- **R4** — IF the endpoint is unreachable, credentials are missing or rejected, the bucket or prefix
-  is absent, or (for a reader) the marker is missing or states a format version the reader does not
-  understand, THEN the tool SHALL exit non-zero with the cause on stderr and SHALL emit no rows. For
-  `xdu`, such a failure SHALL write no marker, and one detected before the marker is removed SHALL
-  leave an existing index and its marker as they were.
+- **R4** — IF the endpoint is unreachable, credentials are missing or rejected, the bucket is
+  absent, or (for a reader) the prefix is absent or its marker is missing or states a format version
+  the reader does not understand, THEN the tool SHALL exit non-zero with the cause on stderr and
+  SHALL emit no rows. For `xdu`, such a failure SHALL write no marker, and one detected before the
+  marker is removed SHALL leave an existing index and its marker as they were. For `xdu`, an absent
+  or empty prefix is not a failure: it is how a new index starts.
 - **R5** — Credentials, region and endpoint SHALL be resolved from the `AWS_*` environment
   variables and from the shared credentials and config files, selected by `AWS_PROFILE` and located
   through `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` when set. One resolver in the library,
-  written in Rust, SHALL serve both the writer and the readers, and the readers SHALL receive its
-  result through DuckDB's `Config` API, with no `aws` extension. An endpoint override from those
-  sources SHALL let the same invocation target AWS S3 or an S3-compatible store with no
-  provider-specific option visible to the operator. No secret SHALL appear in SQL text, on the
-  command line the tools require, or in any output.
+  written in Rust, SHALL serve both the writer and the readers. A reader SHALL pass its result to
+  DuckDB only as the bound parameters of one prepared `CREATE SECRET` statement, issued after the
+  pinned `httpfs` is loaded (R7), with no `aws` extension. An endpoint override from those sources
+  SHALL let the same invocation target AWS S3 or an S3-compatible store with no provider-specific
+  option visible to the operator. No secret SHALL appear in SQL text, on the command line the tools
+  require, or in any output, and DuckDB's own secret listing SHALL show it redacted.
 - **R6** — WHEN `xdu-find` or `xdu-view` queries an `s3://` index, the locator and any partition
-  name that reaches SQL SHALL be bound parameters, and credentials SHALL reach DuckDB only through
-  its `Config` API, never as text interpolated into SQL. Reader SQL for a local-path index stays as
-  it is, and invariant §5's raw-`format!` note for local paths stands.
+  name that reaches SQL SHALL be bound parameters, and credentials SHALL reach DuckDB only as the
+  bound parameters of R5's prepared `CREATE SECRET`, never as text interpolated into SQL. Reader SQL
+  for a local-path index stays as it is, and invariant §5's raw-`format!` note for local paths
+  stands.
 - **R7** — WHEN a reader opens an S3 index, it SHALL load the pinned `httpfs` through `#31`'s loader,
   from the install location or `XDU_EXTENSION_DIR`, with no download and no write under `$HOME`. IF
   the extension is absent, THEN the tool SHALL fail naming the path it looked in and both remedies:
@@ -173,9 +180,10 @@ downloaded at run time, and a missing extension or a missing credential says wha
 - **Q:** Which credential, region and endpoint sources must the pilot honor? — **A:** The `AWS_*`
   environment variables, plus the shared credentials and config files selected by `AWS_PROFILE`,
   with region and endpoint taken from the same sources. `AWS_SHARED_CREDENTIALS_FILE` and
-  `AWS_CONFIG_FILE` are honored so tests can point at fixtures. Resolved in Rust and passed through
-  the `Config` API, with no `aws` extension. Instance metadata, SSO and the full default chain go to
-  the follow-up seed (R5, Non-goals). Ruled by the foreman as gate judge (resolved 2026-11-05).
+  `AWS_CONFIG_FILE` are honored so tests can point at fixtures. Resolved in Rust, with no `aws`
+  extension; how the result reaches DuckDB was amended at the PLAN gate (below). Instance
+  metadata, SSO and the full default chain go to the follow-up seed (R5, Non-goals). Ruled by the
+  foreman as gate judge (resolved 2026-11-05).
 - **Q:** What are R3's fixture floor and byte ceiling? — **A:** A fixture of at least 10 MiB, and
   `--count` over all partitions receives under 5% of stored bytes, measured on every CI run. The
   spike measured 0.16% on 80.1 MiB over 4 partitions, about 33 KiB per chunk object, so the bound
@@ -191,6 +199,24 @@ downloaded at run time, and a missing extension or a missing credential says wha
   gate judge, as a pre-emptive cut (resolved 2026-11-05).
 - **Q:** Does `xdu-view` stay in the pilot? — **A:** Yes, in R2 and R9, phased last (see *Notes*).
   Ruled by the foreman as gate judge (resolved 2026-11-05).
+- **Q:** How do credentials reach DuckDB, given that the `Config` API cannot carry them? — **A:**
+  Only as the bound parameters of one prepared `CREATE SECRET`, issued after the pinned `httpfs` is
+  loaded, never as SQL text, and DuckDB's secret listing shows the secret redacted (R5, R6). The
+  plan's probe D2 (`research/00-digest.md`) found that DuckDB 1.4.4 refuses any `s3_*` key in
+  `Config` at open while autoload is off; spike claim 11 passed only because autoload was on and
+  `$HOME` held an installed `httpfs`. The alternative, autoload on with a versioned extension tree,
+  breaks the tarball-layout non-goal and the offline guarantee (R7, `#31` R3 and R5). Amended by the
+  foreman as gate judge at the PLAN gate (resolved 2026-11-05).
+- **Q:** What does `xdu -o s3://` do with a top-level source directory whose name is not valid UTF-8,
+  or would not survive unchanged as an S3 key segment and a DuckDB glob? — **A:** It refuses the
+  run before the marker is cleared, exits non-zero and names the directory (R1). Encoding the name
+  silently would build a different index, and skipping it silently would violate §2c's fail-loud
+  rule. Ruled by the foreman as gate judge at the PLAN gate (resolved 2026-11-05).
+- **Q:** What does "absent bucket or prefix" mean in R4? — **A:** For a reader, an absent prefix
+  fails, since it has no marker. For `xdu`, a missing bucket, an unreachable endpoint or rejected
+  credentials fail, but an absent or empty prefix is how a new index starts and is not a failure.
+  R4 is reworded to say so. Ruled by the foreman as gate judge at the PLAN gate (resolved
+  2026-11-05).
 
 ## Notes
 
@@ -209,7 +235,8 @@ downloaded at run time, and a missing extension or a missing credential says wha
 - Superseded first cycle: tag `archive/s3-index-target-p2`; its briefs 01, 02, 04 and 05 are
   largely transport-independent.
 - Prerequisite: `spec/duckdb-extension-distribution/GOAL.md` (`#31`), notably its clarification
-  that credentials go through the `Config` API, not the `aws` extension.
+  that credentials are resolved in Rust, not by the `aws` extension. Its `Config` route is
+  superseded here by the PLAN-gate amendment (bound `CREATE SECRET`).
 - Anchors: `src/engine.rs` (`open_connection`, `extension_dir`, `load_extension`,
   `EXTENSION_DIR_ENV`); `src/cli.rs:29-30` (`xdu -o`, a `PathBuf` today) and the readers'
   `-i`/`XDU_INDEX`; `.agents/factory/invariants.md` §2, §2b, §3, §4, §5; `tests/offline_tests.rs`;
