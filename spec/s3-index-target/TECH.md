@@ -6,7 +6,7 @@ appetite: big
 status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: P4
+current_phase: P5
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -77,7 +77,7 @@ phases:
     --check; echo P3-GATE-GREEN
 - id: P4
   name: xdu-view browses an s3:// index in place
-  status: in_progress
+  status: done
   satisfies:
   - R2
   - R6
@@ -190,6 +190,12 @@ departs from it.
   foreman as a GOAL/PLAN question. Never swap the transport, the TLS provider or the gate silently.
 - **No `.partial`, no staging, no cache.** Any code path that writes an index object to local disk
   for an `s3://` locator fails the phase.
+- **Environment note (P4, not a gate change).** On the build host, `uv run --with pyyaml python`
+  hung fetching PyYAML for Python 3.14 into a fresh cache. On the foreman's ruling, the factory
+  scripts (`next_phase.py`, `set_phase.py`) ran under that host's Python 3.14 with `PYTHONPATH`
+  pointed read-only at a PyYAML 6.0.3 already unpacked in the shared uv cache: the same
+  interpreter and library `uv run` would supply. Nothing was written to that cache, and no
+  `verify:` command changed.
 
 ---
 
@@ -542,7 +548,11 @@ runs long, P4 is dropped through a GOAL amendment (never silently), and P5 still
   `### Indexes in S3` names `xdu-view` beside `xdu-find`; `AGENTS.md` (source map, the
   duplicated-literal sentence) and `invariants.md` §5 name `view_query`.
 - **Run B evidence:** test legs as above with N ≥ 34; the Packaging job's literal step green with
-  the new `xdu-view.1` checks.
+  the new `xdu-view.1` checks. *Recorded by run B in [`evidence/p4-ci.md`](evidence/p4-ci.md)
+  (tests run 42034745391, N = 41 on both legs, all 5 `view_` tests named; it tested the merge
+  ref `b005caf` onto `main` at `a0cdd95`, which differs from `ebe5a48` only in PR #32's
+  `ROADMAP.md` and `issues/` edits; release run 42034745344 green, every Linux binary at
+  `GLIBC_2.28`).*
 - **Verify:** see frontmatter.
 - **Touches:** `src/view_query.rs`, `src/lib.rs`, `src/bin/xdu-view.rs`, `tests/`,
   `doc/xdu-view.1.scd`, `.github/workflows/test.yaml`, `README.md`, `AGENTS.md`,
