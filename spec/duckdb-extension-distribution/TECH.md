@@ -66,10 +66,10 @@ phases:
   hill: downhill
   verify: sh spec/duckdb-extension-distribution/verify/p4.sh
 review:
-  last_reviewed_commit: b4d8d9f
-  verdict: changes-requested
-  blocked_reason: 'review F4: invariant 5 omits the LOAD extension path'
-  cycle: 2
+  last_reviewed_commit: 717ddca
+  verdict: approved
+  blocked_reason: ''
+  cycle: 3
 ---
 # TECH.md — Ship DuckDB extensions instead of downloading them
 

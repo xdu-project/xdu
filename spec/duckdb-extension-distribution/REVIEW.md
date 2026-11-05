@@ -385,3 +385,201 @@ No other candidate survived refutation. The reviewer dropped four by executed ch
   and then with `--force`, both with `--limit`, and the two runs selected identical rows. The
   sign-off is for the §5 text amendment; the code path is safe as built.
 - Cycle 2 of ≤3. A third cycle is the last before escalation.
+
+## Review cycle 3 — approved (2026-11-05)
+
+- **Reviewed commit:** 717ddca  ·  **Base:** main (b47ba2b)  ·  **Date:** 2026-11-05
+- **Verdict:** approved
+- **Cycle:** 3 of ≤3, mirroring `review.cycle` in `TECH.md`. The loop converged on its last cycle.
+
+**Mode.** A fresh blind pass over the full spec-excluded diff, the default for a later cycle; no
+human scoped it to the remediation. The reviewer was not told about earlier findings and was barred
+from all of `spec/` except the inlined `GOAL.md`. The orchestrator checked the F4 remediation
+separately (below). No `debate` or `completeness` argument was passed.
+
+**Contract drift.** `GOAL.md` has the same three commits as at cycles 1 and 2 (1615832, 8f7e96c,
+f3f09c2). This cycle grades the amended R6.
+
+**Head.** Since cycle 2 (b4d8d9f), 717ddca changes two non-spec files, `.agents/factory/invariants.md`
+and `AGENTS.md`, plus `TECH.md` and `verify/p4.sh`. `git diff --stat 78daf41 HEAD -- .
+':(exclude)spec/'` names the same two manuals and no release-path input, so the release run at
+78daf41 still describes the release path under review.
+
+### Verification run
+
+Reviewer (blind), on this macOS arm64 host:
+
+- `cargo fmt --all -- --check` → clean.
+- `cargo clippy --offline --locked --all-targets --all-features -- -D warnings` → clean.
+- `cargo test --offline --locked` → 170 passed, 0 failed:
+  - lib 101 (11 in `engine::tests`), xdu-view 5, cli_version 1, crawl 25, find 9, offline 1,
+    rm 18, version 6
+  - the probe's 4 unit tests
+  - `non_utf8_directory_is_refused_before_any_sql` skips its body here, because APFS rejects the
+    name.
+- Host `osx_arm64` leg, end to end the way `release.yaml` runs it:
+  - one `cargo build --release --target aarch64-apple-darwin --bins --example extension-probe`
+  - `fetch.sh` → `footer: ok … engine=v1.4.4 platform=osx_arm64 … sha256=9a3eef9c…`, the hash CI's
+    `osx_arm64` leg logged
+  - `check.sh` → `loaded=httpfs <x>/lib/xdu/extensions/httpfs.duckdb_extension`, `boundary=ok`,
+    then `extension-check: ok platform=osx_arm64 engine=v1.4.4`, rc 0
+- `check.sh` negative controls, all on copies, all rc 1:
+  - an `osx_amd64` httpfs; a `v1.4.3` httpfs; an extra `json.duckdb_extension`; no `lib/`
+  - 16 bytes flipped in the body with the footer intact. The footer check passed, and then `LOAD`
+    refused the file.
+  - `bin/xdu` not executable; an `xdu-view` without the engine `source_id`; no `bin/xdu-rm`
+- `fetch.sh` refused each bad fake-probe manifest:
+  - a failing probe, rc 3
+  - an unknown platform, a duplicate `engine=`, no extensions, a name outside `[a-z0-9_]`, all rc 1
+  - an unpublished engine, rc 56 on the 404
+- Extension-directory drives with `extension-probe load` under `env -i` and a cold `HOME`:
+  - The default directory and an absolute override both load.
+  - A relative override loads.
+  - An empty override falls back to the default.
+  - A missing override fails naming `<dir>/httpfs.duckdb_extension` and "does not download", and
+    the directory is not created.
+  - The cold `HOME` stayed empty throughout.
+- Mutation and lint controls, on scratch copies:
+  - `enable_autoload_extension(true)` fails `connections_open_with_autoinstall_and_autoload_off`
+    and `json_cast_is_refused_without_installing`.
+  - Calling `Connection::open_in_memory`, `open_in_memory_with_flags` or `open` directly fails
+    clippy with `disallowed_methods`, rc 101.
+- `temp_index.sh` drives under a cold `HOME`:
+  - `xdu-find` with `--count`, `--top`, `-f json`, `--regex`, a glob, `--min-size -u` and
+    `--older-than`; `xdu-rm --dry-run`. The cold `HOME` held no entries afterwards.
+  - `xdu-view`: five argument sets ran their partition and directory queries, then stopped at the
+    expected no-TTY raw-mode error, with the cold `HOME` empty. The TUI itself could not be driven,
+    because the sandbox denies `openpty`.
+- `install.sh` with a local `curl` stand-in and no network:
+  - A default install, then a re-install. The re-install replaces the file by rename: a new inode
+    and no temp file left behind.
+  - A symlinked `XDU_INSTALL`: the extension lands under the physical parent, and a probe reached
+    through a further symlink loads it with no configuration.
+  - This drive needed the harness-only `mktemp` stand-in, which is the environment, not the product.
+- HPCCM: specs regenerated with `uvx hpccm==26.5.0` → `cmp`-identical to the committed `xdu.def` and
+  `xdu.docker`. A replay of the recipe's extraction into a scratch prefix loads the extension from
+  `prefix/lib/xdu/extensions`.
+- Dockerfile by reading. One cargo invocation builds the bins and the probe, `fetch.sh` and
+  `check.sh` run in the builder, and the copy to `/usr/local/` matches the default directory.
+- Rubric scope 5: grepped `AGENTS.md` and `invariants.md` for every new module, env var and on-disk
+  artifact; no drift. A grep of the non-spec diff for spec `R#`/`P#` ids in source found none.
+
+Orchestrator:
+
+- **CI release run at 78daf41**, from its full log:
+  - Each of the five jobs logs `HEAD is now at 78daf41`.
+  - Each leg's `Check extensions load (cold HOME)` step ends on `extension-check: ok`, with
+    `platform={linux_amd64,linux_arm64,osx_amd64,osx_arm64}`, all `engine=v1.4.4`.
+  - On both Linux legs, "Assert glibc floor" reports `max GLIBC_2.28` for all four binaries.
+  - All four legs log `boundary=ok`.
+  - The log has no `##[error]` line and no publish job.
+- `sh spec/duckdb-extension-distribution/verify/p3.sh` → `P3-GATE-GREEN`.
+- After the review, `cargo test --offline --locked` compiled nothing and passed 170, failed 0.
+  No fingerprint or dep-info under `target/debug` references the reviewer's scratch. Together
+  these confirm the reviewer's restore of the dev-profile artifacts, described under *Reviewer
+  conduct*.
+
+Cycle-2 remediation, checked by the orchestrator:
+
+- **F4 fixed.** The two manuals now name the extension path as an injection surface:
+  - `invariants.md` §5 is headed "(all readers and the extension loader)" and gains a bullet.
+  - `AGENTS.md` invariant 5 gains the matching sentences.
+  - `AGENTS.md`'s high-risk quick reference gains `src/engine.rs` and calls `QueryFilters` the
+    reader-query surface.
+- Each claim was read against `src/engine.rs` at HEAD:
+  - A set, non-empty `XDU_EXTENSION_DIR` is taken as given (`:47-61`).
+  - The default is the canonical executable's grandparent joined with `lib/xdu/extensions`
+    (`:62-70`, `:85-86`).
+  - The name is restricted to `PINNED_EXTENSIONS` (`:104`).
+  - The path is made absolute, and a non-UTF-8 path or one containing `'` is refused (`:124-137`)
+    before the only SQL, `LOAD` at `:139`.
+  - Both named unit tests exist (`:264`, `:281`), the second skipping on APFS.
+- `git grep` for a `format!` of `LOAD`/`SET`/`INSTALL`/`PRAGMA`/`ATTACH`/`COPY`/`EXPORT`/`IMPORT` in
+  `src` finds only `engine.rs:139` and the test module's `SET` at `:174`.
+- The class predicate 717ddca adds to `verify/p4.sh` was run on copies of the manuals:
+  - The HEAD pair is green.
+  - The cycle-2 pair is red: "invariants.md section 5 does not name src/engine.rs".
+  - Each HEAD manual paired with the other's cycle-2 copy is red, so a regression in either file is
+    caught.
+  - The full `p4.sh` was not re-run here; the reviewer drove `install.sh` independently.
+- No code changed: `git diff b4d8d9f HEAD -- . ':(exclude)spec/'` touches only the two manuals.
+
+Not observed:
+
+- The Dockerfile image build. There is no container runtime here, so it was graded by reading. The
+  Docker "Validate build" jobs at 78daf41 were reported green; their logs were not read.
+- The Test workflow (Lint, `ubuntu-24.04`, `macos-15`, Packaging) at 78daf41. It was reported
+  green, but its log, including the man-page literal assertions, was not read. That includes
+  `non_utf8_directory_is_refused_before_any_sql`, which the amended manuals say runs on the Linux CI
+  leg: it skips here, so no run of its body has been observed in this review.
+- The man-page gate locally. `scdoc` is not installed, so no page was rendered and no literal was
+  confirmed by any form. The diff touches no `doc/*.scd` and no `src/cli.rs`, so there is no
+  changed flag set to compare.
+- The `linux_amd64`, `linux_arm64` and `osx_amd64` legs locally. They are graded from the CI log.
+
+### Requirement → evidence matrix
+
+| R-ID | Implemented by | Verified how (and by whom) | Status |
+|------|----------------|----------------------------|--------|
+| R1 | `engine::PINNED_EXTENSIONS` (a list); probe `manifest`; `fetch.sh`, `footer.sh`; `check.sh`; `release.yaml` build → fetch → `tar … bin share lib` → check before upload, publish skipped on pull requests | Reviewer: host leg, plus platform, engine, set and signature controls. Orchestrator: four-leg CI log at 78daf41, all `engine=v1.4.4`. | ✅ |
+| R2 | `AGENTS.md` layout contract, `invariants.md` §13, `install.sh`, `hpccm/xdu.py`, `Dockerfile`, `.dockerignore` | Reviewer: `install.sh` drives (default, re-install, symlinked); HPCCM specs `cmp`-identical and extraction replayed; Dockerfile by reading. Docker CI reported, not read. | ✅ (Dockerfile by reading) |
+| R3 | `engine::open_connection`, `extension_dir`, `load_extension_from`; `clippy.toml` | Reviewer: default, absolute, relative and empty-override drives under a cold `HOME`; autoload mutation control; clippy control. | ✅ |
+| R4 | `engine::load_extension_from` absent-file branch | Reviewer: missing override fails naming the path and "does not download", directory not created; `check.sh` absent cases; unit tests. | ✅ |
+| R5 | readers open through `engine::open_connection`; none loads an extension | Reviewer: `offline_tests` 1/1; throwaway-index drives and `xdu-view` queries under a cold `HOME`; no `LOAD`/`INSTALL` outside `engine.rs` and the probe. | ✅ |
+| R6 | `release.yaml`, one build invocation for bins and probe; `check.sh` on the exact tarball: probe load from the extracted layout, `--version` of all four binaries, `xdu`/`xdu-find`/`xdu-rm` drives, all under `env -i HOME=<cold>` | (a) and (b): Reviewer, host leg and binary-side controls. Orchestrator: four-leg CI log. | ✅ |
+
+Unmapped changes. None of these blocks the cycle.
+
+- The earlier cycles' items carry over:
+  - `test.yaml` moves to `macos-15`.
+  - `release.yaml` gains a read-only `pull_request` trigger.
+  - The `AGENTS.md` map gains a `packaging/rpm/` line.
+  - `README.md` describes `XDU_EXTENSION_DIR`.
+  - The deferral records in `ROADMAP.md` and `issues/`.
+- The reviewer also listed the R7 draft that `issues/native-os-packages-deb-rpm.md` gains. It is a
+  seed for a later cycle, recorded under a non-goal of this one.
+
+### Findings
+
+None. No candidate survived refutation. The reviewer dropped eight by executed check or by reading
+the diff:
+
+- `install.sh` with an exported `CDPATH` and a relative `XDU_INSTALL`
+- HPCCM with an empty prefix. That hazard already applied to `bin/` and is not new.
+- `docker.yaml`'s pull-request paths without `src/engine.rs`. They never included `src/`, and
+  `release.yaml`'s paths cover it.
+- No build-time `test -f` in the HPCCM recipe. That is deferred to an issue, and extraction places
+  the file.
+- The probe panicking on a closed pipe, which the reviewer's own `| head` caused
+- `EACCES` on the extension directory reported as "not found". The message still names the path,
+  and nothing downloads.
+- `src/engine.rs` absent from the high-blast-radius list. No high-blast logic moved. The `LOAD`
+  surface is gated through §5, and `AGENTS.md` lists the file as high-risk.
+- `open_from_raw` bypassing `clippy.toml`, which needs `unsafe` FFI
+
+### Reviewer conduct
+
+- `git status --porcelain` was empty at hand-back, and HEAD was 717ddca.
+- **First mutation.** One scratch staging binary was overwritten through a hard link to build a
+  control. The real `target/aarch64-apple-darwin/release/xdu` is a separate inode and stayed intact.
+  The scratch copy was restored, and `cmp` is identical for all four binaries.
+- **Second mutation.** Clippy and test runs on a scratch source copy shared the worktree's
+  `target/`. Cargo gave the copy the same metadata hashes, so it replaced the dev-profile `xdu`
+  artifacts, and a worktree `cargo test` then ran the mutant: 99 passed, 2 failed.
+  - The reviewer restored them with `cargo clean -p xdu`, which touched `target/debug` only, then
+    rebuilt.
+  - Release-profile artifacts were never touched.
+  - The gate results above were taken before the copy runs and match the post-restore run.
+  - The orchestrator re-confirmed the restore (above).
+
+### Human-gate triggers
+
+- **Not triggered by this cycle.** It has no finding.
+- **Carried forward for the publish gate:**
+  - Cycle 2's F4 was CONFIRMED against the §5 SQL-injection invariant, and on a literal reading it
+    requires sign-off before publish. The remediation is text-only and verified above.
+  - 717ddca's message says `TECH.md` records the gate judge's confirmation of the §5 amendment
+    under the maintainer's standing mandate. This review read `TECH.md` for its metadata only and
+    has not checked that record.
+  - The R6 amendment (f3f09c2) carries the same kind of confirmation.
+  - Whether those satisfy the human gate is for the publish step to decide.

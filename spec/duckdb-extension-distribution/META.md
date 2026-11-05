@@ -114,3 +114,20 @@ is skipped by the parser):
   because the remediation edits that invariant. Alternatively, state explicitly that it does not.
   Either way, one reading.
 - **Confidence:** med · **Effort:** small
+
+## F5 — Rubric's build-state rule misses a mutated source copy sharing the target dir
+`origin=xdu-review:2 severity=medium category=missing-guidance status=open target=.agents/factory/review-rubric.md`
+- **What happened:** in review cycle 3 the blind reviewer ran clippy and tests on a scratch copy of
+  the sources with a mutation, pointing `CARGO_TARGET_DIR` at the worktree's `target/`. Cargo gave
+  the copy the same metadata hashes, so it replaced the real dev-profile artifacts. A plain
+  `cargo test` in the worktree then ran the mutant, 99 passed and 2 failed. The reviewer noticed and
+  restored by rebuilding, and the orchestrator re-confirmed. `git status` saw nothing.
+- **Skill cause:** the rubric's conduct rule names artifact replacement (`cp /usr/bin/false …`) as
+  build-state poisoning. It is silent on a source-mutation control built in a shared target dir,
+  which poisons the artifacts without touching them directly. The delegation brief's advice to reuse
+  the worktree's `target/` for large builds, meant for the release leg, made the collision likely.
+- **Recommended fix:** in the rubric's *Reviewer conduct*, add one line: build a mutated source copy
+  in its own `CARGO_TARGET_DIR`, never the worktree's, because cargo keys artifacts by package and
+  profile, not by source path. Keep the restore-and-verify rule for the case where it happens
+  anyway. This strengthens the executed-evidence spine and weakens no gate.
+- **Confidence:** high · **Effort:** small
