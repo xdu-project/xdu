@@ -8,6 +8,8 @@
 //! and every `tests/*.rs` file compiles the module into its own separate crate.
 #![allow(dead_code)]
 
+pub mod s3;
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};

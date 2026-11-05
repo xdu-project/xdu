@@ -88,6 +88,26 @@ jobs:
       - name: Test
         run: cargo test --locked --all-features
 
+      # The S3 wire tests need the pinned httpfs, which nothing in the repository carries. Fetch
+      # it the way a release leg does, with the probe from this build naming engine and platform,
+      # into a directory the binaries never look in by default: a copy under
+      # target/lib/xdu/extensions would let a reader that wrongly loads httpfs for a local index
+      # pass every local test. The tests themselves touch nothing beyond loopback.
+      - name: Fetch the pinned httpfs for the S3 tests
+        run: |
+          set -eu
+          cargo build --locked --all-features --example extension-probe
+          sh packaging/extensions/fetch.sh target/debug/examples/extension-probe "$RUNNER_TEMP/xdu-ext"
+
+      # wire.sh runs tests/s3_tests.rs with --include-ignored and fails unless the passed count
+      # equals the listed count and reaches the minimum, so a wire test that vanished, skipped or
+      # was filtered away turns this step red. Raise the minimum when tests are added. The last
+      # line, `s3-wire: '' N of N passed`, is the record of what ran.
+      - name: S3 tests
+        env:
+          XDU_TEST_EXTENSION_DIR: ${{ runner.temp }}/xdu-ext
+        run: sh spec/s3-index-target/verify/wire.sh "" 7
+
   # Mirrors HyperShell's packaging-metadata job: regenerate the shipped artifacts and fail
   # if any are missing. Because man pages come from doc/*.scd and completions come from
   # src/cli.rs, this catches CLI <-> doc/scd drift at PR time (a new/renamed binary or a

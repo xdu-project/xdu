@@ -77,3 +77,18 @@ is skipped by the parser):
   appetite-independent paragraph: any phase whose deliverable is a test, meter or CI guard that an
   R-ID rests on gets an adversarial reviewer before `PLAN.md` is committed.
 - **Confidence:** med · **Effort:** small
+
+## F4 — set_phase.py re-serializes the whole frontmatter on its first use
+`origin=xdu-build:P1 severity=low category=tooling status=open target=.agents/factory/bin/set_phase.py`
+- **What happened:** The first `set_phase.py` call of the build (P1 to `in_progress`, hill to
+  `crest`) rewrote the plan's hand-written frontmatter from flow style into block style, re-quoted
+  scalars and folded every `verify:` string across lines. A two-field state change became a
+  100-line diff, and the only way to see that no gate changed was to load both versions with PyYAML
+  and compare the `verify:` values (they were equal).
+- **Skill cause:** The plan step writes the frontmatter by hand in one style and the build step's
+  mandated script emits another, so the first build commit always carries a cosmetic rewrite of
+  every phase's gate, which is exactly the text a reviewer must not have to re-read.
+- **Recommended fix:** Have `set_phase.py` emit the same style the TECH template uses (flow lists,
+  one-line single-quoted `verify:`), or have `xdu-plan` generate the frontmatter through the script
+  so both steps share one serializer.
+- **Confidence:** high · **Effort:** small

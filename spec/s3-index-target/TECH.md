@@ -1,66 +1,116 @@
 ---
 slug: s3-index-target
-title: "Build an index into S3 and query it in place"
+title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
 status: in_progress
 branch: feature/s3-index-target
 base: main
 current_phase: P1
-last_updated: "2026-11-05"
+last_updated: '2026-11-05'
 phases:
-  - id: P1
-    name: "Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://"
-    status: pending
-    satisfies: [R5, R7, R8, R10]
-    depends_on: []
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh harness_ 5; cargo test --locked --lib s3:: >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]* passed" target/p1-lib.log; cargo test --locked --test rm_tests --test offline_tests --test find_tests --test s3_tests; if grep -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)" src; then exit 1; fi; grep -qF "include-ignored" .github/workflows/test.yaml; grep -qF "fetch.sh" .github/workflows/test.yaml; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
-  - id: P2
-    name: "xdu-find queries an s3:// index in place (demo path)"
-    status: pending
-    satisfies: [R2, R3, R4, R6, R9]
-    depends_on: [P1]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh find_ 14; cargo test --locked --lib; cargo test --locked --test find_tests --test offline_tests --test version_tests --test s3_tests; .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\" --count"; grep -qF "XDU_EXTENSION_DIR" doc/xdu-find.1.scd; grep -qF "AWS_ENDPOINT_URL_S3" doc/xdu-find.1.scd; grep -A20 "check share/man/man1/xdu-find.1" .github/workflows/test.yaml | grep -qF "XDU_EXTENSION_DIR"; grep -qF "s3://" README.md; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P2-GATE-GREEN'
-  - id: P3
-    name: "xdu -o s3:// builds the index into the bucket"
-    status: pending
-    satisfies: [R1, R4, R5, R9]
-    depends_on: [P2]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh write_ 10; cargo test --locked; .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\" --count"; grep -qF "AWS_PROFILE" doc/xdu.1.scd; grep -A20 "check share/man/man1/xdu.1" .github/workflows/test.yaml | grep -qF "AWS_PROFILE"; for c in openssl-sys native-tls aws-lc-sys; do if cargo tree --locked -e normal -i $c >/dev/null 2>&1; then echo "$c is in the runtime tree" >&2; exit 1; fi; done; cargo tree --locked -e normal -i ring >/dev/null; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P3-GATE-GREEN'
-  - id: P4
-    name: "xdu-view browses an s3:// index in place"
-    status: pending
-    satisfies: [R2, R6, R9]
-    depends_on: [P3]
-    parallel: false
-    hammerable: true
-    hill: uphill
-    verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh view_ 5; cargo test --locked; grep -qF "XDU_EXTENSION_DIR" doc/xdu-view.1.scd; grep -qF "AWS_ENDPOINT_URL_S3" doc/xdu-view.1.scd; grep -A20 "check share/man/man1/xdu-view.1" .github/workflows/test.yaml | grep -qF "XDU_EXTENSION_DIR"; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN'
-  - id: P5
-    name: "Close the cycle: full S3 suite, gate literals, deferral ledger"
-    status: pending
-    satisfies: [R9, R10]
-    depends_on: [P4]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: 'set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters s3-proxy-support; do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md; grep -qF "issues/$f.md" ROADMAP.md; done; sh spec/s3-index-target/verify/wire.sh "" 34; cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P5-GATE-GREEN'
+- id: P1
+  name: Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
+  status: in_progress
+  satisfies:
+  - R5
+  - R7
+  - R8
+  - R10
+  depends_on: []
+  parallel: false
+  hammerable: false
+  hill: crest
+  verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh harness_ 5; cargo test
+    --locked --lib s3:: >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]*
+    passed" target/p1-lib.log; cargo test --locked --test rm_tests --test offline_tests
+    --test find_tests --test s3_tests; if grep -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)"
+    src; then exit 1; fi; grep -qF "include-ignored" .github/workflows/test.yaml;
+    grep -qF "fetch.sh" .github/workflows/test.yaml; cargo clippy --locked --all-targets
+    --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
+- id: P2
+  name: xdu-find queries an s3:// index in place (demo path)
+  status: pending
+  satisfies:
+  - R2
+  - R3
+  - R4
+  - R6
+  - R9
+  depends_on:
+  - P1
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: set -eu; sh spec/s3-index-target/verify/wire.sh find_ 14; cargo test --locked
+    --lib; cargo test --locked --test find_tests --test offline_tests --test version_tests
+    --test s3_tests; .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\"
+    --count"; grep -qF "XDU_EXTENSION_DIR" doc/xdu-find.1.scd; grep -qF "AWS_ENDPOINT_URL_S3"
+    doc/xdu-find.1.scd; grep -A20 "check share/man/man1/xdu-find.1" .github/workflows/test.yaml
+    | grep -qF "XDU_EXTENSION_DIR"; grep -qF "s3://" README.md; cargo clippy --locked
+    --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo
+    P2-GATE-GREEN
+- id: P3
+  name: xdu -o s3:// builds the index into the bucket
+  status: pending
+  satisfies:
+  - R1
+  - R4
+  - R5
+  - R9
+  depends_on:
+  - P2
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: set -eu; sh spec/s3-index-target/verify/wire.sh write_ 10; cargo test --locked;
+    .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\" --count";
+    grep -qF "AWS_PROFILE" doc/xdu.1.scd; grep -A20 "check share/man/man1/xdu.1" .github/workflows/test.yaml
+    | grep -qF "AWS_PROFILE"; for c in openssl-sys native-tls aws-lc-sys; do if cargo
+    tree --locked -e normal -i $c >/dev/null 2>&1; then echo "$c is in the runtime
+    tree" >&2; exit 1; fi; done; cargo tree --locked -e normal -i ring >/dev/null;
+    cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
+    -- --check; echo P3-GATE-GREEN
+- id: P4
+  name: xdu-view browses an s3:// index in place
+  status: pending
+  satisfies:
+  - R2
+  - R6
+  - R9
+  depends_on:
+  - P3
+  parallel: false
+  hammerable: true
+  hill: uphill
+  verify: set -eu; sh spec/s3-index-target/verify/wire.sh view_ 5; cargo test --locked;
+    grep -qF "XDU_EXTENSION_DIR" doc/xdu-view.1.scd; grep -qF "AWS_ENDPOINT_URL_S3"
+    doc/xdu-view.1.scd; grep -A20 "check share/man/man1/xdu-view.1" .github/workflows/test.yaml
+    | grep -qF "XDU_EXTENSION_DIR"; cargo clippy --locked --all-targets --all-features
+    -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
+- id: P5
+  name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
+  status: pending
+  satisfies:
+  - R9
+  - R10
+  depends_on:
+  - P4
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters
+    s3-proxy-support; do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md;
+    grep -qF "issues/$f.md" ROADMAP.md; done; sh spec/s3-index-target/verify/wire.sh
+    "" 34; cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml;
+    cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
+    -- --check; echo P5-GATE-GREEN
 review:
-  last_reviewed_commit: ""
+  last_reviewed_commit: ''
   verdict: none
-  blocked_reason: ""
+  blocked_reason: ''
   cycle: 0
 ---
-
 # TECH.md — Build an index into S3 and query it in place
 
 The **context engine and finite-state machine** for building this feature. The YAML
@@ -146,29 +196,29 @@ SigV4-checking S3 endpoint on loopback, resolve credentials the way R5 says, ope
 connection that loads the pinned httpfs and holds those credentials only as bound parameters, and
 read an object through the counting proxy. CI runs it on both legs. `xdu-rm` refuses `s3://`.
 
-- [ ] `src/s3.rs` (new, re-exported via `lib`): `IndexLocator`/`S3Locator` parse on `OsStr`
+- [x] `src/s3.rs` (new, re-exported via `lib`): `IndexLocator`/`S3Locator` parse on `OsStr`
   (PLAN §2.1) with unit tests: `s3://b/p`, trailing `/`, empty bucket, userinfo, glob
   metacharacters, uppercase `S3://` stays local, non-UTF-8 stays local.
-- [ ] `src/s3.rs`: `S3Settings::resolve` over an `EnvSource` trait (PLAN §2.2, digest D4),
+- [x] `src/s3.rs`: `S3Settings::resolve` over an `EnvSource` trait (PLAN §2.2, digest D4),
   hand-rolled INI, redacted `Debug`. Unit tests from fixture files: env beats profile; credentials
   file beats config; `AWS_PROFILE` selects `[profile x]`/`[x]`; `AWS_REGION` > `AWS_DEFAULT_REGION`
   > profile > `us-east-1`; `AWS_ENDPOINT_URL_S3` > `AWS_ENDPOINT_URL` > `services` > `endpoint_url`;
   path style iff an endpoint is set; half-set env credentials, no credentials, endpoint with a path
   → named errors that contain no secret.
-- [ ] `src/engine.rs`: `open_s3_connection(&S3Settings)` = `open_connection` + `load_extension
+- [x] `src/engine.rs`: `open_s3_connection(&S3Settings)` = `open_connection` + `load_extension
   ("httpfs")` + one prepared `CREATE SECRET … ?` (PLAN §2.3). Amend the absent-extension text to
   name the path and both remedies (copy `lib/xdu/extensions/` from a release tarball; set
   `XDU_EXTENSION_DIR`), keeping `assert_names_absent_file`'s substrings. `open_connection` stays
   byte-identical.
-- [ ] `Cargo.toml` dev-dependencies: `s3s = "=0.17.0"`, `s3s-fs = "=0.17.0"`, `hyper-util`, `tokio`
+- [x] `Cargo.toml` dev-dependencies: `s3s = "=0.17.0"`, `s3s-fs = "=0.17.0"`, `hyper-util`, `tokio`
   (digest D6). Confirm the toolchain pin builds them.
-- [ ] `tests/common/s3.rs`: `TestS3` (in-process s3s-fs on `127.0.0.1:0`, `SimpleAuth`, temp root,
+- [x] `tests/common/s3.rs`: `TestS3` (in-process s3s-fs on `127.0.0.1:0`, `SimpleAuth`, temp root,
   `seed_index(local_index, prefix)` by copying into the root), the std-only counting proxy (passes
   `Host` through; forces `Connection: close` on both legs, or parses every request on a kept-alive
   connection, and asserts request count = connection count in the first case; records per request
   method, path, `Range`, response status, `Content-Range` and bytes to client) and the hermetic
   child `Command` builder. A refused bind or a missing extension panics, always.
-- [ ] `tests/s3_tests.rs` `harness_` tests: an `open_s3_connection` reads a seeded object through
+- [x] `tests/s3_tests.rs` `harness_` tests: an `open_s3_connection` reads a seeded object through
   the proxy and the proxy saw it; a wrong secret is refused with a 403-class error that does not
   contain the secret; a stray `DUCKDB_S3_ENDPOINT` in the environment does not redirect the
   connection (the bound secret wins, digest D2). Per amended R5/R6, on the connection
@@ -176,26 +226,33 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
   `secret=redacted` and not the secret; no row of `duckdb_settings()` contains the secret (or the
   session token); and every SQL string `open_s3_connection` builds is exposed to a unit test
   (a pure `fn` returning the statement text) that asserts neither secret value occurs in it.
-- [ ] Always-run tests: `xdu-find -i s3://…` with `XDU_EXTENSION_DIR` set to an empty directory
+- [x] Always-run tests: `xdu-find -i s3://…` with `XDU_EXTENSION_DIR` set to an empty directory
   fails naming that path and both remedies — assert the phrase "release tarball" and
   `XDU_EXTENSION_DIR`, not `lib/xdu/extensions` (the default path already contains it). With a
   garbage `httpfs.duckdb_extension` in `XDU_EXTENSION_DIR`, local `xdu-find`, `xdu-rm --dry-run`
   and `xdu -o <local dir>` answer correctly **with empty stderr** (a swallowed load error would
   print or would have to be discarded, which the verify grep refuses). `offline_tests.rs` untouched
-  and green.
+  and green. *Amended in run A:* `xdu` logs `INFO` records to stderr by design, so its stderr
+  cannot be empty; the test asserts it is non-empty, every line is an `INFO` record, and none
+  names `httpfs` or an extension. `xdu-find` and `xdu-rm` keep the empty-stderr assertion.
   (The xdu-find S3 branch that makes the first test reachable is the minimal prologue of P2's
   §2.6 — parse, resolve, `open_s3_connection`, then `bail!` "not yet" is acceptable here only if
   P2 replaces it in the same cycle; prefer landing the real prologue.)
-- [ ] `src/bin/xdu-rm.rs`: refuse an `s3://` locator right after parse with "S3 indices are not yet
+  *Run A landed the minimal prologue:* parse, resolve, `open_s3_connection`, then
+  `bail!("…: querying an S3 index in place is not yet supported")`. The real prologue needs
+  §2.5's marker read, which is P2's; P2 replaces the `bail!`.
+- [x] `src/bin/xdu-rm.rs`: refuse an `s3://` locator right after parse with "S3 indices are not yet
   supported by xdu-rm", exit non-zero (PLAN §2.7); `tests/rm_tests.rs` covers `-i` and `XDU_INDEX`
   and asserts nothing else ran (no extension load, no pool). `doc/xdu-rm.1.scd`: one sentence
   under `-i`; re-count `XDU_INDEX` if the sentence names it.
-- [ ] `.github/workflows/test.yaml`, both legs: build `extension-probe`, `fetch.sh` into
+- [x] `.github/workflows/test.yaml`, both legs: build `extension-probe`, `fetch.sh` into
   `$RUNNER_TEMP/xdu-ext`, then an "S3 tests" step after Test:
   `XDU_TEST_EXTENSION_DIR=… sh spec/s3-index-target/verify/wire.sh "" <min>`, the one guard script
   both verify and CI run (cargo's exit status read directly; passed count equal to the
   `--list --include-ignored` count). Raise `<min>` in the same commit each later phase adds tests.
-  The step's last line, `s3-wire: '' N of N passed`, is what each run B reads.
+  The step's last line, `s3-wire: '' N of N passed`, is what each run B reads. *Run A set
+  `<min>` to 7, the whole file's listed count (5 `harness_` wire tests and 2 always-run tests),
+  rather than 5: every test in the file runs under `""`, so the floor equals the list.*
 - **Run B evidence:** in the test workflow, jobs `Test (ubuntu-24.04)` and `Test (macos-15)`,
   step "S3 tests": `s3-wire: '' N of N passed` with N ≥ 5 (the ubuntu line is the first observed
   httpfs load by a debug build on linux_amd64). In the release workflow (it runs because this phase

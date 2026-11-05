@@ -651,3 +651,41 @@ fn test_safe_mode_without_relevant_filter_still_deletes() {
     assert!(stdout.contains("Deleted: 1"));
     assert!(!source.join("user1/file.txt").exists());
 }
+
+// =============================================================================
+// Test: An S3 index locator is refused before anything else runs
+// =============================================================================
+
+/// `xdu-rm` refuses an `s3://` locator from `-i` or `XDU_INDEX` with one line and exit 1. A
+/// garbage `httpfs` stands in `XDU_EXTENSION_DIR`, so an extension load would have printed its
+/// own failure; an index lookup or a query would have printed theirs, and a selection would
+/// have printed to stdout. The one refusal line, and nothing else, is the proof none ran.
+#[test]
+fn test_s3_locator_is_refused_before_anything_runs() {
+    let extensions = TempDir::new().unwrap();
+    fs::write(
+        extensions.path().join("httpfs.duckdb_extension"),
+        b"not a DuckDB extension",
+    )
+    .unwrap();
+    let hermetic = common::s3::Hermetic::new();
+    for via_env in [false, true] {
+        let mut cmd = hermetic.command("xdu-rm");
+        cmd.env("XDU_EXTENSION_DIR", extensions.path())
+            .args(["--force", "-j", "2"]);
+        if via_env {
+            cmd.env("XDU_INDEX", "s3://bucket/idx");
+        } else {
+            cmd.args(["-i", "s3://bucket/idx"]);
+        }
+        let output = cmd.output().expect("spawn xdu-rm");
+        assert_eq!(output.status.code(), Some(1), "via_env={via_env}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "xdu-rm: S3 indices are not yet supported by xdu-rm\n",
+            "via_env={via_env}"
+        );
+        assert!(output.stdout.is_empty(), "via_env={via_env}");
+    }
+    hermetic.assert_left_empty();
+}

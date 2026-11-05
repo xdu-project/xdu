@@ -26,7 +26,8 @@ be deleted without removing anything.
 
 *-i*, *--index* _DIR_
 	Path to the Parquet index directory. Required. See also *XDU_INDEX* in
-	_ENVIRONMENT_.
+	_ENVIRONMENT_. An index in S3, given as s3://BUCKET/PREFIX, is refused:
+	*xdu-rm* does not yet delete through an S3 index.
 
 *-u*, *--partition* _NAME_
 	Filter by partition (top-level subdirectory name).

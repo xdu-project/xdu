@@ -4,13 +4,24 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use xdu::cli::XduFindArgs;
+use xdu::s3::ProcessEnv;
 use xdu::{
-    QueryFilters, index_completion_warning, index_glob, index_version_error, resolve_group,
-    resolve_user,
+    IndexLocator, QueryFilters, S3Settings, index_completion_warning, index_glob,
+    index_version_error, resolve_group, resolve_user,
 };
 
 fn main() -> Result<()> {
     let args = XduFindArgs::parse();
+
+    // An s3:// locator resolves its credentials and opens its connection before anything
+    // else, so a missing extension or credential is the first thing an operator hears about.
+    // Every other argument is a local path and takes the path below unchanged, loading no
+    // extension.
+    if let IndexLocator::S3(locator) = IndexLocator::parse(args.index.as_os_str())? {
+        let settings = S3Settings::resolve(&ProcessEnv)?;
+        xdu::engine::open_s3_connection(&settings)?;
+        anyhow::bail!("{locator}: querying an S3 index in place is not yet supported");
+    }
 
     // Resolve index path
     let index_path = args
