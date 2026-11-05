@@ -68,7 +68,7 @@ is skipped by the parser):
   `if cmd; then exit 1; fi`, and capture command output by assignment, not inside `for … in $(…)`."
 - **Confidence:** high · **Effort:** small
 
-## F2 — Reviewer is told to run `verify` commands it is blinded to
+## F2 — Reviewer is told to run `verify` commands it is blinded to · seen again (review cycle 2)
 `origin=xdu-review:2 severity=low category=instruction status=open target=.agents/skills/xdu-review/SKILL.md`
 - **What happened:** Step 2 tells the delegated reviewer to "run the relevant `verify` commands".
   Every `verify:` lives in `TECH.md` or `spec/{slug}/verify/`, which the same step forbids the
@@ -96,4 +96,21 @@ is skipped by the parser):
   recorded as a dated Clarification is graded as written and listed in REVIEW.md. Only a `GOAL.md`
   change after the first build commit, or one with no Clarification entry, needs confirmation
   before grading.
+- **Confidence:** med · **Effort:** small
+
+## F4 — Rubric does not say how drift in a gated invariant's text is graded or gated
+`origin=xdu-review:4 severity=medium category=instruction status=open target=.agents/factory/review-rubric.md`
+- **What happened:** the reviewer found that `invariants.md` §5 and `AGENTS.md` invariant 5 omit a
+  SQL surface the diff added. It could not choose between MEDIUM and HIGH, and handed the call
+  back. The orchestrator then had to decide whether a text-only finding against §5 "touches" a
+  SQL-injection invariant for the mandatory human gate. It read the gate literally and flagged it.
+- **Skill cause:** the severity table's HIGH row says "stale text in `invariants.md`" and the
+  MEDIUM row says "absent" only for `AGENTS.md` descriptions elsewhere. Neither row covers an
+  omission inside an invariant section. The human-gate rule says "touches … a SQL-injection
+  invariant" and does not say whether a drift finding in that invariant's text counts.
+- **Recommended fix:** in the rubric's severity table, extend HIGH to "stale **or incomplete**
+  text in `invariants.md` §1–§12 or an `AGENTS.md` load-bearing invariant". In the human-gate
+  section, add one line: a CONFIRMED text-drift finding in §1, §2, §4 or §5 triggers the gate,
+  because the remediation edits that invariant. Alternatively, state explicitly that it does not.
+  Either way, one reading.
 - **Confidence:** med · **Effort:** small

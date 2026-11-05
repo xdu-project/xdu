@@ -180,3 +180,208 @@ None of these blocks the cycle.
   declare the module. The reviewer drove `xdu-rm`'s dry-run and real run with `--limit` and they
   selected identical rows.
 - For the publish gate: the R6 amendment (f3f09c2) was made mid-cycle at the PLAN gate.
+
+## Review cycle 2 — changes-requested (2026-11-05)
+
+- **Reviewed commit:** b4d8d9f  ·  **Base:** main (b47ba2b)  ·  **Date:** 2026-11-05
+- **Verdict:** changes-requested
+- **Cycle:** 2 of ≤3, mirroring `review.cycle` in `TECH.md`.
+
+**Mode.** A fresh blind pass over the full spec-excluded diff, which is the default for a later
+cycle, rather than a pass scoped to the cycle-1 fixes. The reviewer was not told about cycle 1's
+findings. The orchestrator checked the F1–F3 remediation separately (below). No `debate` or
+`completeness` argument was passed.
+
+**Contract drift.** `GOAL.md` has the same three commits as at cycle 1 (1615832, 8f7e96c,
+f3f09c2). The gate judge confirmed the R6 amendment (f3f09c2) at cycle-1 triage, under the
+maintainer's standing mandate. This cycle grades the amended R6.
+
+**Head.** b4d8d9f changes only `spec/` files relative to 78daf41. The reviewer confirmed that
+`git diff 78daf41 HEAD -- . ':(exclude)spec/'` is empty. The release run at 78daf41 therefore
+built the exact non-spec tree under review.
+
+### Verification run
+
+Reviewer (blind), on this macOS arm64 host:
+
+- `cargo fmt --all -- --check` → clean.
+- `cargo clippy --offline --locked --all-targets --all-features -- -D warnings` → clean.
+- `cargo test --offline --locked` → all pass:
+  - lib 101 (11 in `engine::tests`), xdu-view 5, cli_version 1, crawl 25, find 9, offline 1,
+    rm 18, version 6
+  - the probe's 4 unit tests, which now run under `cargo test`
+  - `non_utf8_directory_is_refused_before_any_sql` skips its body here, because the filesystem
+    rejects a non-UTF-8 name. It runs for real only on Linux.
+- Host `osx_arm64` leg, run end to end the way `release.yaml` runs it:
+  - one `cargo build --release --locked --target aarch64-apple-darwin --bins --example
+    extension-probe`
+  - `extension-probe manifest` → `engine=v1.4.4 platform=osx_arm64 source_id=6ddac802ff
+    extension=httpfs`
+  - `fetch.sh` → `footer: ok … sha256=9a3eef9c…`, the same hash CI's `osx_arm64` leg logged
+  - `tar … bin share lib`, with real completions and stub man pages because `scdoc` is absent
+  - `check.sh` → `extension-check: ok platform=osx_arm64 engine=v1.4.4`, rc 0
+- `check.sh` negative controls, all on copies, all rc 1. Each failed at the intended check:
+  - wrong platform; wrong engine
+  - an extra extension, a hidden stray file, a subdirectory, a missing extension, no `lib/`
+  - one byte flipped with the footer intact, which passed the footer check and then failed at
+    `LOAD`, so the signature check really runs
+  - `bin/xdu-view` not executable; a dead or wrong-version `xdu-view`
+  - the crawler copied in as `xdu-rm`; a dead `xdu`; an `xdu` printing a malformed version
+  - a dead `xdu-find`; an `xdu-find` miscounting
+  - a tool that writes under the cold `HOME`
+  - Exporting `XDU_EXTENSION_DIR` around the script did not change the verdict, so `env -i`
+    isolates it.
+- `fetch.sh` refused each bad fake-probe manifest:
+  - a failing probe, a duplicate `engine=`, an unknown platform, `extension=../evil`
+  - no extensions, an unshaped engine string, an unpublished engine version
+- `footer.sh` refused each malformed input: a short file, random bytes, a directory, the wrong
+  platform, the wrong engine, the wrong argument count, and an empty file.
+- Extension-directory drives with `extension-probe load` under a cold `HOME`, all as specified:
+  - the default directory
+  - an absolute, a relative, an empty and a missing override, and an override naming an empty
+    directory
+  - a symlinked executable, and invocation by relative path and through `PATH`
+  - the cold `HOME` stayed empty throughout
+  - Control: a plain `open_in_memory()` reports autoinstall and autoload on. It reaches for
+    `extensions.duckdb.org` and writes `.duckdb/extensions/v1.4.4/osx_arm64` into the cold `HOME`.
+  - Clippy control: a scratch crate calling `open_in_memory` under the repo's `clippy.toml` fails
+    with `disallowed_methods`.
+- `temp_index.sh` drives under a cold `HOME`:
+  - `xdu-find --count`, `-u alice` and a glob pattern all behaved
+  - `xdu-rm --dry-run --limit 2` selected the same two files that `--force --limit 2` then deleted
+  - `xdu-view`'s SQL shapes run on a refusing connection, which keeps only `core_functions` and
+    `parquet` loaded
+  - The TUI itself could not be driven, because the sandbox denies `openpty`.
+- `install.sh` with a local `curl` stand-in and no network:
+  - a plain prefix and a re-install, which leaves no temp files behind
+  - a symlinked install directory: the extension lands under the physical path, and a probe
+    reached through the symlink loads it
+  - `XDU_INSTALL` set apart from `XDU_PREFIX`
+  - an old tarball with no `lib/`, which creates no `lib`
+  - These drives needed the harness-only `mktemp` stand-in, which is the environment, not the
+    product.
+- HPCCM: specs regenerated with `uvx --from hpccm==26.5.0` into `target/` → `cmp`-identical to the
+  committed `xdu.def` and `xdu.docker`.
+- Grep of the non-spec diff for spec `R#`/`P#` ids in source: none. The only hits are the existing
+  `Found by:` convention in `issues/*.md`.
+
+Orchestrator:
+
+- **CI release run at 78daf41**, from its full log:
+  - Every job checked out `78daf41`, and `TAG` was `pr31`.
+  - Each of the four legs ends its check step on `extension-check: ok`, with
+    `platform={linux_amd64,linux_arm64,osx_arm64,osx_amd64}`, all `engine=v1.4.4`.
+  - Both Linux legs passed "Assert glibc floor", with all four binaries at most `GLIBC_2.28`.
+  - `linux_amd64` printed `boundary=ok IO Error: …`, with no abort.
+  - The log has no `##[error]` line and no publish job log, so publish was skipped on the pull
+    request.
+  - `evidence/p3-pr-run.md` quotes these lines verbatim and names this run and head.
+- `sh spec/duckdb-extension-distribution/verify/p3.sh` → `P3-GATE-GREEN`.
+- Host leg re-run independently from a snapshot of the HEAD build: `fetch.sh` (same sha256), the
+  tarball, then `check.sh` → `extension-check: ok platform=osx_arm64 engine=v1.4.4`.
+- A path containing `'` in `XDU_EXTENSION_DIR` is refused before any SQL, rc 1, with the cold
+  `HOME` left empty (finding F4).
+
+Cycle-1 remediation, checked by the orchestrator:
+
+- **F1 fixed.** `check.sh` now runs `--version` for all four shipped binaries under the cold
+  `HOME`, stdin `/dev/null`, and matches `<name> X.Y.Z`. The cycle-1 control was re-run: a
+  `bin/xdu-view` that is `#!/nonexistent/interpreter` and carries the `source_id`. It now fails
+  with `check.sh: bin/xdu-view --version did not run: …`, rc 1; at cycle 1 it passed, rc 0. The
+  loop sits before the `ok` line under `set -eu`, so every CI leg's `ok` line implies all four ran.
+- **F2 fixed.** `AGENTS.md`'s map now lists `src/engine.rs`, `examples/extension-probe.rs`,
+  `clippy.toml` and `packaging/extensions/`. Each entry matches the code: the public API of
+  `engine.rs` and the four methods `clippy.toml` disallows.
+- **F3 fixed.** The probe compares against the absolutized directory:
+  - `XDU_EXTENSION_DIR=rel` and `=./rel` both load, rc 0.
+  - A missing relative override fails naming `rel2/httpfs.duckdb_extension`, rc 1.
+  - Four unit tests cover the comparison, including a sibling directory that shares a name
+    prefix.
+
+Not observed:
+
+- The Dockerfile image build. There is no container runtime here, so it was graded by reading.
+  The Docker "Validate build" jobs at 78daf41 were reported green with the run; their logs were
+  not read in this session.
+- The Test workflow (Lint, `ubuntu-24.04`, `macos-15`, Packaging) at 78daf41. It was reported
+  green with the run; its log, including the man-page literal assertions, was not read here.
+- The man-page gate locally. `scdoc` is not installed, so no page was rendered and no literal was
+  confirmed by any form. The diff touches no `doc/*.scd` and no `src/cli.rs`, so no flag set changed
+  to compare against. The release run's Prepare job rendered every page, but that shows exit 0
+  only.
+- The `linux_amd64`, `linux_arm64` and `osx_amd64` legs locally. They are graded from the CI log.
+
+### Requirement → evidence matrix
+
+| R-ID | Implemented by | Verified how (and by whom) | Status |
+|------|----------------|----------------------------|--------|
+| R1 | `engine::PINNED_EXTENSIONS` (a list); probe `manifest`; `fetch.sh`, `footer.sh`; `check.sh` exact-set, footer and `source_id` checks; `release.yaml` fetch → `tar … bin share lib` → check before upload; publish needs both build jobs and skips pull requests | Reviewer: host leg, plus platform, engine, set and signature negative controls. Orchestrator: four-leg CI log at 78daf41, all `engine=v1.4.4`, and the evidence file. | ✅ |
+| R2 | `AGENTS.md` layout contract, `invariants.md` §13, `install.sh`, `hpccm/xdu.py`, `Dockerfile`, `.dockerignore` | Reviewer: `install.sh` drives (plain, re-install, symlinked, split prefix, old tarball); HPCCM specs regenerated `cmp`-identical; Dockerfile by reading. Orchestrator: Docker CI reported, not read. | ✅ (Dockerfile by reading) |
+| R3 | `engine::open_connection`, `extension_dir`, `load_extension_from`; `clippy.toml` | Reviewer: override, relative and symlink drives under a cold `HOME`; autoload on/off control; clippy control. Orchestrator: relative-override drives. | ✅ |
+| R4 | `engine::load_extension_from` absent-file branch | Reviewer: missing and empty overrides and no `lib/` fail naming the path and "does not download"; the missing directory is not created. Orchestrator: missing relative override. | ✅ |
+| R5 | readers open through `engine::open_connection`; none loads an extension | Reviewer: `offline_tests` 1/1; throwaway-index drives under a cold `HOME`; reader SQL on a refusing connection. | ✅ |
+| R6 | `release.yaml`, one build invocation for bins and probe; `check.sh` on the exact tarball: probe load from the extracted layout, `--version` of all four binaries, and `xdu`/`xdu-find`/`xdu-rm` drives, all under `env -i HOME=<cold>` | (a) and (b): Reviewer, host leg and exec negative controls. Orchestrator: four-leg CI log; the cycle-1 F1 control now fails. | ✅ |
+
+Unmapped changes. None of these blocks the cycle.
+
+- The cycle-1 items carry over:
+  - `test.yaml` and the `aarch64-apple-darwin` release leg move to `macos-15`.
+  - `release.yaml` gains a read-only `pull_request` trigger.
+  - The deferral records in `ROADMAP.md` and `issues/`.
+- New this cycle:
+  - The `AGENTS.md` map gains a `packaging/rpm/` line for a directory that already exists on
+    `main`.
+  - `README.md` describes `XDU_EXTENSION_DIR` and `cargo install` builds. They are operator-facing,
+    although the loader is library-only this cycle.
+
+### Findings
+
+#### [HIGH/CONFIRMED] F4: the DuckDB injection invariant does not name the extension path this diff sends to SQL
+- **Where:** `.agents/factory/invariants.md` §5 and `AGENTS.md` load-bearing invariant 5
+  (`AGENTS.md:461-463`). The new surface is `src/engine.rs:139`, `LOAD '{literal}'`.
+- **Failure scenario:** The diff adds a new operator-controlled value that reaches SQL. The
+  extension path comes from `XDU_EXTENSION_DIR` or from the canonical executable path, and is
+  interpolated into `LOAD`. Both invariant texts still bound the surface to `read_parquet(...)` and
+  `WHERE`/`LIKE`, list `--pattern`, `--partition` and the index path, and §5 is headed "(all
+  readers)". A later cycle that walks §5 to decide whether its change touches the injection surface
+  is not pointed at `engine.rs`. The S3 cycle will extend that module. A regression there would then
+  not be read as a §5 violation, so it would get no auto-CRITICAL and no human gate. The code is
+  safe today: `load_extension_from` refuses a `'` or non-UTF-8 path before any SQL, and a unit test
+  covers it.
+- **Evidence:**
+  - `grep -nE 'LOAD|XDU_EXTENSION_DIR|engine' .agents/factory/invariants.md` matches only §13's
+    layout bullet (line 244), nothing in §5.
+  - `AGENTS.md:461` reads "Every user value reaching `read_parquet(...)`/`WHERE` is an injection
+    surface."
+  - `git grep -nE 'format!\(.*(LOAD|SET|INSTALL|PRAGMA)' -- src examples` finds the `LOAD` at
+    `engine.rs:139`, plus a `SET` inside the test module.
+  - Running `extension-probe load` with `XDU_EXTENSION_DIR=…/it's` prints "refusing to load DuckDB
+    extension from a path containing a single quote", rc 1. The env var does reach that guard.
+  - Reproduced by both the reviewer and the orchestrator.
+- **Severity:** The reviewer proposed MEDIUM, noting that a strict reading gives HIGH. The rubric
+  rates as HIGH any drift that degrades a gate through text in `invariants.md` or an `AGENTS.md`
+  load-bearing invariant, which is where this sits. §5 also decides the human gate, so HIGH stands.
+- **Touches invariant / requirement:** rubric scope 5, operating-manual drift, against §5. It is
+  not a §5 violation in code.
+- **Remediation:** documentation only. In one commit, keeping the two files in lockstep, amend §5
+  and `AGENTS.md` invariant 5 so the surface includes the extension path that reaches `LOAD`. Name
+  its sources (`XDU_EXTENSION_DIR`, the canonical executable path) and the rule held at
+  `engine::load_extension_from`: refuse `'` and non-UTF-8 before any SQL. No release-path input
+  changes, so the 78daf41 CI evidence stays valid.
+
+No other candidate survived refutation. The reviewer dropped four by executed check:
+
+- `install.sh` with a root-level `XDU_INSTALL`
+- HPCCM with an empty prefix
+- `docker.yaml`'s path list without `src/engine.rs`, which the release pull-request legs cover
+- the probe panicking on a closed pipe, which is release-time only
+
+### Human-gate triggers
+
+- **Triggered, on a literal reading.** F4 is CONFIRMED and concerns the §5 SQL-injection
+  invariant, one of the four that always require sign-off. No high-blast-radius file is
+  implicated. The diff changes `src/bin/xdu-rm.rs` and `src/lib.rs` only by swapping the
+  connection constructor and declaring the module. The reviewer drove `xdu-rm` with `--dry-run`
+  and then with `--force`, both with `--limit`, and the two runs selected identical rows. The
+  sign-off is for the §5 text amendment; the code path is safe as built.
+- Cycle 2 of ≤3. A third cycle is the last before escalation.
