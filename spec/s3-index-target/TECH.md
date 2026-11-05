@@ -94,7 +94,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: pending
+  status: in_progress
   satisfies:
   - R9
   - R10
@@ -563,10 +563,16 @@ runs long, P4 is dropped through a GOAL amendment (never silently), and P5 still
 **Goal:** the whole suite green with nothing ignored, the man-page gate asserting every new literal
 by count, and every deferral recorded.
 
-- [ ] Run the full suite through `verify/wire.sh "" 34`: every listed test passed.
-- [ ] Re-derive every new literal count on all four pages from the rendered text; confirm the CI
+- [x] Run the full suite through `verify/wire.sh "" 34`: every listed test passed.
+  *Run A:* 41 of 41 locally; the workflow's minimum is 41, the listed count.
+- [x] Re-derive every new literal count on all four pages from the rendered text; confirm the CI
   list and `AGENTS.md` agree (§13).
-- [ ] **Deferral ledger.** Walk P1–P4's bodies and commits for "do not fix here", "known
+  *Run A:* scdoc is not installed here, so no page was rendered. Every `check` spec in the
+  workflow (51 across the four pages) was re-derived from the `.scd` sources with markup and
+  whitespace stripped, as CI normalizes the render: every count and presence matches. `AGENTS.md`
+  names the same counted classes (`XDU_INDEX`, `XDU_JOBS`, `XDU_EXTENSION_DIR`, the `AWS_*`
+  names, `xdu.1`'s two `s3://BUCKET/PREFIX`). The Packaging job is the proof.
+- [x] **Deferral ledger.** Walk P1–P4's bodies and commits for "do not fix here", "known
   limitation", "follow-up", "deferred". Each must have an `issues/` file (from
   `templates/ISSUE.md`) and a `ROADMAP.md` entry. At minimum:
   `issues/s3-index-rm.md`, `issues/s3-credential-chain.md`,
@@ -581,7 +587,19 @@ by count, and every deferral recorded.
   refuses a top-level directory with a non-ASCII name, because object_store percent-encodes it
   in a key; building keys raw would admit such names, but needs a reader-parity wire test first,
   since httpfs's handling of non-ASCII keys is unprobed.
-- [ ] If P4 was cut by amendment, record `issues/s3-index-view.md` and its ROADMAP entry here.
+  *Run A:* the walk of P1–P4's bodies, PLAN, GOAL and the branch's commits found no deferral
+  beyond the six named here. Filed from the template, each with a `ROADMAP.md` entry:
+  `issues/s3-index-rm.md`, `issues/s3-credential-chain.md`, `issues/s3-proxy-support.md`,
+  `issues/s3-non-ascii-partition-names.md`, `issues/local-reader-bound-parameters.md` (which also
+  carries P4's two local-SQL findings: a `'` in a directory name breaks a local `xdu-view`
+  listing, and the list and tree directory statements can share one builder once local SQL is
+  rewritten) and `issues/duckdb-debug-build-integral-assertion.md`. The S3 entries sit after `S3
+  as a crawl source`; the engine one sits after the macOS SDK entry. The `S3 as an index target`
+  entry now points at `spec/s3-index-target/` and its deferrals; its seed keeps its `shaped`
+  status until the cycle lands. Before the ledger, `origin/main` (`a0cdd95`, PR #32) was merged
+  into the branch; it applied cleanly.
+- [x] If P4 was cut by amendment, record `issues/s3-index-view.md` and its ROADMAP entry here.
+  *Run A:* not cut; nothing to record.
 - **Run B evidence:** test legs as above with N ≥ 34 (the final `<min>` in the workflow equals the
   listed count); the Packaging job's literal step green on all four pages.
 - **Verify:** see frontmatter.

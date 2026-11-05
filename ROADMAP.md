@@ -42,7 +42,7 @@ range requests: measured against an 80.1 MiB index, `--count` moved 0.13 MiB and
 3.94 MiB, where a staging design pays the full 80.1 MiB every time. The intention is that a query
 costs what the query asks for, not what the index weighs.
 
-*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: —*
+*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: in flight as a pilot (build into a bucket; `xdu-find` and `xdu-view` query in place) — see `spec/s3-index-target/`; its deferrals are the five entries after `S3 as a crawl source` and the debug-build DuckDB entry*
 **Seed:** [`issues/s3-index-target.md`](issues/s3-index-target.md)
 
 ## S3 as a crawl source
@@ -57,6 +57,61 @@ no atime — the Unix-only/no-atime assumption no longer holds for every backend
 
 *Horizon: long-term · Depends on: crawler-source abstraction; expect dedicated research + sub-phases · Refs: —*
 **Seed:** [`issues/s3-crawl-source.md`](issues/s3-crawl-source.md)
+
+## `xdu-rm` against an index in S3
+
+The S3 pilot builds an index into a bucket and lets `xdu-find` and `xdu-view` query it in place, but
+`xdu-rm` refuses an `s3://` locator before it reads anything. An operator who keeps one central index
+still needs a local copy of it to run a guarded bulk delete. The deletions stay local; what is missing
+is reading the index in place under every one of `xdu-rm`'s destructive gates unchanged, which is
+high-blast work on the one tool that deletes files.
+
+*Horizon: mid-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL non-goals, R8)*
+**Seed:** [`issues/s3-index-rm.md`](issues/s3-index-rm.md)
+
+## S3 credentials beyond environment variables and the shared files
+
+xdu's one credential resolver reads the `AWS_*` variables and the shared credentials and config files,
+and nothing else. Instance metadata, SSO caches, web identity, `credential_process` and assumed roles
+are missing, so an operator whose credentials come from one of those must export static keys first.
+Any widening has to stay in the one resolver, so the writer and the readers keep resolving the same
+identity, and has to settle whether DuckDB's `credential_chain` (the separate `aws` extension) earns a
+place in the pinned set.
+
+*Horizon: mid-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL non-goals)*
+**Seed:** [`issues/s3-credential-chain.md`](issues/s3-credential-chain.md)
+
+## S3 traffic through an HTTP proxy
+
+Neither direction of the S3 support uses a proxy: the bundled DuckDB ignores `HTTP(S)_PROXY`, and the
+writer's client is built with the proxy turned off so that writer and readers cannot take different
+routes. A site that reaches its object store only through a proxy cannot use an S3 index. The fix is
+one proxy configuration that reaches both directions.
+
+*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (PLAN deviation 6)*
+**Seed:** [`issues/s3-proxy-support.md`](issues/s3-proxy-support.md)
+
+## Index non-ASCII top-level directories into S3
+
+`xdu -o s3://…` refuses a top-level directory with a non-ASCII name, because the writer's client
+percent-encodes such a name in the key and the readers' glob would no longer match it. A local build
+of the same tree works. Building keys raw would admit these names, but only after a reader-parity
+wire test shows how `httpfs` lists and reports such keys.
+
+*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (TECH P3, foreman ruling at P3 run B)*
+**Seed:** [`issues/s3-non-ascii-partition-names.md`](issues/s3-non-ascii-partition-names.md)
+
+## Bind the index path and partition names in local-index reader SQL
+
+For an S3 index, nothing a locator, a partition name or a directory prefix carries reaches SQL as
+text. For a local index all three still do (invariant §5's known exception), so a `'` in an index
+path, a partition name or a directory name fails the query with a parser error, and `xdu-view`
+cannot list such a directory locally although it can over S3. In `xdu-rm` the text after such a
+quote would be SQL. Binding them retires the exception, at the cost of rewriting every local reader
+statement, `xdu-rm`'s included.
+
+*Horizon: near-term · Depends on: — · Refs: `spec/s3-index-target/` (GOAL non-goals, the R6 clarification)*
+**Seed:** [`issues/local-reader-bound-parameters.md`](issues/local-reader-bound-parameters.md)
 
 ## Index layout, declared by the operator
 
@@ -502,6 +557,17 @@ move to SDK 27, every macOS leg, the release build included, goes red without a 
 
 *Horizon: near-term · Depends on: — (an engine bump re-pins the shipped extensions) · Refs: —*
 **Seed:** [`issues/macos-sdk27-bundled-duckdb-build.md`](issues/macos-sdk27-bundled-duckdb-build.md)
+
+## A debug build aborts on one local query inside the bundled DuckDB
+
+A debug build of `xdu-find` aborts with `Assertion failed: (min_val <= input)` in the bundled
+engine's `compress_integral.cpp` on one local query shape (partition scope, a size filter and a size
+sort over a fixture of distinct sizes); the release build answers it correctly. Tests run debug
+binaries, so a test over that shape kills the test binary, and the S3 parity tests avoid the
+combination for now.
+
+*Horizon: near-term · Depends on: — (an engine bump re-pins the shipped extensions) · Refs: `spec/s3-index-target/` (TECH P2)*
+**Seed:** [`issues/duckdb-debug-build-integral-assertion.md`](issues/duckdb-debug-build-integral-assertion.md)
 
 ## Native OS packages (DEB / RPM)
 
