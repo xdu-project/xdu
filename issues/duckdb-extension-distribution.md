@@ -1,5 +1,5 @@
 ---
-status: unshaped
+status: shaped on feature/duckdb-extension-distribution (2026-11-04) — see spec/duckdb-extension-distribution/GOAL.md
 kind: feature
 appetite: small
 ---
