@@ -19,7 +19,13 @@ for b in xdu xdu-find xdu-view xdu-rm; do cp "$TD/$T/release/$b" "$S/staging/bin
 # The leg as the workflow runs it: fetch, assemble, check.
 sh packaging/extensions/fetch.sh "$P" "$S/staging/lib/xdu/extensions"
 tar czf "$S/good.tar.gz" -C "$S/staging" bin share lib
-sh packaging/extensions/check.sh "$S/good.tar.gz" "$P"
+out=$(sh packaging/extensions/check.sh "$S/good.tar.gz" "$P")
+printf '%s\n' "$out"
+# The last line is the per-leg evidence P3's run B reads from each CI log.
+last=$(printf '%s\n' "$out" | tail -n 1)
+E0=$("$P" manifest | sed -n 's/^engine=//p')
+PL0=$("$P" manifest | sed -n 's/^platform=//p')
+[ "$last" = "extension-check: ok platform=$PL0 engine=$E0" ]
 # A hostile environment must not change the verdict: check.sh runs everything under env -i.
 XDU_EXTENSION_DIR="$S/nowhere" http_proxy='http://127.0.0.1:9' https_proxy='http://127.0.0.1:9' \
     sh packaging/extensions/check.sh "$S/good.tar.gz" "$P"

@@ -1,7 +1,7 @@
 """P3 gate: the release and CI workflows carry the extension steps in an order that cannot publish
 an unchecked tarball. Structural only; the per-leg evidence is the pull request's own run.
 
-Run: uv run --with pyyaml python spec/duckdb-extension-distribution/verify/p3.py
+Run through verify/p3.sh, which gives uv sandbox-safe cache directories.
 """
 
 import sys

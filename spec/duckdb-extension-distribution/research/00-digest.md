@@ -12,7 +12,7 @@ records what each decided and where it landed.
 | Fetch from `extensions.duckdb.org/<engine>/<platform>/`, with the engine and platform reported by the leg's own build, not a Rust-triple table | PLAN §2.3, §2.4 |
 | The 512-byte footer is the static check (magic `4`, then platform and version at fixed offsets) | PLAN §2.4 `footer.sh` |
 | No `-rdynamic` or export work: `httpfs` imports no `duckdb::` symbols | PLAN §4 |
-| R6's loader is a same-build Cargo example, not a shipped binary. This touches R6's wording and is flagged to the foreman | PLAN §3 deviation row 1 |
+| R6's loader is a same-build Cargo example, not a shipped binary. This touched R6's wording; GOAL R6 was amended to match (Clarification 4, 2026-11-05) | PLAN §2.3, §2.4; GOAL R6 |
 | Exercise the engine/extension C++ boundary, not just `LOAD` (the `linux_amd64` static-`libstdc++` risk) | PLAN §2.3 step 4 |
 | `macos-14` is retired: Apple legs move to `macos-15` / `macos-15-intel` (native, no Rosetta) | PLAN §2.5, deviation row 3 |
 | No hash pin. Engine and platform are what the GOAL pins, and the signature is checked at `LOAD` | PLAN §5 |

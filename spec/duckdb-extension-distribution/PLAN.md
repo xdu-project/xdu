@@ -1,6 +1,6 @@
 # PLAN — Ship DuckDB extensions instead of downloading them
 
-> **Status:** Draft for review · **Last updated:** 2026-11-04
+> **Status:** Draft for review · **Last updated:** 2026-11-05
 > **Authoritative technical design.** The *how*. Vision/contract is [`GOAL.md`](GOAL.md);
 > the phased executable roadmap is [`TECH.md`](TECH.md). Backing detail is in
 > [`research/`](research/). Every design element traces to a GOAL R-ID.
@@ -131,6 +131,8 @@ how `gen-completions` gets installed today). It has two modes and uses only `xdu
      `HOME`, the extracted `bin/xdu-find --count` must print `3` and `bin/xdu-rm --pattern '*.log'
      --dry-run` must report its two matches, as `tests/offline_tests.rs` does.
   6. The cold `HOME` is still empty.
+  7. The last line is `extension-check: ok platform=<platform> engine=<engine>`. Run B of P3 reads it
+     from each leg's log as the per-leg evidence.
 
 ### 2.5 Release and CI workflows
 
@@ -193,7 +195,7 @@ how `gen-completions` gets installed today). It has two modes and uses only `xdu
 | R3   | `engine::open_connection` (autoinstall/autoload off); `load_extension` by absolute path from `extension_dir()` (exe-relative, `XDU_EXTENSION_DIR` override); no write under `$HOME` asserted by `check.sh` |
 | R4   | `load_extension_from` refuses an absent file with the full path, before any `LOAD`; unit test plus `check.sh` negative control |
 | R5   | all three readers open through `open_connection`, enforced by `clippy.toml` `disallowed-methods`; no reader calls `load_extension`; refusal unit test (local `json` trigger fails, no install), repeated by the probe on every release leg; `tests/offline_tests.rs` unchanged and green |
-| R6   | `check.sh` on every leg, on the extracted tarball, under a cold `HOME` with autoinstall off, via a probe from the same build; Linux legs inside manylinux_2_28; run on PRs |
+| R6   | On every leg, before upload, `check.sh` on the extracted tarball under one cold `HOME`, with autoinstall off and asserted: (a) steps 2–3, the probe from the same `cargo build` invocation, run from the extracted `bin/`, loads the shipped extension; (b) step 5, the extracted `xdu`, `xdu-find` and `xdu-rm` run. Linux legs inside manylinux_2_28. Observed on all four legs on the draft PR before review (TECH P3 run B) |
 
 ## 3. Invariant gate (AGENTS.md constitution check)
 
@@ -222,9 +224,11 @@ fundamentally at odds. Gate #2 (this design):
 
 ### Deviation justifications
 
+R6's subject was a question at the plan gate. GOAL R6 was amended to the same-build-probe reading
+(Clarification 4, 2026-11-05), so it is no longer a deviation.
+
 | Deviation | Why needed | Simpler alternative rejected because |
 |-----------|-----------|--------------------------------------|
-| **[QUESTION — touches R6's wording]** R6's load is performed by a probe (`examples/extension-probe`) built in the same `cargo build` as the tarball binaries and run from the extracted tarball's `bin/`, not by the four tarball binaries themselves. The shipped binaries are tied in structurally (one `cargo build` invocation, probe taken from that leg's `target/<target>/release/examples/`), by the engine-version `source_id` check, and by driving the extracted `xdu`/`xdu-find`/`xdu-rm` under the same cold `HOME`. | No shipped binary can load an extension this cycle without breaking another commitment: the loader is library-only (Clarification 3, non-goal "operator-visible diagnostic") and the reader path must load nothing (R5). | (a) A hidden flag or subcommand in a shipped binary is an operator-visible diagnostic and drags in §10's man-page obligation. (b) An env-var hook that makes a reader load the set puts a non-static load on the local query path, against R5. If the foreman reads R6's "the binaries in that leg's tarball" as satisfied by the same-build engine run from the tarball layout, no GOAL change is needed; if not, R6 or Clarification 3 has to move. |
 | `release.yaml` gains a path-filtered `pull_request` trigger; `publish` is skipped on PRs; `TAG` gets a PR fallback. *Does not change any R-ID.* | Without it R6 and R1 run for the first time at a real release, and the spike's claim 13 (the one R6 exists to close) is never observed before merge. No container runtime on the planning host can stand in for the Linux legs. | A `workflow_dispatch` dry-run input checks out `inputs.tag`, so it would build the tag rather than the branch, and dispatching it is an outbound action the build step cannot take on its own. The `docker.yaml` PR guardrail is the precedent followed. |
 | Apple legs and the `test.yaml` macOS host move from `macos-14` to `macos-15` / `macos-15-intel`. *Does not change any R-ID; not a new leg.* | `macos-14` retired from GitHub Actions on 2026-11-02, so those jobs currently get no runner and R6 cannot run on them. | Staying on `macos-14` leaves R1 and R6 unrunnable on two of four legs. Cross-building `x86_64-apple-darwin` on arm64 would make its check depend on Rosetta, which the runner images do not document. |
 
@@ -250,10 +254,12 @@ fundamentally at odds. Gate #2 (this design):
 
 ## 5. Risks & open questions
 
-- **R6's subject** (deviation row 1) needs the foreman's reading before build.
+- **R6's subject:** resolved by the GOAL amendment (Clarification 4); the design is unchanged.
 - **When the Linux evidence exists.** The two manylinux legs first run on the pull request.
-  `xdu-review` grades R6 from the macOS-host run in P2 plus the PR run's per-leg logs. Pushing the
-  branch and opening that PR is a human-approved act, not something a build phase does.
+  P3 is therefore split into two runs (TECH P3). Run A builds the workflows and passes the
+  structural gate, then hands back. The foreman pushes the branch and opens a draft PR. Run B
+  records the four legs' `check.sh` results and closes P3, so `xdu-review` grades R6 on observed
+  per-leg logs. Neither run pushes or calls `gh`.
 - **Mixed C++ runtimes on `linux_amd64`.** The `httpfs` boundary query in `load` is the mitigation.
   If it aborts in the manylinux leg, the fix is in `.cargo/config.toml`, which gets its own decision
   rather than a silent edit.
@@ -293,8 +299,8 @@ fundamentally at odds. Gate #2 (this design):
 - **P3:** structural assertions on the parsed workflow YAML: step order fetch → assemble → check →
   upload, `lib` in the tar members, no `if:`/`continue-on-error` on fetch or check, the same
   tarball path in check and upload, the probe taken from `target/<target>/release/examples/`,
-  runner labels, the publish guard, the PR trigger's paths and its PR-only cancellation. R6's
-  four-leg evidence is the PR run.
+  runner labels, the publish guard, the PR trigger's paths and its PR-only cancellation (run A).
+  R6's four-leg evidence is the draft PR's run, recorded and gated in run B.
 - **P4:** `install.sh` driven end to end through a `curl` shim that serves the P2 tarball and its
   `SHA256SUMS`, in three layouts: `XDU_INSTALL` outside `XDU_PREFIX`, a second install over the
   first (the upgrade path), and a symlinked install directory. After each, the probe, copied

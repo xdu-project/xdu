@@ -81,6 +81,10 @@ would. Two cheap checks tie its evidence to the shipped binaries. The engine's `
 the `source_id` string survives `strip` plus LTO is *inferred*: it is reachable from the
 `version()` builtin. P2 confirms it on the host before the workflow relies on it.
 
+*Resolved at the plan gate, 2026-11-05:* GOAL R6 was amended to exactly this reading (Clarification
+4). The extension loads into a same-build engine run from the extracted layout, and the shipped
+binaries run separately under the same cold `HOME`.
+
 A Cargo **example** is the right home for the probe rather than a `[[bin]]`: `cargo install`
 installs every bin target (it already installs `gen-completions`), but never an example.
 

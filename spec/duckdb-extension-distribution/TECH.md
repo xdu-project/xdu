@@ -7,7 +7,7 @@ status: in_progress
 branch: feature/duckdb-extension-distribution
 base: main
 current_phase: P1
-last_updated: "2026-11-04"
+last_updated: "2026-11-05"
 phases:
   - id: P1
     name: "Engine module: connections refuse autoload; extensions load by path or fail naming it"
@@ -35,7 +35,7 @@ phases:
     parallel: false
     hammerable: false
     hill: uphill
-    verify: "uv run --with pyyaml python spec/duckdb-extension-distribution/verify/p3.py"
+    verify: "sh spec/duckdb-extension-distribution/verify/p3.sh"
   - id: P4
     name: "Install channels and the recorded layout contract; deferral ledger"
     status: pending
@@ -64,7 +64,7 @@ the per-phase checklists below are the work. `xdu-build` executes the next actio
 - **Vision / requirements (locked):** [`GOAL.md`](GOAL.md) — R-IDs are the contract.
 - **Authoritative design:** [`PLAN.md`](PLAN.md).
 - **Backing research:** [`research/00-digest.md`](research/00-digest.md) + briefs.
-- **Gate scripts:** `verify/p2.sh`, `verify/p3.py` and `verify/p4.sh` were written at plan time,
+- **Gate scripts:** `verify/p2.sh`, `verify/p3.sh` (+ `p3.py`) and `verify/p4.sh` were written at plan time,
   before the code they drive. A phase may fix a bug in its gate script only with the reason in the
   commit body, and never by weakening a control that must go red.
 
@@ -84,7 +84,11 @@ nothing here departs from it.
 - **No CLI change in this cycle**, so no `doc/*.scd` change and no edit to the CI literal list. If a
   phase finds it needs one, stop and escalate: that would be an operator-visible diagnostic, which
   is a non-goal.
-- **Network.** P2 and P4 fetch from `extensions.duckdb.org`; nothing else in the build needs it.
+- **Network.** P2 and P4 fetch from `extensions.duckdb.org`. P3's gate fetches `pyyaml` through
+  `uv` (`pypi.org`, `files.pythonhosted.org`) into fresh cache dirs under `$TMPDIR`. Nothing else
+  needs it.
+- **No push, no `gh`.** No phase pushes, opens a PR, or calls `gh`. P3's external wait is handed
+  back to the foreman (run A / run B below).
 - **No `spec/` ids in source, comments, scripts or workflow files.**
 
 ---
@@ -127,7 +131,7 @@ as before.
   `src/bin/xdu-rm.rs`, `src/bin/xdu-view.rs`.
 
 ## Phase P2 — Probe and scripts, on the host leg
-**Satisfies:** R1, R3, R4, R6 (mechanism; the four-leg run is P3's PR) · **Depends on:** P1
+**Satisfies:** R1, R3, R4, R6 (mechanism on the host leg; the four-leg run is P3 run B) · **Depends on:** P1
 **Goal:** the host can do exactly what a release leg will do: build, fetch the pinned set for its
 own engine and platform, assemble, and pass the cold-`HOME` load check. Every control that must go
 red does.
@@ -145,7 +149,9 @@ red does.
       members must equal the manifest set. Add the three R4 negative controls (existing empty
       override, missing override, `lib/` removed), each matching the loader's wording and the
       exact path, and drive `xdu-rm --dry-run` beside `xdu-find --count`. Put scratch in a
-      self-cleaning `mktemp -d` resolved with `pwd -P`.
+      self-cleaning `mktemp -d` resolved with `pwd -P`. `check.sh` ends by printing
+      `extension-check: ok platform=<platform> engine=<engine>` as its last line, and nothing
+      after it. P3 run B reads that line from each CI log.
 - [ ] Confirm on the host's release build that the manifest's `source_id` occurs in `xdu-find`,
       `xdu-view` and `xdu-rm` after `strip` + LTO. **If it does not, stop and escalate.** Do not
       drop the check or swap in a weaker one. Name it what it is in comments: an engine-*version*
@@ -163,7 +169,27 @@ red does.
 ## Phase P3 — Release and CI workflows
 **Satisfies:** R1, R6 · **Depends on:** P2
 **Goal:** every release leg fetches, ships and checks the pinned set before upload; the workflows
-run on runners that exist; the PR exercises all four legs without publishing.
+run on runners that exist; a draft PR exercises all four legs without publishing, and their
+results are recorded before review.
+
+P3 waits on something outside the build, so it runs twice. **Neither run pushes, opens a PR, or
+calls `gh`.**
+
+- **Run A** does the checklist below, then runs `sh spec/duckdb-extension-distribution/verify/p3.sh
+  structural` (must print `P3-RUN-A-GREEN`). It commits the code with P3 left `in_progress`
+  (`set_phase.py --phase P3 --phase-status in_progress --hill crest`), then **hands back** to the foreman.
+  It does not mark P3 done. The foreman pushes the branch and opens a draft PR, which triggers
+  `release.yaml` on all four legs. P4 does not depend on P3, so the foreman may dispatch it while the
+  legs run.
+- **Run B** is resumed by the foreman with the run's URL and the four legs' logs (or the lines from
+  them). It writes `spec/duckdb-extension-distribution/evidence/p3-pr-run.md`, which holds:
+  - `run: <actions run URL>`;
+  - `head: <sha the run built>`, which must be an ancestor of `HEAD`;
+  - one line per leg, `<target>: <the leg's final check.sh line>`, copied verbatim.
+
+  It then runs the full gate `sh spec/duckdb-extension-distribution/verify/p3.sh` and marks P3
+  `done`. If any leg is red, run B does not mark P3 done. It records the failing leg's output in
+  the evidence file, sets `--blocked-reason`, and hands back. A fix is a new run A.
 
 - [ ] `release.yaml` both build jobs (PLAN §2.5): one locked build of `--bins --example
       extension-probe`; a fetch step (Linux: after the glibc-floor step); assemble tars
@@ -179,11 +205,13 @@ run on runners that exist; the PR exercises all four legs without publishing.
       `if:` and no `continue-on-error`.
 - [ ] `test.yaml`: `macos-14` → `macos-15`. `docker.yaml`: add `examples/**` and
       `packaging/extensions/**` to the PR paths.
-- **Verify:** `uv run --with pyyaml python spec/duckdb-extension-distribution/verify/p3.py`
-  (structure and order). **R6's four-leg evidence is the pull request's run**, which a human opens.
-  `xdu-review` grades R6 from P2's host run plus that run's per-leg `check.sh` logs, and treats R6 as
-  open until the logs exist.
-- **Touches:** `.github/workflows/{release,test,docker}.yaml`.
+- **Verify:** `sh spec/duckdb-extension-distribution/verify/p3.sh`. In run A, only its
+  `structural` mode is expected to pass. In run B, the full gate also requires the evidence file:
+  one passing `check.sh` line per leg, with the platform matching its target, a single engine
+  version across legs, and a `head` sha on this branch. `xdu-review` grades R6 from that file plus
+  P2's host run.
+- **Touches:** `.github/workflows/{release,test,docker}.yaml`; run B adds
+  `spec/duckdb-extension-distribution/evidence/p3-pr-run.md`.
 
 ## Phase P4 — Install channels, the contract, the deferral ledger
 **Satisfies:** R2 · **Depends on:** P2
