@@ -64,6 +64,6 @@ spec and its companions, and a tooling-mandated top-level `debian/` when the DEB
   with R1's no-network builders. Building distro packages from the release tarball (R3) would
   carry `lib/xdu/extensions/` for free; whichever route is chosen, R7 is the requirement.
 - Related: GitHub issue #5; PR #12 (COPR-style first pass); `packaging/rpm/xdu.spec`;
-  [`duckdb-extension-distribution.md`](duckdb-extension-distribution.md), which set the layout.
+  `spec/duckdb-extension-distribution/` (on `main` since #31), which set the layout.
 - License posture helps: MIT with no bundled-exception baggage beyond DuckDB.
 - Found by: original roadmap; re-aimed at official repos 2026-09-07.

@@ -49,7 +49,7 @@ look for them, the same way the repository's own `Dockerfile` and every release 
 
 ## Notes
 
-- Related: [`duckdb-extension-distribution.md`](duckdb-extension-distribution.md) (the layout);
+- Related: `spec/duckdb-extension-distribution/` (the layout, on `main` since #31);
   `hpccm/xdu.py`; the `Dockerfile`'s runtime-stage `test -f`, which is the same guard for the
   repository's own image.
 - The pinned set is a list (`xdu::engine::PINNED_EXTENSIONS`). If a later cycle adds an extension,

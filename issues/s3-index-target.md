@@ -60,10 +60,10 @@ not for the index.
 
 ## Notes
 
-- **Depends on [`duckdb-extension-distribution.md`](duckdb-extension-distribution.md).** `httpfs`
-  cannot be statically linked — the vendored amalgamation carries sources for `core_functions`,
-  `parquet` and `json` only — so it has to arrive as a shipped binary rather than a runtime
-  download. That seed is prerequisite and has a second consumer.
+- **The shipped-extensions prerequisite is met, on `main` since #31** (record in
+  `spec/duckdb-extension-distribution/`). `httpfs` cannot be statically linked — the vendored
+  amalgamation carries sources for `core_functions`, `parquet` and `json` only — so it arrives as a
+  shipped binary rather than a runtime download.
 - **What the extension-distribution cycle left for this one.** It shipped `httpfs` in every release
   tarball at `lib/xdu/extensions/` and a library loader (`xdu::engine::load_extension`), but no CLI
   path loads an extension yet, so two operator-facing pieces wait for the first one that does, which
