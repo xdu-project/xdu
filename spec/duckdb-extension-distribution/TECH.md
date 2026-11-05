@@ -6,7 +6,7 @@ appetite: small
 status: in_progress
 branch: feature/duckdb-extension-distribution
 base: main
-current_phase: P2
+current_phase: P3
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -29,7 +29,7 @@ phases:
     src/bin/xdu-view.rs; do grep -qF ''open_connection'' $f; done; echo P1-GATE-GREEN'
 - id: P2
   name: Probe, fetch and check scripts, proven on the host's own release leg
-  status: pending
+  status: done
   satisfies:
   - R1
   - R3
@@ -155,13 +155,13 @@ as before.
 own engine and platform, assemble, and pass the cold-`HOME` load check. Every control that must go
 red does.
 
-- [ ] `examples/extension-probe.rs` (PLAN §2.3). `manifest` validates its own field shapes and
+- [x] `examples/extension-probe.rs` (PLAN §2.3). `manifest` validates its own field shapes and
       refuses an empty set. `load` uses **one** connection throughout: the settings read false, the
       `'{}'::JSON` refusal shows the autoload-off hint, each pinned extension is loaded and printed
       as `loaded=<name> <path>`, and a `read_parquet` against `http://127.0.0.1:9/x.parquet` fails
       with `httpfs`'s own connection error. Any `autoload` / `INSTALL` / `requires the extension`
       wording is a failure. Exit non-zero on any miss, with the reason on stderr.
-- [ ] `packaging/extensions/footer.sh`, `fetch.sh`, `check.sh` (PLAN §2.4). Write them in POSIX `sh`
+- [x] `packaging/extensions/footer.sh`, `fetch.sh`, `check.sh` (PLAN §2.4). Write them in POSIX `sh`
       with `set -eu` and one assertion per line, because under `set -e` neither an `&&` list nor a
       `!` command stops the script. Capture the manifest by assignment, never `for x in $(…)`. Run
       every probe and reader under `env -i PATH="$PATH" HOME="$cold"`. The `lib/xdu/extensions`
@@ -171,11 +171,11 @@ red does.
       self-cleaning `mktemp -d` resolved with `pwd -P`. `check.sh` ends by printing
       `extension-check: ok platform=<platform> engine=<engine>` as its last line, and nothing
       after it. P3 run B reads that line from each CI log.
-- [ ] Confirm on the host's release build that the manifest's `source_id` occurs in `xdu-find`,
+- [x] Confirm on the host's release build that the manifest's `source_id` occurs in `xdu-find`,
       `xdu-view` and `xdu-rm` after `strip` + LTO. **If it does not, stop and escalate.** Do not
       drop the check or swap in a weaker one. Name it what it is in comments: an engine-*version*
       tie (PLAN §5).
-- [ ] Confirm `load` leaves no file under the cold `HOME`, including any secrets directory `httpfs`
+- [x] Confirm `load` leaves no file under the cold `HOME`, including any secrets directory `httpfs`
       might create.
 - **Verify:** `sh spec/duckdb-extension-distribution/verify/p2.sh`. It covers the good path, the
   good path again under a hostile exported environment, and eleven controls that must fail:
