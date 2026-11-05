@@ -17,7 +17,7 @@ phases:
     parallel: false
     hammerable: false
     hill: uphill
-    verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh harness_ 3; cargo test --locked --lib s3:: >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]* passed" target/p1-lib.log; cargo test --locked --test rm_tests --test offline_tests --test find_tests --test s3_tests; if grep -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)" src; then exit 1; fi; grep -qF "include-ignored" .github/workflows/test.yaml; grep -qF "fetch.sh" .github/workflows/test.yaml; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
+    verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh harness_ 5; cargo test --locked --lib s3:: >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]* passed" target/p1-lib.log; cargo test --locked --test rm_tests --test offline_tests --test find_tests --test s3_tests; if grep -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)" src; then exit 1; fi; grep -qF "include-ignored" .github/workflows/test.yaml; grep -qF "fetch.sh" .github/workflows/test.yaml; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
   - id: P2
     name: "xdu-find queries an s3:// index in place (demo path)"
     status: pending
@@ -53,7 +53,7 @@ phases:
     parallel: false
     hammerable: false
     hill: uphill
-    verify: 'set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters s3-proxy-support; do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md; grep -qF "issues/$f.md" ROADMAP.md; done; sh spec/s3-index-target/verify/wire.sh "" 32; cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P5-GATE-GREEN'
+    verify: 'set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters s3-proxy-support; do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md; grep -qF "issues/$f.md" ROADMAP.md; done; sh spec/s3-index-target/verify/wire.sh "" 34; cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P5-GATE-GREEN'
 review:
   last_reviewed_commit: ""
   verdict: none
@@ -121,6 +121,19 @@ departs from it.
   as whole). Endpoints in the fixture's config name only the proxy, so traffic cannot bypass it.
 - **Empty `XDU_EXTENSION_DIR`** in a test means an empty *directory*: an empty *value* is treated
   as unset and falls back to the default lookup.
+- **Run A / run B (binding, foreman at the PLAN gate).** Some claims can only be proved in CI:
+  httpfs loaded by a debug build on linux_amd64, the release legs (manylinux_2_28 glibc floor,
+  NEEDED libraries, `extension-check`), and the wire tests on both test legs. So every phase runs
+  twice. **Run A** does the checklist, passes the phase's local `verify:`, commits code and state
+  with the phase left `in_progress`, and hands back. The foreman pushes. **Run B** reads the CI
+  logs of that push, quotes the evidence lines named in the phase's *Run B evidence* bullet into
+  `spec/s3-index-target/evidence/p<n>-ci.md` (run id, job, step, the line verbatim), re-runs the
+  local `verify:`, marks the phase `done` and advances. A missing or contradicting line is a phase
+  failure: run B stops and reports; it never re-words the evidence.
+- **Dependency floor (binding, foreman at the PLAN gate).** No `openssl-sys`, `native-tls` or
+  `aws-lc-sys` in the runtime dependency tree; P3's `verify:` enforces it, and it stays a gate. If
+  ring fails in a release leg, the fallback (hand-rolled SigV4 over `ureq`) goes back to the
+  foreman as a GOAL/PLAN question. Never swap the transport, the TLS provider or the gate silently.
 - **No `.partial`, no staging, no cache.** Any code path that writes an index object to local disk
   for an `s3://` locator fails the phase.
 
@@ -133,8 +146,6 @@ SigV4-checking S3 endpoint on loopback, resolve credentials the way R5 says, ope
 connection that loads the pinned httpfs and holds those credentials only as bound parameters, and
 read an object through the counting proxy. CI runs it on both legs. `xdu-rm` refuses `s3://`.
 
-- [ ] **Gate first:** if the GOAL gate ruled Q1 (PLAN §5) other than option (a), stop and re-plan
-  the `engine.rs` item before writing code.
 - [ ] `src/s3.rs` (new, re-exported via `lib`): `IndexLocator`/`S3Locator` parse on `OsStr`
   (PLAN §2.1) with unit tests: `s3://b/p`, trailing `/`, empty bucket, userinfo, glob
   metacharacters, uppercase `S3://` stays local, non-UTF-8 stays local.
@@ -160,7 +171,11 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
 - [ ] `tests/s3_tests.rs` `harness_` tests: an `open_s3_connection` reads a seeded object through
   the proxy and the proxy saw it; a wrong secret is refused with a 403-class error that does not
   contain the secret; a stray `DUCKDB_S3_ENDPOINT` in the environment does not redirect the
-  connection (the bound secret wins, digest D2).
+  connection (the bound secret wins, digest D2). Per amended R5/R6, on the connection
+  `open_s3_connection` returns: `SELECT secret_string FROM duckdb_secrets()` contains
+  `secret=redacted` and not the secret; no row of `duckdb_settings()` contains the secret (or the
+  session token); and every SQL string `open_s3_connection` builds is exposed to a unit test
+  (a pure `fn` returning the statement text) that asserts neither secret value occurs in it.
 - [ ] Always-run tests: `xdu-find -i s3://…` with `XDU_EXTENSION_DIR` set to an empty directory
   fails naming that path and both remedies — assert the phrase "release tarball" and
   `XDU_EXTENSION_DIR`, not `lib/xdu/extensions` (the default path already contains it). With a
@@ -177,11 +192,16 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
   under `-i`; re-count `XDU_INDEX` if the sentence names it.
 - [ ] `.github/workflows/test.yaml`, both legs: build `extension-probe`, `fetch.sh` into
   `$RUNNER_TEMP/xdu-ext`, then an "S3 tests" step after Test:
-  `XDU_TEST_EXTENSION_DIR=… XDU_TEST_S3_REQUIRED=1`, with the same rule as `verify/wire.sh`
-  (cargo's exit status read directly, never through `tee | grep`; passed count equal to the
-  `--list --include-ignored` count). CI may call `verify/wire.sh "" <min>` or a copy under
-  `.github/`; the step must not be satisfiable by a summary that a SIGPIPE or a missing pipefail
-  produced.
+  `XDU_TEST_EXTENSION_DIR=… sh spec/s3-index-target/verify/wire.sh "" <min>`, the one guard script
+  both verify and CI run (cargo's exit status read directly; passed count equal to the
+  `--list --include-ignored` count). Raise `<min>` in the same commit each later phase adds tests.
+  The step's last line, `s3-wire: '' N of N passed`, is what each run B reads.
+- **Run B evidence:** in the test workflow, jobs `Test (ubuntu-24.04)` and `Test (macos-15)`,
+  step "S3 tests": `s3-wire: '' N of N passed` with N ≥ 5 (the ubuntu line is the first observed
+  httpfs load by a debug build on linux_amd64). In the release workflow (it runs because this phase
+  touches `Cargo.toml` and `src/engine.rs`), jobs `Build (x86_64-unknown-linux-gnu)` and
+  `Build (aarch64-unknown-linux-gnu)`: `extension-check: ok platform=linux_amd64 engine=v1.4.4`
+  and `extension-check: ok platform=linux_arm64 engine=v1.4.4`.
 - **Verify:** see frontmatter (lib `s3::` unit tests, always-run suites, `harness_` wire tests with
   `verify/wire.sh`, no discarded `load_extension` result, the CI step present, clippy, fmt).
 - **Touches:** `src/s3.rs`, `src/lib.rs`, `src/engine.rs`, `src/bin/xdu-find.rs` (prologue only),
@@ -241,6 +261,10 @@ and binds everything S3 sends to SQL. The demo works after this phase.
   `:99-101` that S3 indices need `httpfs`.
 - [ ] `AGENTS.md` and `invariants.md` §5: S3 locators and partition names are bound; local raw
   `format!` note stands; `open_s3_connection`'s `CREATE SECRET` joins the engine surface.
+- **Run B evidence:** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
+  `s3-wire: '' N of N passed` with N ≥ 19; job `Packaging (man + completions generate)`, step
+  "Assert critical literals survive into the published man-page text", green with the new
+  `xdu-find.1` checks; the R3 test's printed ratio line from the ubuntu leg.
 - **Verify:** see frontmatter.
 - **Touches:** `src/lib.rs`, `src/s3.rs`, `src/bin/xdu-find.rs`, `tests/`, `doc/xdu-find.1.scd`,
   `README.md`, `AGENTS.md`, `.agents/factory/invariants.md`, `.github/workflows/test.yaml`.
@@ -262,9 +286,10 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
   `no_proxy()` reqwest connector; bounded retry and timeouts; PUT at the final key; LIST + DELETE
   of every higher id; marker DELETE/PUT; key round-trip check for partition names).
 - [ ] `src/bin/xdu.rs`: `-o` stays `PathBuf`; classify on `OsStr`; the S3 sequence of PLAN §2.8 with
-  the marker DELETE after every rejecting check; local sequence untouched. Implement Q2 and Q3 as
-  ruled (recommended: refuse non-round-tripping partition names before the clear; an empty prefix
-  is a fresh index).
+  the marker DELETE after every rejecting check; local sequence untouched. Per amended R1, refuse
+  a top-level name that is not UTF-8 or not safe as an S3 key segment and a DuckDB glob before the
+  clear, exiting non-zero and naming the directory; per amended R4, an absent or empty prefix is a
+  new index, while a missing bucket, an unreachable endpoint or rejected credentials fail.
 - [ ] Wire tests (`write_` prefix):
   - round trip: `xdu -o s3://` vs a local run of the same tree — key set equals file set;
     `__root__` present; per partition, an in-test DuckDB `SELECT * … ORDER BY path` over each tree
@@ -278,7 +303,7 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
   - ordering, through the proxy: a successful run issues LIST, then DELETE of the marker, then the
     chunk PUTs, and the marker PUT last;
   - rejections **with valid credentials** (missing source, a reserved partition name, a partition
-    name that would not round-trip per Q2): non-zero, the proxy saw **no DELETE**, and the existing
+    name that would not round-trip, per R1): non-zero, the proxy saw **no DELETE**, and the existing
     marker's bytes and chunks are unchanged. Wrong secret / dead endpoint / missing bucket: the same
     assertions (these alone cannot catch an early clear, because the DELETE would fail too);
   - read-only credentials (a second identity without write, or a test-only `S3` wrapper around
@@ -295,6 +320,12 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
   `AWS_*` names; CI literal counts. `README.md`: the build half of `### Indexes in S3`.
 - [ ] `invariants.md` §2/§7 and the matching `AGENTS.md` text: S3 finalize = one PUT at the final
   key plus LIST prune; the runtime's threads in the budget.
+- **Run B evidence:** test legs as above with N ≥ 29. Release workflow, both `Build (…-linux-gnu)`
+  jobs: step "Assert glibc floor" prints `… needs max GLIBC_2.x` lines with x ≤ 28 and no
+  `floor breach`, `runtime breach` or `unexpected dynamic needs` line; then
+  `extension-check: ok platform=linux_amd64 engine=v1.4.4` and the `linux_arm64` line. This is
+  the proof that ring and object_store build and link in manylinux_2_28; a failure here invokes the
+  dependency-floor rule above.
 - **Verify:** see frontmatter.
 - **Touches:** `Cargo.toml`, `Cargo.lock`, `src/crawl.rs`, `src/s3.rs`, `src/bin/xdu.rs`, `tests/`,
   `doc/xdu.1.scd`, `README.md`, `AGENTS.md`, `.agents/factory/invariants.md`,
@@ -314,6 +345,8 @@ runs long, P4 is dropped through a GOAL amendment (never silently), and P5 still
   `Vec<DirEntry>` equal for root, each partition, a nested directory, every `SortMode`, and a filter
   set; R4 refusals through `run_view` (no TUI) with empty `HOME`/`TMPDIR`/cwd left empty.
 - [ ] `doc/xdu-view.1.scd`: as `xdu-find`'s page in P2; CI literal counts.
+- **Run B evidence:** test legs as above with N ≥ 34; the Packaging job's literal step green with
+  the new `xdu-view.1` checks.
 - **Verify:** see frontmatter.
 - **Touches:** `src/view_query.rs`, `src/lib.rs`, `src/bin/xdu-view.rs`, `tests/`,
   `doc/xdu-view.1.scd`, `.github/workflows/test.yaml`.
@@ -323,7 +356,7 @@ runs long, P4 is dropped through a GOAL amendment (never silently), and P5 still
 **Goal:** the whole suite green with nothing ignored, the man-page gate asserting every new literal
 by count, and every deferral recorded.
 
-- [ ] Run the full suite through `verify/wire.sh "" 32`: every listed test passed.
+- [ ] Run the full suite through `verify/wire.sh "" 34`: every listed test passed.
 - [ ] Re-derive every new literal count on all four pages from the rendered text; confirm the CI
   list and `AGENTS.md` agree (§13).
 - [ ] **Deferral ledger.** Walk P1–P4's bodies and commits for "do not fix here", "known
@@ -333,6 +366,8 @@ by count, and every deferral recorded.
   `issues/local-reader-bound-parameters.md` (GOAL Non-goals) and `issues/s3-proxy-support.md`
   (PLAN deviation 6). Update the `S3 as an index target` ROADMAP entry to point at the spec.
 - [ ] If P4 was cut by amendment, record `issues/s3-index-view.md` and its ROADMAP entry here.
+- **Run B evidence:** test legs as above with N ≥ 34 (the final `<min>` in the workflow equals the
+  listed count); the Packaging job's literal step green on all four pages.
 - **Verify:** see frontmatter.
 - **Touches:** `issues/`, `ROADMAP.md`, `.github/workflows/test.yaml`, `AGENTS.md`, `doc/*.scd`.
 

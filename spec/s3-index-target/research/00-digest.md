@@ -35,7 +35,9 @@ Probed here against DuckDB 1.4.4 (the crate's bundled engine version) with the o
 with every field bound, issued by `engine::open_s3_connection` immediately after loading httpfs.
 It also overrides what httpfs reads from `AWS_*`/`DUCKDB_S3_*` at load (`03` risk 1), because a
 matching secret wins over settings. This keeps R5/R6's purpose (no secret in SQL text) but not
-their letter ("through DuckDB's `Config` API"): **a GOAL amendment is required** — PLAN §5 Q1.
+their letter ("through DuckDB's `Config` API"). **Amended at the PLAN gate** (GOAL `0f0edbd`): R5
+and R6 now name the bound `CREATE SECRET` after `LOAD`, with the secret redacted in DuckDB's
+secret listing.
 
 ## D3 — The writer uploads with a Rust client: object_store 0.14.2 on ring
 

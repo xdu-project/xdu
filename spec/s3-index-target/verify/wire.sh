@@ -5,7 +5,7 @@
 #
 # PREFIX is the test-name filter (harness_, find_, write_, view_, or "" for the whole file); MIN is
 # the fewest tests the family may hold. Written at plan time so a build phase is not graded by a
-# gate it wrote itself.
+# gate it wrote itself. Both each phase's verify and the CI S3 step run this one script.
 #
 # Under --include-ignored libtest always reports "0 ignored", so that phrase proves nothing. What
 # does: the passed count equals the count `--list` reports for the same filter, and that count is at
@@ -61,4 +61,5 @@ if [ -z "$passed" ]; then die "no clean summary line"; fi
 if [ "$listed" -lt "$min" ]; then die "'$prefix' lists $listed tests, fewer than $min"; fi
 if [ "$passed" -ne "$listed" ]; then die "'$prefix' passed $passed of $listed listed"; fi
 
-echo "wire.sh: '$prefix' $passed of $listed passed"
+# Run B of each phase reads this line from both CI test legs; keep its shape.
+echo "s3-wire: '$prefix' $passed of $listed passed"

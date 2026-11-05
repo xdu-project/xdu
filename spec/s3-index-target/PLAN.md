@@ -1,6 +1,7 @@
 # PLAN — Build an index into S3 and query it in place
 
-> **Status:** Draft for review · **Last updated:** 2026-11-05
+> **Status:** Passed the PLAN gate, reconciled with GOAL amendment `0f0edbd` · **Last updated:**
+> 2026-11-05
 > **Authoritative technical design.** The *how*. Vision/contract is [`GOAL.md`](GOAL.md);
 > the phased executable roadmap is [`TECH.md`](TECH.md). Backing detail is in
 > [`research/`](research/); decisions are consolidated in
@@ -187,11 +188,11 @@ rule).
 
 | R-ID | Design element(s) that satisfy it |
 |------|-----------------------------------|
-| R1 | §2.8 `IndexSink`/`S3Sink`, PUT per chunk at finalize, LIST-prune, §2b sequence; `-o` stays `PathBuf` with `OsStr` classification; round-trip test compares the endpoint root to a local run, and a run with empty `TMPDIR`/`HOME` leaves both empty (P3) |
+| R1 | §2.8 `IndexSink`/`S3Sink`, PUT per chunk at finalize, LIST-prune, §2b sequence; unsafe top-level names refused before the marker clear, naming the directory; `-o` stays `PathBuf` with `OsStr` classification; round-trip test compares the endpoint root to a local run, and a run with empty `TMPDIR`/`HOME` leaves both empty (P3) |
 | R2 | §2.4 binding + §2.6 flow for `xdu-find` (P2); §2.9 for `xdu-view` (P4); §2.5 marker cap; local-vs-S3 parity tests across filters, `--count`, `--top`, sort, `-u` |
 | R3 | D7 counting proxy; ≥10 MiB, ≤12-chunk fixture over 4 partitions; ranged-only and <5% assertions with a negative control; runs in CI's S3 step every push (P2) |
-| R4 | §2.5 `classify_s3_error` + glob-then-HEAD marker read (readers, P2); §2.8 pre-flight LIST before the marker DELETE, no marker on failure (writer, P3); test matrix: dead port, wrong secret, no credentials, missing bucket, missing prefix/marker, unknown `format` |
-| R5 | §2.2 resolver in `src/s3.rs` serving `S3Sink` and `open_s3_connection`; no `aws` extension; secret only in bound parameters, redacted `Debug`; tests assert the secret is absent from stdout/stderr. **Delivery mechanism needs the Q1 amendment** |
+| R4 | §2.5 `classify_s3_error` + glob-then-HEAD marker read (readers, P2); §2.8 pre-flight LIST before the marker DELETE, no marker on failure, an absent or empty prefix is a new index (writer, P3); test matrix: dead port, wrong secret, no credentials, missing bucket, missing prefix/marker, unknown `format` |
+| R5 | §2.2 resolver in `src/s3.rs` serving `S3Sink` and `open_s3_connection`; no `aws` extension; secret only in bound parameters, redacted `Debug`; tests assert the secret is absent from stdout/stderr, from `duckdb_settings()` and from every SQL string the code builds, and that `duckdb_secrets()` shows it redacted (P1) |
 | R6 | §2.4 `parquet_source` binds the S3 glob (locator + `-u`); §2.3 bound `CREATE SECRET`; local SQL byte-identical (unit test) |
 | R7 | §2.3 `open_s3_connection` through `load_extension`; amended error text; `offline_tests.rs` untouched; a test that a local query ignores a garbage `httpfs` file in `XDU_EXTENSION_DIR` (P1) |
 | R8 | §2.7 refusal at `xdu-rm.rs:27` (P1) |
@@ -230,16 +231,17 @@ blocks the intent) and again against this design (gate #2):
 
 ### Deviation justifications
 
-Rows marked **QUESTION** change what an R-ID SHALL do, or read its wording one way. They are listed
-again in §5 and need a ruling at the GOAL gate before or at build.
+Rows 1, 4 and 5 were questions against R-ID wording; the foreman resolved all three by amending
+the GOAL at the PLAN gate (`0f0edbd`), so each is now a pointer. Rows 2, 3 and 6–9 were accepted as
+written.
 
 | Deviation | Why needed | Simpler alternative rejected because |
 |-----------|-----------|--------------------------------------|
-| 1. **QUESTION (R5, R6).** Credentials reach DuckDB as bound parameters of one `CREATE SECRET` after `LOAD`, not through the `Config` API | `Config` with `s3_*` keys fails at open with autoload off: "The following options were not recognized: s3_region" (probed, D2). R5's "readers SHALL receive its result through DuckDB's `Config` API" and R6's "only through its `Config` API" are unmeetable as written | Autoload on with a versioned extension tree: changes the tarball layout (a Non-goal) and reopens the autoload surface `offline_tests` guards. Prepared `SET s3_* = ?`: works, but `duckdb_settings()` shows the secret in clear where `duckdb_secrets()` redacts it |
+| 1. Resolved by GOAL amendment `0f0edbd`: R5/R6 now require the bound `CREATE SECRET` after `LOAD`, redacted in `duckdb_secrets()`. No longer a deviation (evidence: digest D2) | — | — |
 | 2. §2: S3 chunks have no `.partial` + rename; each is one PUT at its final key | An object store has no rename; copy-and-delete is neither atomic nor cheap | Emulating `.partial` with copy+delete: two requests and a window with both keys, for no atomicity gain over a single PUT |
 | 3. The S3 prune deletes every higher-numbered chunk, past gaps; local stops at the first gap | One LIST already names every key; R1 asks for "no stale chunk" | Mirroring the gap stop: possible, but it keeps a stale chunk a foreign edit left behind, which R1 forbids. The gap only arises from such an edit |
-| 4. **QUESTION (R1).** `xdu -o s3://` refuses, before the marker clear, a top-level directory whose name is not UTF-8 or would not survive unchanged as an S3 key segment and a DuckDB glob (object_store percent-encodes `%#~[]{}^\|\\`) | Such a partition cannot be written under its own name, and an encoded name breaks `-u` and the readers' partition column without an error | Writing it encoded: the "same index" then differs silently. Skipping it: a silently incomplete index (§2c) |
-| 5. **QUESTION (R4).** For `xdu`, "the prefix is absent" is not a failure: a fresh prefix is how a new index starts. A missing *bucket*, an unreachable endpoint and rejected credentials fail. For readers an absent prefix fails (no marker) | Read literally for the writer, R4 forbids building any new index, which contradicts R1 | None. This is a reading, not a design choice, and it needs confirming |
+| 4. Resolved by GOAL amendment `0f0edbd`: R1 now refuses, before the marker clear, a top-level name that is not UTF-8 or not safe as an S3 key segment and a DuckDB glob. No longer a deviation | — | — |
+| 5. Resolved by GOAL amendment `0f0edbd`: R4 now fails an absent prefix for readers only; for `xdu` an absent or empty prefix starts a new index. No longer a deviation | — | — |
 | 6. Both directions ignore `HTTP(S)_PROXY`/`NO_PROXY`; the pages say so | DuckDB 1.4.4 ignores them and reqwest honours them, so honouring them in the writer alone could split writer and readers onto different routes (D5) | Honouring env proxies in the writer only: incoherent. A shared proxy setting: new surface the pilot does not need. Follow-up `issues/s3-proxy-support.md` |
 | 7. New runtime dependencies: `object_store` (ring), `reqwest`, `rustls`, `tokio`, `futures`, `bytes` (26 lockfile crates). Dev-only: `s3s`, `s3s-fs`, `hyper-util` | §2b needs DELETE and LIST, which httpfs lacks; R1 needs byte-identical chunks, which `COPY` cannot give (D3). R10 needs an endpoint with SigV4 and no container (D6) | Hand-rolled SigV4 over `ureq`: 15 crates and no runtime, but ~500 lines of signing and XML that a pilot would own. Kept as the fallback if ring/manylinux fails |
 | 8. xdu-view's 4 queries move from the binary into `src/view_query.rs` | R2/R10 require testing xdu-view over S3, and the TUI never runs in CI | A hidden dump flag: new CLI surface in high-blast `cli.rs` plus man-page obligations. `#[cfg(test)]` in the bin cannot reach the binaries or the S3 fixture |
@@ -249,7 +251,7 @@ again in §5 and need a ruling at the GOAL gate before or at build.
 
 - **Credentials into DuckDB with autoload off** → `Config` route impossible; bound `CREATE SECRET`
   after `LOAD` works and redacts ([`00-digest.md`](research/00-digest.md) D2,
-  [`01`](research/01-reader-path.md) §0). Needs Q1.
+  [`01`](research/01-reader-path.md) §0). Adopted by GOAL amendment `0f0edbd`.
 - **Writer transport** → object_store 0.14.2 on ring; DuckDB has no DELETE and re-encodes
   ([`03`](research/03-writer-transport.md)).
 - **Loopback endpoint without containers** → s3s-fs in-process; MinIO archived, versitygw broken on
@@ -268,34 +270,26 @@ again in §5 and need a ruling at the GOAL gate before or at build.
 
 ## 5. Risks & open questions
 
-**Questions for the GOAL gate** (deviation rows 1, 4 and 5):
+**Resolved at the PLAN gate** (GOAL amendment `0f0edbd`, 2026-11-05):
 
-- **Q1 — R5/R6 delivery mechanism.** [NEEDS CLARIFICATION: amend R5's "the readers SHALL receive
-  its result through DuckDB's `Config` API" and R6's "credentials SHALL reach DuckDB only through
-  its `Config` API" to "through bound parameters of a prepared statement once the extension is
-  loaded, never as SQL text"?] Options:
-  - (a) amend as stated (recommended);
-  - (b) autoload with a versioned extension tree, which changes the tarball layout, a Non-goal;
-  - (c) cut S3 reads, which is the whole point.
+- **Q1 → R5/R6:** credentials go only as the bound parameters of one prepared `CREATE SECRET`
+  after `LOAD`; `duckdb_secrets()` shows the secret redacted. Built as §2.3 describes.
+- **Q2 → R1:** an unsafe top-level name is refused before the marker clear, naming the directory.
+- **Q3 → R4:** an absent prefix fails a reader; for `xdu` an absent or empty prefix starts a new
+  index.
 
-  P1 builds (a). If the ruling differs, P1's engine work is the only part that changes.
-- **Q2 — non-UTF-8 or non-round-tripping partition names under `-o s3://`.** [NEEDS CLARIFICATION:
-  may `xdu -o s3://` refuse such a source tree up front, naming the directory?] Options:
-  - (a) refuse before the marker clear (recommended);
-  - (b) percent-encode and document that `-u` and the partition column show the encoded form;
-  - (c) skip with a warning, which is rejected by §2c.
-- **Q3 — R4's "prefix is absent" for `xdu`.** [NEEDS CLARIFICATION: confirm it applies to the
-  readers only, and that the writer treats an empty prefix as a fresh index?] The recommendation is
-  yes, because the alternative contradicts R1.
+No open question remains for build.
 
 **Risks:**
 
 - **httpfs loaded from a debug build on linux_amd64** has never been observed (claim 13 is
-  inference). The first CI push of P1 proves it. If it fails, P1 stops there.
+  inference). P1's run B reads it from the ubuntu test leg. If it fails, P1 stops there.
 - **ring under manylinux_2_28 inside `release.yaml`:** ring builds there today only as a build
-  dependency, so P3's commit must run the release workflow's dynamic-library check or a local
-  equivalent. The fallback is hand-rolled SigV4 over `ureq`, also on ring. That shares the same
-  risk, so the real fallback for a ring failure is the archive's `aws-lc` set.
+  dependency; P3's run B reads the release legs. **Binding (foreman, PLAN gate):** P3's refusal of
+  `openssl-sys`, `native-tls` and `aws-lc-sys` in the runtime tree stays a gate. If ring fails in a
+  release leg, the fallback is hand-rolled SigV4 over `ureq`, and it returns to the foreman as a
+  GOAL/PLAN question, never a silent swap. That question should weigh that `ureq`'s rustls also
+  defaults to ring.
 - **Error classification by DuckDB text** (D8) depends on httpfs's message strings. Mitigation: the
   glob-before-HEAD split carries the main distinction, and every class has a test, so a wording
   change in a future engine bump fails loudly.
