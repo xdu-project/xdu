@@ -59,10 +59,12 @@ follows then adds a transport, not an installer.
 - **R5** — The local-index query path SHALL load no extension it does not link statically, and with
   autoinstall and autoload disabled the offline guarantee SHALL hold by refusal rather than by the
   absence of a trigger: `tests/offline_tests.rs` keeps passing with its cold `HOME` empty.
-- **R6** — WHEN the release workflow builds a platform leg, it SHALL verify that the binaries in that
-  leg's tarball, extracted, load the shipped extension with a cold `HOME` and autoinstall disabled.
-  This closes the spike's one inferred claim (the `linux_amd64` glibc floor was read from symbols,
-  never exercised in a manylinux build) on every leg rather than one.
+- **R6** — WHEN the release workflow builds a platform leg, it SHALL verify, with a cold `HOME` and
+  autoinstall disabled, that (a) the leg's shipped extension loads into the xdu engine built by the
+  same build invocation as that leg's tarball binaries, run from the extracted tarball layout, and
+  (b) the extracted tarball binaries themselves run under that same cold `HOME`. This closes the
+  spike's one inferred claim (the `linux_amd64` glibc floor was read from symbols, never exercised
+  in a manylinux build) on every leg rather than one.
 
 ## Non-goals (no-gos)
 
@@ -93,6 +95,14 @@ follows then adds a transport, not an installer.
   consumer lands this cycle? — **A:** Library-only, verified by integration tests and R6's release
   check. No operator-visible diagnostic this cycle. Answered by the foreman as gate judge (resolved
   2026-11-04).
+- **Q:** Which binary does R6 load the extension into, when no shipped binary loads one this cycle?
+  — **A:** An engine from the same build, not a shipped binary. The library-only answer above and
+  R5 (the reader path loads nothing) leave no shipped binary that can load an extension, so R6 as
+  first written could not be met. A probe built by the same build invocation as the leg's tarball
+  binaries exercises the same engine, toolchain and link flags. R6 now loads the extension into that
+  probe, run from the extracted tarball layout, and separately runs the shipped binaries under the
+  same cold `HOME`. The library-only answer stands. Amended by the foreman at the PLAN gate (resolved
+  2026-11-05).
 
 ## Related materials
 
