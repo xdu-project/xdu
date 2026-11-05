@@ -1915,7 +1915,7 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // Connect to DuckDB
-    let conn = Connection::open_in_memory()?;
+    let conn = xdu::engine::open_connection()?;
 
     // Initialize app
     let mut app = App::new(conn, index_path, args.partition, filters, sort_mode)?;

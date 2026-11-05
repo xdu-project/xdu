@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod crawl;
+pub mod engine;
 
 use std::ffi::CString;
 use std::fmt;

@@ -2,7 +2,6 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use duckdb::Connection;
 
 use xdu::cli::XduFindArgs;
 use xdu::{
@@ -35,7 +34,7 @@ fn main() -> Result<()> {
     let glob_pattern = index_glob(&index_path, args.partition.as_deref());
 
     // Connect to DuckDB (in-memory)
-    let conn = Connection::open_in_memory()?;
+    let conn = xdu::engine::open_connection()?;
 
     // Build filters using shared QueryFilters. A glob is translated here; an invalid
     // one fails before any query is built rather than at the database. Owner and

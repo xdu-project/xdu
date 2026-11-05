@@ -1,57 +1,76 @@
 ---
 slug: duckdb-extension-distribution
-title: "Ship DuckDB extensions instead of downloading them"
+title: Ship DuckDB extensions instead of downloading them
 kind: feature
 appetite: small
 status: in_progress
 branch: feature/duckdb-extension-distribution
 base: main
-current_phase: P1
-last_updated: "2026-11-05"
+current_phase: P2
+last_updated: '2026-11-05'
 phases:
-  - id: P1
-    name: "Engine module: connections refuse autoload; extensions load by path or fail naming it"
-    status: pending
-    satisfies: [R3, R4, R5]
-    depends_on: []
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "set -eu; cargo test --locked --lib engine:: 2>&1 | tee /dev/stderr | grep -qE 'test result: ok. [1-9][0-9]* passed'; cargo test --locked --test offline_tests --test find_tests --test rm_tests; grep -qF 'disallowed-methods' clippy.toml; cargo clippy --locked --all-targets --all-features -- -D warnings; if grep -rnF 'open_in_memory()' src/bin; then exit 1; fi; for f in src/bin/xdu-find.rs src/bin/xdu-rm.rs src/bin/xdu-view.rs; do grep -qF 'open_connection' $f; done; echo P1-GATE-GREEN"
-  - id: P2
-    name: "Probe, fetch and check scripts, proven on the host's own release leg"
-    status: pending
-    satisfies: [R1, R3, R4, R6]
-    depends_on: [P1]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "sh spec/duckdb-extension-distribution/verify/p2.sh"
-  - id: P3
-    name: "Release legs fetch, check and ship the pinned set; CI off the retired macOS label"
-    status: pending
-    satisfies: [R1, R6]
-    depends_on: [P2]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "sh spec/duckdb-extension-distribution/verify/p3.sh"
-  - id: P4
-    name: "Install channels and the recorded layout contract; deferral ledger"
-    status: pending
-    satisfies: [R2]
-    depends_on: [P2]
-    parallel: false
-    hammerable: false
-    hill: uphill
-    verify: "sh spec/duckdb-extension-distribution/verify/p4.sh"
+- id: P1
+  name: 'Engine module: connections refuse autoload; extensions load by path or fail
+    naming it'
+  status: done
+  satisfies:
+  - R3
+  - R4
+  - R5
+  depends_on: []
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: 'set -eu; cargo test --locked --lib engine:: 2>&1 | tee /dev/stderr | grep
+    -qE ''test result: ok. [1-9][0-9]* passed''; cargo test --locked --test offline_tests
+    --test find_tests --test rm_tests; grep -qF ''disallowed-methods'' clippy.toml;
+    cargo clippy --locked --all-targets --all-features -- -D warnings; if grep -rnF
+    ''open_in_memory()'' src/bin; then exit 1; fi; for f in src/bin/xdu-find.rs src/bin/xdu-rm.rs
+    src/bin/xdu-view.rs; do grep -qF ''open_connection'' $f; done; echo P1-GATE-GREEN'
+- id: P2
+  name: Probe, fetch and check scripts, proven on the host's own release leg
+  status: pending
+  satisfies:
+  - R1
+  - R3
+  - R4
+  - R6
+  depends_on:
+  - P1
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: sh spec/duckdb-extension-distribution/verify/p2.sh
+- id: P3
+  name: Release legs fetch, check and ship the pinned set; CI off the retired macOS
+    label
+  status: pending
+  satisfies:
+  - R1
+  - R6
+  depends_on:
+  - P2
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: sh spec/duckdb-extension-distribution/verify/p3.sh
+- id: P4
+  name: Install channels and the recorded layout contract; deferral ledger
+  status: pending
+  satisfies:
+  - R2
+  depends_on:
+  - P2
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: sh spec/duckdb-extension-distribution/verify/p4.sh
 review:
-  last_reviewed_commit: ""
+  last_reviewed_commit: ''
   verdict: none
-  blocked_reason: ""
+  blocked_reason: ''
   cycle: 0
 ---
-
 # TECH.md — Ship DuckDB extensions instead of downloading them
 
 The **context engine and finite-state machine** for building this feature. The YAML
@@ -99,30 +118,30 @@ nothing here departs from it.
 function loads a pinned extension by absolute path or fails naming the path. Readers behave exactly
 as before.
 
-- [ ] Add `src/engine.rs` and `pub mod engine;` in `src/lib.rs` (PLAN §2.1): `PINNED_EXTENSIONS`,
+- [x] Add `src/engine.rs` and `pub mod engine;` in `src/lib.rs` (PLAN §2.1): `PINNED_EXTENSIONS`,
       `EXTENSION_DIR_ENV`, `EXTENSION_SUBDIR`, `open_connection`, `extension_dir_from` (pure),
       `extension_dir`, `load_extension_from`, `load_extension`. Canonicalize **only**
       `current_exe()`, take `.parent().parent()`, and never canonicalize the override. A missing
       override directory must still yield the R4 message with the path as given.
-- [ ] `clippy.toml` with `disallowed-methods` for `duckdb::Connection::{open, open_in_memory,
+- [x] `clippy.toml` with `disallowed-methods` for `duckdb::Connection::{open, open_in_memory,
       open_with_flags, open_in_memory_with_flags}`; `#[allow(clippy::disallowed_methods)]` only
       inside `src/engine.rs` (including the red-first refusal test's plain connection).
-- [ ] Write the refusal test **first** against a plain `Connection::open_in_memory()`. It sets
+- [x] Write the refusal test **first** against a plain `Connection::open_in_memory()`. It sets
       `extension_directory` to a `TempDir`, runs `SELECT '{}'::JSON`, and asserts the error carries
       DuckDB's autoload-disabled wording **and** the directory stays empty. Observe it red, then
       switch it to `open_connection` and observe green. Record both outcomes in the commit body: a
       green that was never red proves nothing here, and a network-less sandbox can turn the
       autoinstall attempt into an error that only the wording assertion tells apart.
-- [ ] Unit tests in `src/engine.rs`: both `current_setting`s are false; absent file → error contains
+- [x] Unit tests in `src/engine.rs`: both `current_setting`s are false; absent file → error contains
       the full `<dir>/httpfs.duckdb_extension` path and `XDU_EXTENSION_DIR`, directory untouched;
       the same holds for an override directory that does not exist; a name outside
       `PINNED_EXTENSIONS` is refused; a directory path containing `'` is refused before any SQL
       runs; `extension_dir_from` gives a non-empty override precedence, unchanged, ignores an
       empty one, and otherwise resolves to the exe's grandparent joined with `lib/xdu/extensions`.
-- [ ] `src/bin/xdu-find.rs`, `src/bin/xdu-rm.rs`, `src/bin/xdu-view.rs`: replace
+- [x] `src/bin/xdu-find.rs`, `src/bin/xdu-rm.rs`, `src/bin/xdu-view.rs`: replace
       `Connection::open_in_memory()` with `xdu::engine::open_connection()`. Nothing else in these
       files changes. `xdu-rm.rs` is high-blast: the diff there is the one line plus an import.
-- [ ] `tests/offline_tests.rs` is **not** edited. Its module doc already describes the cold-`HOME`
+- [x] `tests/offline_tests.rs` is **not** edited. Its module doc already describes the cold-`HOME`
       assertion; the "holds by refusal" story belongs in `AGENTS.md`, which P4 updates.
 - **Verify:** `cargo test --lib engine::` reports at least one passing test, offline/find/rm suites
   green, `clippy.toml` carries the rule and clippy is clean, no `open_in_memory()` left in
