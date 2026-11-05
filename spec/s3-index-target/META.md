@@ -162,3 +162,20 @@ is skipped by the parser):
   harness edit allowed. Anything else under `.agents/` still goes through META and
   `/xdu-harness`.
 - **Confidence:** high · **Effort:** small
+
+## F9 — The reviewer's curated inputs are to be pasted "inline", which means retyping ~700 lines
+`origin=xdu-review:step-2 severity=low category=instruction status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** Step 2 says to give the blind reviewer the full text of `GOAL.md`,
+  `invariants.md` and `review-rubric.md` "inline". At cycle 2's head those total about 690 lines,
+  and the `debate` variant needs two copies. A model orchestrator can put text inline only by
+  regenerating it, and a slip there would silently hand the reviewer a different contract. This
+  cycle instead built one brief file with `cat` from the three committed files, under the
+  review's scratch directory in `target/`, and pointed both reviewers at it. That file was their
+  only route to `spec/` content.
+- **Skill cause:** "inline" names a transport, but what blindness needs is an exact, curated
+  input set. The skill does not sanction the exact transport, so using it is a deviation that
+  each orchestrator has to justify again.
+- **Recommended fix:** in Step 2, prefer a brief file assembled verbatim by `cat` from the
+  committed files at the reviewed head, outside `spec/`, and have `REVIEW.md` record that it was
+  used. Blindness is unchanged: the file holds only the three allowed texts.
+- **Confidence:** med · **Effort:** small

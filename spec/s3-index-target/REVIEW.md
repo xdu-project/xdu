@@ -265,3 +265,282 @@ auto-CRITICAL.
 ## Optional completeness sub-pass (separate reviewer; may see TECH.md)
 
 Not run (no `completeness` argument).
+
+## Review cycle 2 — changes-requested (2026-11-05)
+
+- **Reviewed commit:** ef4fedfb859756bb5a52f1461cd7cb5e48e9aeea  ·  **Base:** `origin/main`
+  (merge-base `a0cdd95`)  ·  **Date:** 2026-11-05
+- **Verdict:** changes-requested
+- **Cycle:** 2 of ≤3, mirroring `review.cycle` in `TECH.md`. This is the second cycle without
+  convergence, so the skill escalates to the human.
+
+### How this review ran
+
+- **Mode:** a fresh blind pass over the full spec-excluded diff, which is the default for a later
+  cycle. The foreman asked for the whole change to be graded against the GOAL, not only the
+  remediation. It used the `debate` variant again, for the same reason as cycle 1: the diff
+  touches the coupled core. Reviewer A argued "ship" and B argued "block". Neither saw the
+  other's output, nor cycle 1's findings.
+- **What the reviewers saw:**
+  - `GOAL.md`, `invariants.md` and `review-rubric.md`, verbatim at `ef4fedf`, in one brief
+    file. The orchestrator built that file with `cat` from the committed files instead of
+    retyping about 690 lines twice (meta-note F9).
+  - The spec-excluded diff, `git log --oneline`, `AGENTS.md`, and the runnable worktree.
+  - They were barred from all of `spec/`, which covers cycle 1's `REVIEW.md` and `TECH.md`'s
+    remediation triage. They were also barred from commit bodies, `target/ci/`, and build
+    scratch they did not create.
+  - Cycle 1's one exception, `wire.sh`, was not needed: the CI gate now lives in
+    `tests/s3-wire.sh`.
+- **One correction mid-run.** The orchestrator's brief gave the relative
+  `XDU_TEST_EXTENSION_DIR=target/test-ext` that `AGENTS.md` documents. Once the orchestrator had
+  reproduced that form failing (finding 2), it told both reviewers to use an absolute path, and
+  said the behaviour was already recorded. By then A had reproduced it on its own.
+- **Contract drift:** the same three GOAL commits as cycle 1 (`e4ba7d0`, `e3593e9`, `0f0edbd`),
+  and none since. The gate judge confirmed them under the maintainer's standing mandate, so this
+  cycle grades the GOAL as it stands.
+- **Artifact-deliverable R-IDs:** none. The orchestrator owns the CI-run halves of R3 and R10,
+  graded from the CI logs below.
+
+### Verification run
+
+"A" and "B" are the blind reviewers; "O" is the orchestrator.
+
+- `sh tests/s3-wire.sh "" 43` with `XDU_TEST_EXTENSION_DIR` unset, so the script's absolute
+  default applies (O) → exit 0:
+  - `s3-wire: '' 43 of 43 passed`
+  - `s3-count-bytes: received 138351 of 16784047 stored bytes (0.824%), 21 requests: LIST 2, HEAD
+    10, GET 9`
+  - `write-unsafe-names: 4 case(s), non-UTF-8 case skipped: the filesystem refuses the name`
+    (APFS)
+- `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 43`, the form `AGENTS.md`
+  documents (O) → exit 1 with `22 passed; 21 failed`. Every failure reads `DuckDB extension
+  'httpfs' not found at target/test-ext/httpfs.duckdb_extension`. A reproduced this with `cargo
+  test` directly. This is finding 2.
+- `cargo test --locked --offline --test s3_tests -- --include-ignored` with an absolute extension
+  directory (A, B) → `43 passed`, equal to the 43 that `-- --list --include-ignored` lists. The
+  negative control printed `s3-scan-bytes: ... (90.271%)`.
+- `cargo test --locked --offline` (A, B) → exit 0. lib passed 154 tests; `s3_tests` reported
+  `2 passed; 0 failed; 41 ignored`.
+- `cargo fmt --all -- --check` and `cargo clippy --locked --offline --all-targets --all-features
+  -- -D warnings` (A, B) → exit 0.
+- **CLI drives (A, B)** against loopback S3 servers they wrote. Each server started and stopped
+  within one Bash call, and a connect to every port was refused afterwards.
+  - **Parity.** Local and S3 gave the same results over 12 (A) and 17 (B) awkward partition names
+    and 6 awkward prefixes (A), for `--count`, the default listing, `--top`, `-u` on every
+    partition including `__root__`, `-f csv`/`-f json`, and sorted output.
+    - Locally, `-u "it's"` fails with a DuckDB parser error. That is the recorded §5 exception for
+      local paths, which the GOAL lists as a Non-goal. Over S3 the same query answers correctly.
+  - **A partition scope with a size filter and a size sort, on the release build (B):** the same
+    as local for 7 argument sets. The debug build aborts on the local query, which is the filed
+    `issues/duckdb-debug-build-integral-assertion.md`.
+  - **Error bodies that echo the secret or the session token** (A, B): 403
+    SignatureDoesNotMatch, 400 InvalidToken, 400 ExpiredToken and 500. `xdu`, `xdu-find` and
+    `xdu-view` each exit 1 with empty stdout, and neither the secret nor the token appears in any
+    output.
+  - **Every proxy variable pointed at a dead port** (A, B): the reader and the writer both
+    succeed, as the man pages say.
+  - **Re-run with fewer files** (A): the stale chunks are deleted. The request order is a LIST of
+    the prefix, the marker DELETE, the chunk PUTs and partition LISTs, then the marker PUT last.
+    The reader's marker access is HEAD, HEAD, then a bounded GET of `bytes=0-98`.
+  - **Missing credentials, an empty `XDU_EXTENSION_DIR`, and `xdu-rm` through both `-i` and
+    `XDU_INDEX`** (A, B): each names its cause, exits 1, prints no stdout and leaves `HOME`
+    empty. `xdu-rm` sent 0 requests.
+  - **`xdu-view` without a TTY** (B): it ran its S3 queries before terminal setup, every chunk
+    read a ranged 206.
+- **The `xdu-view` TUI was not driven interactively:** `openpty: Operation not permitted` (A, B).
+- **Findings 3 and 4 re-run by O.** Both reproduced; the evidence is under each finding.
+- **CI on the merge ref (O): Tests run 42058060960 on `0d80d6a`.** That is `fbecdb7` merged into
+  `a0cdd95`. `a0cdd95` is an ancestor of `fbecdb7`, so the merge's tree is `fbecdb7`'s, and
+  `ef4fedf` differs from `fbecdb7` only in four `spec/` files.
+  - Both legs ran the `S3 tests` step: `test result: ok. 43 passed; 0 failed`, then `s3-wire: ''
+    43 of 43 passed`, then `s3-count-bytes: received 138351 of 16784047 stored bytes (0.824%), 21
+    requests: LIST 2, HEAD 10, GET 9`.
+  - Linux ran the non-UTF-8 case (`write-unsafe-names: 5 case(s), non-UTF-8 case ran`). macOS
+    skipped it, naming the filesystem's refusal.
+  - The plain `Test` step reports `s3_tests` as `2 passed; 0 failed; 41 ignored` on both legs.
+  - Packaging printed `OK: every asserted literal survived into the published man-page text`.
+  - None of the three logs has a `##[error]` line: Tests, Release run 42058061145 (5 jobs, at
+    `fbecdb7`) and Publish Image run 42058061014 (2 validate jobs).
+  - O spot-checked the lines quoted in the "Review cycle 1" sections of `evidence/p1-ci.md`,
+    `p3-ci.md` and `p5-ci.md` against the logs, and each matches.
+- **Man-page render (local): unavailable again.** `scdoc` is not installed, and this session
+  installs nothing. A and B approximated scdoc's markup at source level, and every count in CI's
+  `check` lists matched. No `.scd` line opens with `.` or `'`. CI's distro-`scdoc` count gate is
+  green, but the published text has still not been read locally. That remains an unclosed gap
+  for the human (`AGENTS.md`'s Commands section has the install line).
+- **Tree state (O).** `git status --porcelain` was empty after both hand-backs and after O's
+  probes. Nothing mutated build state: `target/test-ext/httpfs.duckdb_extension` predates the
+  review and `target/lib/` does not exist. O's two runs of `tests/s3-wire.sh` rewrote
+  `target/wire-all.log` and `target/wire-all.list`, the script's fixed names.
+
+### Cycle 1 findings at this head (O)
+
+| Cycle 1 finding | Status at `ef4fedf` |
+|---|---|
+| 1. A reader's endpoint falls back to `DUCKDB_S3_ENDPOINT` | Closed. `harness_stray_duckdb_s3_endpoint_is_not_taken_when_the_resolver_picks_aws` passes locally and on both CI legs: the stray listener sees 0 connections, and every CONNECT names the regional AWS host. Neither blind reviewer found a fallback. |
+| 2. Path lists not widened | Closed. All five copies name the eight paths. A and B found that the three restated copies match the `invariants.md` header exactly. |
+| 3. A commented header merges profiles | Closed. `a_comment_after_a_section_header_keeps_the_profiles_apart`, `a_malformed_section_header_takes_no_keys_from_or_into_another_profile` and `section_headers_follow_the_shared_file_rules` pass. |
+| 4. The writer echoes the session token | Closed. `write_refusal_bodies_that_echo_the_session_token_are_not_printed` passes. A's and B's probes found 0 occurrences across three tools and four bodies. |
+| 5. CI's S3 gate under `spec/` | Closed. The gate is `tests/s3-wire.sh`, with a minimum of 43, and `AGENTS.md` documents it. The documented command is wrong, though: finding 2 below. |
+| 6. §2b and the CLI surface | Closed in `invariants.md` §2b and in `AGENTS.md`'s CLI surface. `AGENTS.md`'s Architecture copy of the same sentence is still local-only: finding 1 below. |
+
+### Requirement → evidence matrix
+
+| R-ID | Implemented by | Verified how (who) | Status |
+|------|----------------|--------------------|--------|
+| R1 | `s3::S3Sink`, `check_s3_partition_names`; `crawl::IndexSink`/`LocalSink`/`encode_chunk`; ordering in `bin/xdu.rs` | `write_*` wire tests; parity, prune and request-order drives (A, B); CI both legs (O) | ✅ |
+| R2 | `lib::parquet_source`, `index_glob_s3`, `read_completion_marker_s3`, `marker_*` gates; `view_query`; both reader bins | `find_*`/`view_*` wire tests; parity drives; ranged 206 reads (A, B). TUI not driven | ✅ |
+| R3 | httpfs ranged reads; nothing staged | `find_count_receives_under_five_percent_of_stored_bytes` at 0.824%, with a 90.271% negative control (A, B, O); both CI legs at 0.824% (O) | ✅ |
+| R4 | `S3Sink::request_error`, `lib::s3_request_error`, pre-flight LIST | `*_failures_*`, read-only and refused-chunk wire tests; missing-credential drives (A, B) | ✅ |
+| R5 | `S3Settings::resolve`, `endpoint_authority`, `client_endpoint_url`, `duckdb_secret_statement`; `engine::open_s3_connection_from` | Unit tests, `harness_*`, profile and secret wire tests, echo probes (A, B, O) | ✅ with two LOW edge cases: findings 3 and 4 |
+| R6 | bound glob, bound `path LIKE ?`, bound marker URLs | `test_parquet_source_*`, `local_view_sql_is_byte_for_byte_what_xdu_view_sent`, quote-prefix wire tests; `-u "it's"` over S3 (A, B) | ✅ |
+| R7 | `engine::load_extension_from` error text; `open_s3_connection` | `s3_index_without_httpfs_names_the_path_and_both_remedies`, `local_tools_ignore_a_garbage_httpfs`, `offline_tests`; empty-directory drives (A, B) | ✅ |
+| R8 | early refusal in `src/bin/xdu-rm.rs` | `rm_tests` case; `-i` and `XDU_INDEX` drives, 0 requests (A, B) | ✅ |
+| R9 | the four `doc/*.scd` pages; README "Indexes in S3"; CI literal list | Source-level counts (A, B); CI count gate green (O); **render not read locally** | ✅ (gap noted) |
+| R10 | in-process `s3s` endpoint, `#[ignore]` tier, `tests/s3-wire.sh`, CI step with a minimum of 43 | 43/43 locally (A, B, O) and on both CI legs (O); plain `cargo test` lists 41 ignored | ✅ (documented local form wrong: finding 2) |
+
+**Unmapped changes**, none blocking: the same as cycle 1, minus the dead `XDU_TEST_S3_REQUIRED`
+export, which is gone. The moves of `xdu-view`'s SQL into `src/view_query.rs` and of the local
+write path behind `IndexSink` serve R1, R2 and R6 (A, B).
+
+**A note, not a finding:** `xdu-find --help` and `xdu-view --help` still describe `-i` as a
+directory (A, B). R9 asks only for the man pages and the README, both of which carry `s3://`, and
+no page advertises a flag the binaries lack.
+
+### Findings
+
+Four findings, all CONFIRMED. Finding 1 was raised by both reviewers independently. None is an
+`invariants.md` §1–§12 violation, so none is auto-CRITICAL.
+
+#### [MEDIUM/CONFIRMED] 1. `AGENTS.md` describes only the local marker gate
+- **Where:** `AGENTS.md:402-406`, in the "Run-level completion marker" bullet under
+  Architecture. Load-bearing invariant 2 points at that bullet ("see Architecture").
+- **Failure scenario:**
+  - The bullet says "All three readers call `lib::index_version_error` first … via
+    `lib::index_completion_warning`. Reads are capped (`MARKER_READ_LIMIT`) and non-blocking".
+  - On an `s3://` index, `xdu-find` and `xdu-view` call neither function. They read with
+    `lib::read_completion_marker_s3` (a LIST, then a HEAD), then call `lib::marker_version_error`
+    and `lib::marker_completion_warning`, and refuse an oversized marker as
+    `MarkerRead::Oversized` without fetching it.
+  - `invariants.md` §2b already says this; cycle 1's finding 6 corrected it there. But
+    `AGENTS.md` declares that it wins when the two drift, and the copy that wins is the narrower
+    one.
+- **Evidence:** a grep of `AGENTS.md` finds 0 matches for each of `read_completion_marker_s3`,
+  `marker_version_error`, `marker_completion_warning` and `Oversized`. `invariants.md` has 1–2
+  each (A, B). O read the bullet.
+- **Severity:** B argued HIGH, since invariant 2 delegates the marker rule to this bullet. It is
+  graded MEDIUM, as cycle 1's finding 6 was. The gate text that `xdu-plan` and `xdu-review` draw
+  from, `invariants.md` §2b, is correct, so no gate is degraded.
+- **Touches:** operating-manual drift (rubric scope item 5); §2b.
+
+#### [MEDIUM/CONFIRMED] 2. The documented S3 wire-gate command fails 21 of its 43 tests
+- **Where:**
+  - `AGENTS.md:216` (Commands) and `AGENTS.md:578` (Testing) give
+    `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 43`.
+  - `tests/common/s3.rs:64-79`: `test_extension_dir` checks the file relative to the test's own
+    working directory, then returns the value unchanged.
+  - `tests/common/s3.rs:345,356` pass that value to the spawned binaries as
+    `XDU_EXTENSION_DIR`, and those binaries run in an empty temporary working directory
+    (`:836`).
+- **Failure scenario:**
+  - A contributor who runs the gate exactly as the manual says sees 21 S3 tests fail with
+    "httpfs not found". They are all the tests that hand the directory to a child.
+  - The failure is loud, never a silent pass. CI is unaffected, because it passes the absolute
+    `runner.temp` path.
+  - The script's own default, `$PWD/target/test-ext`, works. So does any absolute path.
+  - Cycle 1's finding 5 remediation introduced this text.
+- **Evidence:**
+  - O ran the documented command: exit 1, `test result: FAILED. 22 passed; 21 failed`, with
+    `s3-wire.sh: cargo test exited 101`.
+  - The same script with the variable unset: `43 of 43 passed`.
+  - A reproduced the split with `cargo test` directly.
+- **Touches:** operating-manual drift (rubric scope item 5): the local form of a standing CI gate.
+  Also R10's local half.
+
+#### [LOW/CONFIRMED] 3. A bucket name that carries `host:port#` moves the writer to that host
+- **Where:** `src/s3.rs:100-134` (`S3Locator::parse` refuses only `@` and glob metacharacters in
+  the bucket), `src/s3.rs:411-419` (`client_endpoint_url` builds
+  `https://{bucket}.{authority}`), used at `src/s3.rs:830`.
+- **Failure scenario:**
+  - With no endpoint override, the writer's URL is `https://<bucket>.s3.<region>.amazonaws.com`.
+  - A bucket of `127.0.0.1:PORT#` turns that into a URL whose authority is `127.0.0.1:PORT`. The
+    rest of the intended host falls into the fragment.
+  - The writer then sends its signed requests, session token included, to a host that none of
+    R5's sources named.
+  - For the same locator the reader fails DNS instead. The writer and the readers address
+    different hosts, which is the coherence the resolver's `endpoint_authority` exists to
+    guarantee.
+  - A real S3 bucket name cannot hold `:` or `#`.
+  - It is graded LOW because the operator types the locator and could name any endpoint through
+    `AWS_ENDPOINT_URL` anyway. No trust boundary is crossed.
+- **Evidence:**
+  - A's probe, re-run by O. A loopback TCP recorder listened on an ephemeral port; then this
+    ran: `env -i PATH=… HOME=<empty> AWS_ACCESS_KEY_ID=k AWS_SECRET_ACCESS_KEY=s
+    AWS_SESSION_TOKEN=tok AWS_REGION=us-east-1 target/debug/xdu SRC -o
+    's3://127.0.0.1:PORT#/idx'`.
+  - `xdu` exited 1 with "cannot reach the S3 endpoint while listing the index prefix … Error
+    performing GET https://127.0.0.1:PORT/?list-type=2&prefix=idx%2F". (In O's run the `s` of
+    `https` printed as `<redacted>`, because the probe's one-character secret was struck from
+    the text.)
+  - The recorder logged 4 connections, each opening with a TLS ClientHello (`160301`): the
+    first try and three retries.
+  - The same locator through `xdu-find -i` made no connection (A).
+  - That the token would reach a host with a valid certificate is inferred: the recorder ended
+    each handshake, so no request was sent.
+- **Touches:** R5 ("one resolver … SHALL serve both the writer and the readers"; the endpoint
+  comes from R5's sources).
+
+#### [LOW/CONFIRMED] 4. A non-UTF-8 locator echoes the credentials written before `@`
+- **Where:** `src/s3.rs:101-103`. The UTF-8 check prints the locator, and it runs before the `@`
+  check at `src/s3.rs:109-116`. That check's comment says it must come "before anything that
+  would print the locator: the part before `@` may be a secret".
+- **Failure scenario:**
+  - A locator that carries `KEY:SECRET@` and also one byte that is not UTF-8 is refused by the
+    UTF-8 check, and that refusal prints the secret to stderr.
+  - `xdu`, `xdu-find` and `xdu-view` are affected. `xdu-rm` is not, because it refuses on the
+    scheme first.
+  - The secret is one the operator typed on their own command line, and the input is an edge
+    case.
+- **Evidence:**
+  - B's probe, re-run by O. `env -i PATH=/usr/bin:/bin HOME=<empty> target/debug/xdu-find -i
+    $'s3://AKIDEXAMPLE:topsecret-Zq9@bucket/p\xff' --count` printed `Error: S3 locator is not
+    valid UTF-8: s3://AKIDEXAMPLE:topsecret-Zq9@bucket/p�` and exited 1.
+  - The control, the same locator without `\xff`, printed the non-echoing "an S3 locator must not
+    carry credentials before the bucket" message.
+  - B saw the same echo from `xdu -o`.
+- **Touches:** R5 ("No secret SHALL appear … in any output").
+
+**Considered and dropped:**
+- **Reader error bodies leaking the token:** DuckDB prints no response body (A, B).
+- **Partition-name and prefix parity, `+` in listings:** all names matched (A, B).
+- **Proxy bypass:** behaves as documented (A, B).
+- **The race between the marker HEAD and GET:** the local reader has the same stat-then-read
+  window, so this is parity, not a regression (B).
+- **Small chunks fetched by one range that covers the whole object:** that is DuckDB reading the
+  footer, and every chunk GET was ranged (B).
+- **A region in the shared credentials file going unread:** no reference implementation was
+  available here to confirm a divergence (B).
+- **DNS threads outside §7's budget:** could not be measured, since `ps` is refused (B).
+- **Redaction of a very short secret mangling the error text:** O saw it with a one-character
+  probe secret. Real key material is far longer, so it is not a finding.
+
+### Human-gate triggers
+
+- **Triggered by path.** Findings 3 and 4 are CONFIRMED and sit in `src/s3.rs`, which is on the
+  authoritative list. Neither breaks §1, §2, §4 or §5 as written: no credential becomes SQL text,
+  and the marker ordering holds.
+- **Bounded loop.** This is cycle 2 without convergence, with one cycle left in the ≤3 bound.
+  The skill escalates to the human.
+- **Recommendation: fix all four in one remediation run, with human sign-off on the `src/s3.rs`
+  changes.** Each fix is small and local, and the fix is cheaper than a deferral seed:
+  1. Bring `AGENTS.md`'s marker bullet in line with §2b.
+  2. Make `test_extension_dir` return an absolute path, so the documented command works as
+     written.
+  3. Have `S3Locator::parse` refuse a bucket whose characters could change the URL's authority,
+     naming the character. Add a wire test that drives a `#` locator against a loopback
+     listener and expects 0 connections.
+  4. Run the `@` check before the UTF-8 check, or leave the locator out of the UTF-8 error.
+
+### Optional completeness sub-pass (separate reviewer; may see TECH.md)
+
+Not run (no `completeness` argument).

@@ -3,7 +3,7 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_review
+status: blocked
 branch: feature/s3-index-target
 base: main
 current_phase: done
@@ -138,11 +138,11 @@ phases:
     --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo
     P5-GATE-GREEN'
 review:
-  last_reviewed_commit: 435239ce522752a6f894ac30f0aa237354b9e3e4
+  last_reviewed_commit: ef4fedfb859756bb5a52f1461cd7cb5e48e9aeea
   verdict: changes-requested
-  blocked_reason: 'review cycle 1: R5 endpoint fallback, profile-header parse, writer
-    error echo; gate-list drift'
-  cycle: 1
+  blocked_reason: 'review cycle 2: AGENTS.md marker bullet and wire-gate path; two
+    s3.rs locator edges'
+  cycle: 2
 ---
 # TECH.md — Build an index into S3 and query it in place
 
