@@ -3,7 +3,7 @@ slug: duckdb-extension-distribution
 title: Ship DuckDB extensions instead of downloading them
 kind: feature
 appetite: small
-status: in_review
+status: done
 branch: feature/duckdb-extension-distribution
 base: main
 current_phase: done
