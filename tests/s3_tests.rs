@@ -93,6 +93,28 @@ fn harness_connection_reads_a_seeded_index_through_the_proxy() {
     s3.assert_proxy_clean();
 }
 
+/// A client may open a connection and never send on it: a pooled or speculative connection,
+/// or one dropped as a retry races a refusal. Such a connection is not a request, so the
+/// proxy's accounting must not fail on it, whether it was dropped or is still idle.
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn harness_a_connection_that_carries_nothing_is_not_a_request() {
+    let (s3, _work) = seeded();
+    // Both open before the read below, and the proxy accepts in order, so both are accepted
+    // by the time the read has its answer: one closed at once, one held open, empty, past the
+    // assertion.
+    drop(std::net::TcpStream::connect(s3.proxy_addr()).unwrap());
+    let idle = std::net::TcpStream::connect(s3.proxy_addr()).unwrap();
+
+    let conn = open_s3_connection_from(&s3.settings(), s3.extension_dir())
+        .unwrap_or_else(|e| panic!("open_s3_connection failed: {e:#}"));
+    assert_eq!(count_rows(&conn, &s3).unwrap(), ROWS as i64);
+    assert!(!s3.requests().is_empty(), "the read sent no request");
+    s3.assert_no_whole_parquet_get();
+    s3.assert_proxy_clean();
+    drop(idle);
+}
+
 #[test]
 #[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
 fn harness_wrong_secret_is_refused_without_echoing_it() {

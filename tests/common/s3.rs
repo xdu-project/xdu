@@ -22,7 +22,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
@@ -275,6 +275,8 @@ impl S3 for UrlEncodedListing {
 /// A loopback S3 endpoint behind a counting proxy.
 pub struct TestS3 {
     proxy: CountingProxy,
+    /// Connections the endpoint itself accepted. Only the proxy is told its address.
+    endpoint_connections: Arc<AtomicUsize>,
     // Dropped after the proxy, so the proxy never forwards to a stopped server mid-test.
     runtime: Option<tokio::runtime::Runtime>,
     root: TempDir,
@@ -308,6 +310,8 @@ impl TestS3 {
         );
         builder.set_auth(auth);
         let service = builder.build();
+        let endpoint_connections = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::clone(&endpoint_connections);
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).expect("endpoint listener");
             let http = ConnBuilder::new(TokioExecutor::new());
@@ -315,6 +319,7 @@ impl TestS3 {
                 let Ok((socket, _)) = listener.accept().await else {
                     continue;
                 };
+                accepted.fetch_add(1, Ordering::SeqCst);
                 let conn = http
                     .serve_connection(TokioIo::new(socket), service.clone())
                     .into_owned();
@@ -325,6 +330,7 @@ impl TestS3 {
         let proxy = CountingProxy::start(endpoint);
         TestS3 {
             proxy,
+            endpoint_connections,
             runtime: Some(runtime),
             root,
             extension_dir,
@@ -455,10 +461,16 @@ impl TestS3 {
         self.proxy.records()
     }
 
-    /// Every request named an object or a listing in this bucket, every connection carried
-    /// exactly one request, and the proxy hit no error of its own.
+    /// The proxy hit no error of its own, every connection that carried bytes carried exactly
+    /// one recorded request, and the endpoint saw no connection but the proxy's one per
+    /// recorded request. A connection that carried nothing is not a request.
     pub fn assert_proxy_clean(&self) {
-        self.proxy.assert_clean();
+        self.proxy.assert_clean(&self.endpoint_connections);
+    }
+
+    /// The proxy's address, for a test of the proxy itself.
+    pub fn proxy_addr(&self) -> SocketAddr {
+        self.proxy.addr
     }
 
     /// No GET of a `*.parquet` key covered the whole object. A GET without a `Range`, an
@@ -560,15 +572,33 @@ fn percent_decode(text: &str) -> String {
 struct ProxyState {
     records: Mutex<Vec<ProxyRecord>>,
     errors: Mutex<Vec<String>>,
-    connections: AtomicUsize,
+    /// Every connection accepted, in accept order.
+    connections: Mutex<Vec<Arc<ProxyConnection>>>,
 }
+
+/// What became of one accepted connection.
+#[derive(Default)]
+struct ProxyConnection {
+    /// The client sent at least one byte.
+    carried: AtomicBool,
+    /// The request those bytes made was recorded.
+    recorded: AtomicBool,
+    /// The relay is finished with the connection, whatever the outcome.
+    done: AtomicBool,
+}
+
+/// How long `assert_clean` waits for connections still relaying a request.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A std-only HTTP/1.1 relay that records every request it forwards.
 ///
-/// Each connection carries one request: the proxy forwards it with `Connection: close`, reads
-/// the response to EOF, relays it with `Connection: close`, and closes. A client that pipelined
-/// a second request on the same connection is recorded as an error rather than silently
-/// missed. `Host` passes through unchanged, since SigV4 signs it.
+/// A connection carries at most one request: the proxy forwards it with `Connection: close`,
+/// reads the response to EOF, records the request, relays the response with
+/// `Connection: close`, and closes. A client that pipelined a second request on the same
+/// connection is recorded as an error rather than silently missed. A connection that closes or
+/// idles out before sending a byte carries no request and is not one: a client may open a
+/// pooled or speculative connection and never use it, or drop one when a retry races a
+/// refusal. `Host` passes through unchanged, since SigV4 signs it.
 struct CountingProxy {
     addr: SocketAddr,
     state: Arc<ProxyState>,
@@ -595,12 +625,18 @@ impl CountingProxy {
                         break;
                     }
                     let Ok(stream) = stream else { continue };
-                    state.connections.fetch_add(1, Ordering::SeqCst);
+                    let connection = Arc::new(ProxyConnection::default());
+                    state
+                        .connections
+                        .lock()
+                        .unwrap()
+                        .push(Arc::clone(&connection));
                     let state = Arc::clone(&state);
                     thread::spawn(move || {
-                        if let Err(e) = relay(stream, upstream, &state) {
+                        if let Err(e) = relay(stream, upstream, &state, &connection) {
                             state.errors.lock().unwrap().push(e.to_string());
                         }
+                        connection.done.store(true, Ordering::SeqCst);
                     });
                 }
             })
@@ -617,15 +653,55 @@ impl CountingProxy {
         self.state.records.lock().unwrap().clone()
     }
 
-    fn assert_clean(&self) {
+    /// The proxy hit no error; every connection that carried a byte carried a request that was
+    /// recorded; and the endpoint accepted exactly one connection per recorded request, so no
+    /// request reached it except through the recorder. Connections that carried nothing are
+    /// not requests and are not counted.
+    ///
+    /// Callers assert once their clients have exited, but a relay may still be finishing a
+    /// request a client gave up on, so connections that carried bytes are waited for first.
+    fn assert_clean(&self, endpoint_connections: &AtomicUsize) {
+        let deadline = Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            let relaying = self
+                .connections()
+                .iter()
+                .filter(|c| c.carried.load(Ordering::SeqCst) && !c.done.load(Ordering::SeqCst))
+                .count();
+            if relaying == 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{relaying} connection(s) still relaying a request after {SETTLE_TIMEOUT:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
         let errors = self.state.errors.lock().unwrap().clone();
         assert!(errors.is_empty(), "the counting proxy failed: {errors:#?}");
-        let connections = self.state.connections.load(Ordering::SeqCst);
-        let requests = self.state.records.lock().unwrap().len();
+        let connections = self.connections();
+        let carried = connections
+            .iter()
+            .filter(|c| c.carried.load(Ordering::SeqCst))
+            .count();
+        let unrecorded = connections
+            .iter()
+            .filter(|c| c.carried.load(Ordering::SeqCst) && !c.recorded.load(Ordering::SeqCst))
+            .count();
         assert_eq!(
-            requests, connections,
-            "{connections} connection(s) carried {requests} recorded request(s)"
+            unrecorded, 0,
+            "{unrecorded} of {carried} connection(s) that carried bytes have no recorded request"
         );
+        let requests = self.state.records.lock().unwrap().len();
+        let reached = endpoint_connections.load(Ordering::SeqCst);
+        assert_eq!(
+            reached, requests,
+            "the endpoint accepted {reached} connection(s) for {requests} recorded request(s)"
+        );
+    }
+
+    fn connections(&self) -> Vec<Arc<ProxyConnection>> {
+        self.state.connections.lock().unwrap().clone()
     }
 
     fn stop(&mut self) {
@@ -703,14 +779,25 @@ fn read_head(stream: &mut TcpStream) -> io::Result<Option<(Head, Vec<u8>)>> {
     )))
 }
 
-fn relay(mut client: TcpStream, upstream: SocketAddr, state: &ProxyState) -> io::Result<()> {
+fn relay(
+    mut client: TcpStream,
+    upstream: SocketAddr,
+    state: &ProxyState,
+    connection: &ProxyConnection,
+) -> io::Result<()> {
     client.set_read_timeout(Some(IO_TIMEOUT))?;
     client.set_write_timeout(Some(IO_TIMEOUT))?;
-    // A connection that closes before sending anything carries no request: the acceptor's own
-    // wake-up at shutdown, or a client that gave up. It is not counted as one.
+    // A connection that closes, resets or idles out before sending a byte carries no request:
+    // a client's unused pooled or speculative connection, one dropped as a retry raced a
+    // refusal, or the acceptor's own wake-up at shutdown.
+    match client.peek(&mut [0u8; 1]) {
+        Ok(n) if n > 0 => connection.carried.store(true, Ordering::SeqCst),
+        _ => return Ok(()),
+    }
     let Some((request, mut body)) = read_head(&mut client)? else {
-        state.connections.fetch_sub(1, Ordering::SeqCst);
-        return Ok(());
+        return Err(io::Error::other(
+            "connection closed before a head it had begun",
+        ));
     };
     if request
         .header("transfer-encoding")
@@ -765,19 +852,18 @@ fn relay(mut client: TcpStream, upstream: SocketAddr, state: &ProxyState) -> io:
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    // Recorded before the client sees a byte of the response, so a client that has its answer
+    // never outruns the record. The relay back is best effort: the request reached the
+    // endpoint and is accounted for, whether or not the client stayed to read the answer.
     let head = response.closing();
-    client.write_all(&head)?;
-    client.write_all(&response_body)?;
-    client.flush()?;
-    let _ = client.shutdown(Shutdown::Both);
-
+    let bytes_to_client = (head.len() + response_body.len()) as u64;
     state.records.lock().unwrap().push(ProxyRecord {
         method,
         target,
         range: request.header("range").map(str::to_string),
         status,
         content_range: response.header("content-range").map(str::to_string),
-        bytes_to_client: (head.len() + response_body.len()) as u64,
+        bytes_to_client,
         amz_headers: request
             .headers
             .iter()
@@ -785,6 +871,12 @@ fn relay(mut client: TcpStream, upstream: SocketAddr, state: &ProxyState) -> io:
             .filter(|name| name.starts_with("x-amz-"))
             .collect(),
     });
+    connection.recorded.store(true, Ordering::SeqCst);
+    let _ = client
+        .write_all(&head)
+        .and_then(|()| client.write_all(&response_body))
+        .and_then(|()| client.flush());
+    let _ = client.shutdown(Shutdown::Both);
     Ok(())
 }
 
@@ -894,12 +986,25 @@ fn stop_acceptor(addr: SocketAddr, stopping: &AtomicBool, acceptor: &mut Option<
 /// A loopback listener that stands for a host no request should reach: it accepts every
 /// connection, keeps the first bytes the client sent, and closes it. It speaks no protocol, so
 /// a TLS client fails its handshake here, but the connection is counted first.
+///
+/// Every connection counts, an empty one included. Nothing but the code under test is given
+/// this address, so dialling it at all is the defect a test looks for; unlike the counting
+/// proxy, where a client's unused connection is harmless, here there is no harmless one.
 pub struct CountingListener {
     addr: SocketAddr,
-    openings: Arc<Mutex<Vec<Vec<u8>>>>,
+    openings: Arc<Mutex<Vec<Arc<Opening>>>>,
     stopping: Arc<AtomicBool>,
     acceptor: Option<JoinHandle<()>>,
 }
+
+/// One accepted connection: its first bytes, once read.
+#[derive(Default)]
+struct Opening {
+    bytes: Mutex<Option<Vec<u8>>>,
+}
+
+/// How long a `CountingListener` waits for a client's first bytes.
+const OPENING_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl CountingListener {
     pub fn start() -> CountingListener {
@@ -908,13 +1013,28 @@ impl CountingListener {
         let addr = listener.local_addr().expect("listener address");
         let openings = Arc::new(Mutex::new(Vec::new()));
         let stopping = Arc::new(AtomicBool::new(false));
-        let kept = Arc::clone(&openings);
-        let acceptor = spawn_acceptor(listener, Arc::clone(&stopping), move |mut stream| {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-            let mut first = [0u8; 16];
-            let n = stream.read(&mut first).unwrap_or(0);
-            kept.lock().unwrap().push(first[..n].to_vec());
-        });
+        let acceptor = {
+            let openings = Arc::clone(&openings);
+            let stopping = Arc::clone(&stopping);
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if stopping.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(mut stream) = stream else { continue };
+                    // Counted here, at accept, not once its bytes are in: a test that asks
+                    // after its client exited sees every connection the client made.
+                    let opening = Arc::new(Opening::default());
+                    openings.lock().unwrap().push(Arc::clone(&opening));
+                    thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(OPENING_TIMEOUT));
+                        let mut first = [0u8; 16];
+                        let n = stream.read(&mut first).unwrap_or(0);
+                        *opening.bytes.lock().unwrap() = Some(first[..n].to_vec());
+                    });
+                }
+            })
+        };
         CountingListener {
             addr,
             openings,
@@ -927,9 +1047,25 @@ impl CountingListener {
         self.addr
     }
 
-    /// The first bytes of every connection accepted so far, one entry per connection.
+    /// The first bytes of every connection accepted so far, one entry per connection, empty
+    /// for a connection that sent nothing. Waits for each connection's first read to finish.
     pub fn openings(&self) -> Vec<Vec<u8>> {
-        self.openings.lock().unwrap().clone()
+        let openings = self.openings.lock().unwrap().clone();
+        let deadline = Instant::now() + OPENING_TIMEOUT + Duration::from_secs(1);
+        openings
+            .iter()
+            .map(|opening| {
+                loop {
+                    if let Some(bytes) = opening.bytes.lock().unwrap().clone() {
+                        break bytes;
+                    }
+                    if Instant::now() >= deadline {
+                        break Vec::new();
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+            })
+            .collect()
     }
 }
 

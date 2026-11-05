@@ -107,7 +107,7 @@ jobs:
       - name: S3 tests
         env:
           XDU_TEST_EXTENSION_DIR: ${{ runner.temp }}/xdu-ext
-        run: sh tests/s3-wire.sh "" 45
+        run: sh tests/s3-wire.sh "" 46
 
   # Mirrors HyperShell's packaging-metadata job: regenerate the shipped artifacts and fail
   # if any are missing. Because man pages come from doc/*.scd and completions come from

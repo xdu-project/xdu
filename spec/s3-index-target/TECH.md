@@ -21,9 +21,10 @@ phases:
   parallel: false
   hammerable: false
   hill: downhill
-  verify: 'set -eu; sh tests/s3-wire.sh harness_ 6; cargo test --locked --lib s3::
-    >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]* passed" target/p1-lib.log;
-    for t in the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on
+  verify: 'set -eu; sh tests/s3-wire.sh harness_ 7; grep -qF "test harness_a_connection_that_carries_nothing_is_not_a_request
+    ... ok" target/wire-harness_.log; cargo test --locked --lib s3:: >target/p1-lib.log
+    2>&1; grep -qE "test result: ok. [1-9][0-9]* passed" target/p1-lib.log; for t
+    in the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on
     the_secret_statement_addresses_by_endpoint the_writer_and_the_readers_address_the_same_host
     a_region_that_would_name_another_host_is_refused_for_aws a_comment_after_a_section_header_keeps_the_profiles_apart
     a_malformed_section_header_takes_no_keys_from_or_into_another_profile section_headers_follow_the_shared_file_rules
@@ -346,7 +347,7 @@ siblings.
   documented S3-tier command was run as written: `cargo build --locked --example extension-probe`
   green; `fetch.sh` (to a scratch destination, so the pinned file was not rewritten) fetched a
   file byte-identical to `target/test-ext/httpfs.duckdb_extension`; and the wire command. The
-  Commands line and the workflow carry the new minimum, 45.
+  Commands line and the workflow carry the new minimum, 46 after F5's test.
 - **F3 (LOW) → P1.** `S3Locator::parse` takes S3's bucket naming rules as an allow-list: 3 to 63
   characters, lowercase letters, digits, `.` and `-`, a letter or digit at each end, no `..`.
   That refuses every character the review named (`:`, `#`, `/`, `?`, `@`, `\`, `%`, whitespace)
@@ -382,6 +383,36 @@ siblings.
   form and the two `/`-in-secret forms through all three tools: on the old parser 7 outputs
   carried the key or secret and the writer made 4 connections, and now 0 and 0. The unit test
   `no_locator_refusal_prints_the_credentials` covers ten forms.
+- **F5 (flaky harness assertion, observed by the foreman) → P1.** Tests run 42048443198 on
+  `435239c`, a spec-only head whose code was green before and after, failed once on ubuntu in
+  `harness_wrong_secret_is_refused_without_echoing_it`: "4 connection(s) carried 3 recorded
+  request(s)". The counting proxy asserted connections equal requests, but a client may open a
+  connection and close it, or leave it idle, without sending a byte: a pooled or speculative
+  connection, or one dropped as a retry races a 403. Its relay also pushed the record only after
+  relaying the response, so a client could finish before its request was counted, and a client
+  that hung up early turned a recorded request into a proxy error. Now each accepted connection
+  is tracked: a `peek` decides whether it carried a byte; one that closes, resets or idles out
+  first is not a request. A request is recorded before the client sees a byte of the response,
+  and the relay back is best effort. `assert_clean` waits (up to 30 s) for connections still
+  relaying, then asserts what the equality stood for: no proxy error, every connection that
+  carried bytes has its recorded request, and the endpoint accepted exactly one connection per
+  recorded request, so nothing reached it except through the recorder. That last check is new;
+  the old equality could not see a request that bypassed the proxy. Sweep of the siblings in
+  `tests/common/s3.rs`: `CountingListener` (the F1, F3 and F4 tests' "no host reached" listener)
+  counted a connection only once its first read finished, so a test reading it right after its
+  client exited could miss one; it now counts at accept, and `openings()` waits for the reads.
+  There an empty connection still counts, by design: only the code under test has that address,
+  so dialling it is the defect. `ConnectRecorder` and `EchoingRefusal` record a request after
+  its head arrives and before answering, and ignore empty connections, so they were already
+  right. Red first: the new wire test `harness_a_connection_that_carries_nothing_is_not_a_request`
+  holds one empty connection idle and closes another, then reads through the proxy. Against the
+  old accounting it failed 5 of 5 runs with the CI message, "4 connection(s) carried 3 recorded
+  request(s)". It passes now. Mutating the new recorder to leave GETs unrecorded failed it ("2 of
+  3 connection(s) that carried bytes have no recorded request"). Mutating it to send each GET to
+  the endpoint once more outside the record failed it ("the endpoint accepted 5 connection(s)
+  for 3 recorded request(s)"). The full wire tier then ran
+  10 times in a row in the documented relative form, `sh tests/s3-wire.sh "" 46`: 10 passed, 0
+  failed, each `46 of 46`.
 - **Man pages and README (R9).** `xdu.1`, `xdu-find.1` and `xdu-view.1` and the README's S3
   section state the bucket rule, and that a refused locator is not repeated. No counted literal
   changed. scdoc is not installed here, so the pages were not rendered.
@@ -392,7 +423,8 @@ siblings.
   `evidence/p1-ci.md` and `p5-ci.md` no longer describes the head. This is run A: local gates
   green, P1 and P5 left `in_progress`. Run B reads the CI run of the pushed head (the bullets
   under each phase) and marks them done.
-- **Gates retuned (predicates).** P1 names the new unit and always-run tests and refuses any
+- **Gates retuned (predicates).** P1 runs `harness_` at 7 and names F5's test, names the new
+  unit and always-run tests, and refuses any
   locator-echoing format in `impl S3Locator` and `bucket_name_problem`. P5 runs the wire gate in
   the documented relative form, requires `AGENTS.md`'s command to carry the listed count, requires
   the Architecture section to name the S3 marker symbols, refuses the four old local-only phrases
@@ -520,14 +552,19 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
 >   unit tests `bucket_names_follow_s3s_rules`, `no_character_outside_the_bucket_rules_reaches_the_host`,
 >   `no_locator_refusal_prints_the_credentials` and the retuned `glob_metacharacters_are_refused`
 >   failed on the old parser and pass.
-> - [x] Red first, F2: the documented relative command failed 21 of 43; it passes 45 of 45.
+> - [x] Red first, F2: the documented relative command failed 21 of 43; it passes 46 of 46.
+> - [x] Red first, F5: `harness_a_connection_that_carries_nothing_is_not_a_request` failed 5 of 5
+>   on the old proxy accounting and passes; two mutations of the new recorder (an unrecorded GET,
+>   a GET sent to the endpoint outside the record) each fail it. Gate retuned: `harness_ 7`, and
+>   the new test named in the harness log.
 > - [ ] Run B: record the evidence below.
 >
 > **Run B evidence (cycle 2):** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
-> `s3-wire: '' 45 of 45 passed`, and in that step's log
-> `test a_bucket_that_names_a_host_and_port_reaches_no_host ... ok` and
-> `test a_locator_carrying_credentials_is_refused_without_printing_them ... ok`; step "Test":
-> `s3_tests` reports `4 passed; 0 failed; 41 ignored`. If the release workflow runs on the head,
+> `s3-wire: '' 46 of 46 passed`, and in that step's log
+> `test a_bucket_that_names_a_host_and_port_reaches_no_host ... ok`,
+> `test a_locator_carrying_credentials_is_refused_without_printing_them ... ok` and
+> `test harness_a_connection_that_carries_nothing_is_not_a_request ... ok`; step "Test":
+> `s3_tests` reports `4 passed; 0 failed; 42 ignored`. If the release workflow runs on the head,
 > its four `extension-check: ok … engine=v1.4.4` lines. Record in `evidence/p1-ci.md` under a
 > "Review cycle 2" heading.
 
@@ -910,7 +947,7 @@ by count, and every deferral recorded.
 >   asserted literal (no `AWS_*`, `XDU_*` or `s3://` text) and no line opens with `.` or `'`.
 > - [ ] Run B: record the evidence below.
 >
-> **Run B evidence (cycle 2):** both test legs' `s3-wire: '' 45 of 45 passed`, equal to the
+> **Run B evidence (cycle 2):** both test legs' `s3-wire: '' 46 of 46 passed`, equal to the
 > workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published
 > man-page text"; the Lint job green. Record in `evidence/p5-ci.md`.
 
