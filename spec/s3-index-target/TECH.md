@@ -3,10 +3,10 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_progress
+status: in_review
 branch: feature/s3-index-target
 base: main
-current_phase: P5
+current_phase: done
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -94,7 +94,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: in_progress
+  status: done
   satisfies:
   - R9
   - R10
@@ -601,7 +601,10 @@ by count, and every deferral recorded.
 - [x] If P4 was cut by amendment, record `issues/s3-index-view.md` and its ROADMAP entry here.
   *Run A:* not cut; nothing to record.
 - **Run B evidence:** test legs as above with N ≥ 34 (the final `<min>` in the workflow equals the
-  listed count); the Packaging job's literal step green on all four pages.
+  listed count); the Packaging job's literal step green on all four pages. *Recorded by run B in
+  [`evidence/p5-ci.md`](evidence/p5-ci.md) (tests run 42040878700 on merge ref `506097e`, whose
+  tree is `b6673d3`'s; N = 41 on both legs, equal to the workflow's minimum; the literal step
+  green on all four pages).*
 - **Verify:** see frontmatter.
 - **Touches:** `issues/`, `ROADMAP.md`, `.github/workflows/test.yaml`, `AGENTS.md`, `doc/*.scd`.
 
