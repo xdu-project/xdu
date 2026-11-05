@@ -3,15 +3,15 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_progress
+status: in_review
 branch: feature/s3-index-target
 base: main
-current_phase: P1
+current_phase: done
 last_updated: '2026-11-05'
 phases:
 - id: P1
   name: Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
-  status: in_progress
+  status: done
   satisfies:
   - R5
   - R7
@@ -62,7 +62,7 @@ phases:
     P2-GATE-GREEN
 - id: P3
   name: xdu -o s3:// builds the index into the bucket
-  status: in_progress
+  status: done
   satisfies:
   - R1
   - R4
@@ -107,7 +107,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: in_progress
+  status: done
   satisfies:
   - R9
   - R10
@@ -260,7 +260,8 @@ ruling, though `xdu-build` Step 2.3 keeps harness changes off product branches (
   credentials file, `[profile default]` ahead of `[default]`. Not changed, recorded for the
   foreman: a `#`/`;` after a property value is part of the value here, as botocore reads it; the
   AWS SDKs' profile parser strips it when whitespace precedes it. Either way a wrong value fails
-  closed (a refused signature or a named error).
+  closed (a refused signature or a named error). *Ruling, 2026-11-05 (foreman, run B):* keep it.
+  A `#` or `;` after a value stays part of the value, as botocore reads it, and fails closed.
 - **F4 (MEDIUM) → P3.** `S3Sink::request_error` printed object_store's text, which quotes the
   response body. It now keeps the client's words up to the body, then the status and the body's
   S3 `<Code>`, and strikes the secret and token from the text as a last guard. Class sweep: every
@@ -288,9 +289,15 @@ ruling, though `xdu-build` Step 2.3 keeps harness changes off product branches (
 - **Run A / run B.** The fix changes `src/` and `.github/workflows/`, so the CI evidence in
   `evidence/p1-ci.md`, `p3-ci.md` and `p5-ci.md` no longer describes the head. This remediation is
   run A: local gates green, P1, P3 and P5 left `in_progress`. Run B reads the CI run of the pushed
-  head (bullets below) and marks them done. The release workflow does not run on this diff (its
-  pull-request paths name `src/engine.rs`, not `src/s3.rs`, and nothing in `Cargo.*` changed), so
-  P1's and P3's release-leg evidence stays at `b6673d3`.
+  head (bullets below) and marks them done. Run A expected no release run, since this diff touches
+  none of the release workflow's pull-request paths. *Corrected 2026-11-05 (run B):* GitHub
+  filters a `pull_request` run by the pull request's whole diff against `main`, which still holds
+  `Cargo.toml` and `src/engine.rs` from earlier phases, so release run 42058061145 ran at
+  `fbecdb7`. Its legs built the explicit object_store endpoint, and that evidence is recorded.
+- **Closed 2026-11-05 (run B).** Tests run 42058060960 (merge ref `0d80d6a`, tree `fbecdb7`'s),
+  release run 42058061145 and image run 42058061014 are quoted under "Review cycle 1" in
+  `evidence/p1-ci.md`, `p3-ci.md` and `p5-ci.md`. The P1, P3 and P5 gates were re-run and are
+  green; every phase is done and the FSM is `in_review` for review cycle 2.
 
 ---
 
@@ -390,7 +397,9 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
 > - [x] Red first, F3: the new unit tests failed on the old parser (`default` resolved to
 >   `other-id`), and `find_credentials_from_a_profile_in_the_shared_files` now drives both header
 >   forms through `xdu-find`; against the old parser it fails with "no S3 credentials".
-> - [ ] Run B: evidence below.
+> - [x] Run B: both test legs print `s3-wire: '' 43 of 43 passed` (tests run 42058060960, merge
+>   ref `0d80d6a`); release run 42058061145 at `fbecdb7` gives `extension-check: ok … engine=v1.4.4`
+>   on all four legs. Recorded in `evidence/p1-ci.md`; the P1 gate re-ran green.
 >
 > **Run B evidence (cycle 1):** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
 > `s3-wire: '' 43 of 43 passed`. Record in `evidence/p1-ci.md` under a "Review cycle 1" heading.
@@ -622,11 +631,13 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
 >   <Token-0>xdu-test-session-token-…</Token-0>". Fixed: the writer prints
 >   "… - HTTP 403 SignatureDoesNotMatch" and "… - HTTP 400 InvalidToken"; `xdu-find` prints its
 >   cause and no body in both cases.
-> - [ ] Run B: evidence below.
+> - [x] Run B: the test legs' `s3-wire: '' 43 of 43 passed`; release run 42058061145 at
+>   `fbecdb7`: every binary `needs max GLIBC_2.28` on both Linux legs and `extension-check: ok`
+>   on all four legs. Recorded in `evidence/p3-ci.md`; the P3 gate re-ran green.
 >
 > **Run B evidence (cycle 1):** the test legs' `s3-wire: '' 43 of 43 passed` (shared with P1).
-> No release run: the release workflow's paths do not cover this diff, so the release-leg
-> evidence in `evidence/p3-ci.md` stays at `b6673d3`. Record in `evidence/p3-ci.md`.
+> Run A expected no release run; one ran (see the triage correction), and its glibc-floor and
+> extension-check lines are recorded too. Record in `evidence/p3-ci.md`.
 
 ## Phase P4 — xdu-view browses an s3:// index in place
 **Satisfies:** R2, R6, R9 · **Depends on:** P3 · **Size:** ~0.5 day
@@ -753,7 +764,9 @@ by count, and every deferral recorded.
 >
 > - [x] Man pages: scdoc is not installed here, so the region sentence was not rendered. It adds
 >   no asserted literal (no `AWS_*`, `XDU_*` or `s3://` text) and no line opens with `.` or `'`.
-> - [ ] Run B: evidence below.
+> - [x] Run B: both legs `s3-wire: '' 43 of 43 passed`, equal to the minimum; the Packaging
+>   literal step printed its `OK:` line; Lint green. Recorded in `evidence/p5-ci.md`; the P5 gate
+>   re-ran green.
 >
 > **Run B evidence (cycle 1):** both test legs' `s3-wire: '' 43 of 43 passed`, equal to the
 > workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published

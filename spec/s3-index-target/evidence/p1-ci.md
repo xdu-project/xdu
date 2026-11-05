@@ -54,3 +54,64 @@ httpfs load by a debug build on linux_amd64.
     `2026-11-05T10:01:46.1294220Z extension-check: ok platform=osx_arm64 engine=v1.4.4`
   - `Build macOS (x86_64-apple-darwin)`:
     `2026-11-05T10:12:27.9248640Z extension-check: ok platform=osx_amd64 engine=v1.4.4`
+
+## Review cycle 1 (remediation run B, head `fbecdb7`)
+
+Run B of the review-cycle-1 remediation copied these lines verbatim from the CI logs of
+`fbecdb7` on draft PR #33. A record, not a gate.
+
+- **Tests workflow, run 42058060960.** It ran on `pull_request` and checked out the merge ref
+  `pull/33/merge`. That merge is `0d80d6a`, the head `fbecdb7` merged into `main` at `a0cdd95`.
+  `main` has not moved past `a0cdd95`, the merge base, so the merge's tree is `fbecdb7`'s.
+  - Job `Test (ubuntu-24.04)`, step `Run actions/checkout@9c091bb…`:
+    `2026-11-05T15:44:44.6867098Z HEAD is now at 0d80d6a Merge fbecdb7255e4f97bf43669ba953329e91f1e4793 into a0cdd95201e6cf2dff44f68ab3c6362dae907143`
+  - Job `Test (macos-15)`, same step:
+    `2026-11-05T15:44:49.1877470Z HEAD is now at 0d80d6a Merge fbecdb7255e4f97bf43669ba953329e91f1e4793 into a0cdd95201e6cf2dff44f68ab3c6362dae907143`
+- No log of run 42058060960, release run 42058061145 or image run 42058061014 holds a
+  `##[error]` line.
+
+### The S3 wire tests (tests run 42058060960, step "S3 tests")
+
+The workflow's minimum is 43, the file's listed count. Both legs passed all of them, the new
+`harness_stray_duckdb_s3_endpoint_is_not_taken_when_the_resolver_picks_aws` and
+`write_refusal_bodies_that_echo_the_session_token_are_not_printed` among them.
+
+- Job `Test (ubuntu-24.04)`:
+  `2026-11-05T15:48:49.0594620Z s3-wire: '' 43 of 43 passed`
+  `2026-11-05T15:48:49.0321873Z s3-count-bytes: received 138351 of 16784047 stored bytes (0.824%), 21 requests: LIST 2, HEAD 10, GET 9`
+- Job `Test (macos-15)`:
+  `2026-11-05T15:48:18.9658130Z s3-wire: '' 43 of 43 passed`
+  `2026-11-05T15:48:18.9687020Z s3-count-bytes: received 138351 of 16784047 stored bytes (0.824%), 21 requests: LIST 2, HEAD 10, GET 9`
+
+### Release run 42058061145 (checks out `fbecdb7` itself)
+
+The run happened although the remediation diff touches none of the release workflow's
+pull-request paths: GitHub filters a `pull_request` run by the pull request's whole diff against
+`main`, which still includes `Cargo.toml` and `src/engine.rs` from earlier phases. So the release
+legs built the new explicit object_store endpoint.
+
+- Checkout, job `Build (x86_64-unknown-linux-gnu)`:
+  `2026-11-05T15:46:01.6826165Z HEAD is now at fbecdb7 [feature] Build s3-index-target P1/P3/P5: review cycle 1 F1-F6`
+- Checkout, job `Build (aarch64-unknown-linux-gnu)`:
+  `2026-11-05T15:46:09.8936447Z HEAD is now at fbecdb7 [feature] Build s3-index-target P1/P3/P5: review cycle 1 F1-F6`
+- Step "Assert glibc floor". The log's only `floor breach`, `runtime breach` and
+  `unexpected dynamic needs` text is the step's own script being echoed.
+  - Job `Build (x86_64-unknown-linux-gnu)`:
+    `2026-11-05T16:02:32.5748745Z xdu needs max GLIBC_2.28`
+    `2026-11-05T16:02:32.6033758Z xdu-find needs max GLIBC_2.28`
+    `2026-11-05T16:02:32.6342824Z xdu-view needs max GLIBC_2.28`
+    `2026-11-05T16:02:32.6652712Z xdu-rm needs max GLIBC_2.28`
+  - Job `Build (aarch64-unknown-linux-gnu)`:
+    `2026-11-05T15:58:28.0715781Z xdu needs max GLIBC_2.28`
+    `2026-11-05T15:58:28.1009951Z xdu-find needs max GLIBC_2.28`
+    `2026-11-05T15:58:28.1336082Z xdu-view needs max GLIBC_2.28`
+    `2026-11-05T15:58:28.1662728Z xdu-rm needs max GLIBC_2.28`
+- Step "Check extensions load (cold HOME)":
+  - Job `Build (x86_64-unknown-linux-gnu)`:
+    `2026-11-05T16:03:06.5573387Z extension-check: ok platform=linux_amd64 engine=v1.4.4`
+  - Job `Build (aarch64-unknown-linux-gnu)`:
+    `2026-11-05T15:58:36.2219821Z extension-check: ok platform=linux_arm64 engine=v1.4.4`
+  - Job `Build macOS (aarch64-apple-darwin)`:
+    `2026-11-05T15:54:16.9685420Z extension-check: ok platform=osx_arm64 engine=v1.4.4`
+  - Job `Build macOS (x86_64-apple-darwin)`:
+    `2026-11-05T15:59:08.0791240Z extension-check: ok platform=osx_amd64 engine=v1.4.4`
