@@ -460,7 +460,12 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    `ORDER BY`** so `--dry-run` and the real run select identical rows.
 5. **DuckDB injection surface.** Every user value reaching `read_parquet(...)`/`WHERE` is an
    injection surface. Route it through one validated escaping/quoting helper (or bound parameters);
-   never raw `format!` a partition name or index path into SQL.
+   never raw `format!` a partition name or index path into SQL. The extension path is one too:
+   `engine::load_extension_from` puts the extension file's absolute path, from `XDU_EXTENSION_DIR`
+   or the canonical exe's `../../lib/xdu/extensions`, into `LOAD '<path>'`, and refuses a path
+   containing `'` or not valid UTF-8 before any SQL runs. The unit tests
+   `engine::tests::quoted_directory_is_refused_before_any_sql` and
+   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold that rule.
 6. **Unix-only.** `MetadataExt` (atime; disk usage = `st_blocks`×512) is load-bearing; don't add
    code assuming portability. A future S3/Windows source must special-case (S3 has no atime).
 7. **Shared rayon-pool concurrency.** See Architecture. Preserve the single-pool + driver-thread +
@@ -488,9 +493,11 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
 - **`src/bin/xdu-rm.rs`** — destructive. `--limit` needs a deterministic `ORDER BY`; `--safe` must
   re-verify the criteria it claims to (atime/size today; min-size/newer-than/pattern are gaps); the
   confirm/dry-run/force gates are load-bearing.
-- **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the SQL/injection surface),
+- **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
   `index_glob` (the one place the index layout becomes SQL), and the `ROOT_PARTITION` /
   `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list that guards both.
+- **`src/engine.rs`** — the one place a DuckDB connection opens (autoload and autoinstall off), and
+  `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5).
 - **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning; the
   reserved-index-name collision rejection in `build_work_queue`; completion-marker write/clear ordering.
 - **`src/bin/xdu.rs`** — the shared-pool concurrency model (driver threads, `thread::scope` error

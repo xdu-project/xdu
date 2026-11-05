@@ -95,4 +95,21 @@ for f in examples/*.rs; do grep -qF "$f " "$M" || { echo "map lacks $f" >&2; exi
 for d in packaging/*/; do grep -qF "$d " "$M" || { echo "map lacks $d" >&2; exit 1; }; done
 for f in clippy.toml; do grep -qE "^$f +#" "$M" || { echo "map lacks $f" >&2; exit 1; }; done
 
+# Invariant 5 names every module that formats a non-query statement (LOAD, SET, INSTALL, ...)
+# into SQL, in both manuals: invariants.md section 5 by path, AGENTS.md item 5 by module.
+I5="$S/inv5"
+A5="$S/agents5"
+awk '/^## 5\. / { m = 1; print; next } m && /^## / { exit } m' .agents/factory/invariants.md > "$I5"
+awk '/^5\. \*\*DuckDB injection surface/ { m = 1; print; next } m && /^[0-9]+\. / { exit } m' AGENTS.md > "$A5"
+[ -s "$I5" ]
+[ -s "$A5" ]
+mods=$(git grep -lE 'format!\("(LOAD|SET|INSTALL|PRAGMA|ATTACH|COPY|EXPORT|IMPORT) ' -- src)
+[ -n "$mods" ]
+for f in $mods; do
+    m=${f#src/}
+    m=${m%.rs}
+    grep -qF "$f" "$I5" || { echo "invariants.md section 5 does not name $f" >&2; exit 1; }
+    grep -qF "$m::" "$A5" || { echo "AGENTS.md invariant 5 does not name $m::" >&2; exit 1; }
+done
+
 echo P4-GATE-GREEN

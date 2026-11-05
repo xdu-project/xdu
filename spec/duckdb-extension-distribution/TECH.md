@@ -3,7 +3,7 @@ slug: duckdb-extension-distribution
 title: Ship DuckDB extensions instead of downloading them
 kind: feature
 appetite: small
-status: blocked
+status: in_review
 branch: feature/duckdb-extension-distribution
 base: main
 current_phase: done
@@ -137,6 +137,21 @@ nothing here departs from it.
   `AGENTS.md` (P4) now states what `check.sh` (P2) proves, and the tightened `verify/p3.sh` (P3)
   is what turns the stale evidence red once the release-path change lands. Split, one commit
   would carry a false manual or a green P3 gate over stale evidence.
+
+## Review cycle 2 — remediation triage
+
+[`REVIEW.md`](REVIEW.md) (cycle 2, changes-requested at b4d8d9f) raised one finding.
+
+- **F4 (HIGH, CONFIRMED), fix now → P4, text only, one commit.** `invariants.md` §5 and
+  `AGENTS.md` invariant 5 bounded the SQL-injection surface to `read_parquet(...)`/`WHERE`, and
+  did not name the extension path that `engine::load_extension_from` puts into `LOAD '<path>'`.
+  Both texts now name it, with its sources (`XDU_EXTENSION_DIR`, the canonical executable path),
+  the refusal rule (a `'` or non-UTF-8 path is refused before any SQL), and the two unit tests that
+  hold the rule. The code is unchanged; it was safe as built.
+- **Human gate.** F4 touches §5, one of the invariants that always require sign-off. The gate
+  judge confirmed the §5 text amendment and the fix-now triage.
+- **No release-path input changes**, so P3's evidence at 78daf41 stays valid; `verify/p3.sh`
+  stays green.
 
 ---
 
@@ -355,6 +370,23 @@ and the new layout is the recorded contract.
 >
 > - [x] Repository map entries for the four paths (F2), plus `packaging/rpm/` (sweep).
 > - [x] `verify/p4.sh` asserts the map predicate, seen red first.
+
+> **Amendment (P4, review cycle 2 remediation):** F4 — §5 in `invariants.md` (heading now "all
+> readers and the extension loader") and `AGENTS.md` invariant 5 name the extension path reaching
+> `LOAD`, its two sources, the refusal `load_extension_from` enforces, and the unit tests
+> `engine::tests::quoted_directory_is_refused_before_any_sql` and
+> `engine::tests::non_utf8_directory_is_refused_before_any_sql`. The sweep found one more live site:
+> the High-risk files quick reference called `QueryFilters` *the* injection surface, so it now says
+> the reader-query surface and gains a `src/engine.rs` entry. The review rubric, the review skill
+> and `invariants.md`'s high-blast list cite §5 by number only and enumerate no surfaces, so they
+> are unchanged.
+> **Gate retuned (check added, none weakened):** `verify/p4.sh` evaluates the class predicate:
+> every `src/` module that formats a non-query statement (`LOAD`, `SET`, `INSTALL`, `PRAGMA`,
+> `ATTACH`, `COPY`, `EXPORT`, `IMPORT`) into SQL is named by path in §5 and by module in
+> `AGENTS.md` invariant 5. Against the cycle-2 manuals it is red on each file.
+>
+> - [x] §5 and `AGENTS.md` invariant 5 amended in lockstep (F4).
+> - [x] `verify/p4.sh` asserts the §5 predicate, seen red first.
 - **Touches:** `install.sh`, `Dockerfile`, `.dockerignore` (if needed), `hpccm/xdu.py`, `AGENTS.md`,
   `.agents/factory/invariants.md`, `README.md`, `ROADMAP.md`, `issues/s3-index-target.md`,
   `issues/native-os-packages-deb-rpm.md`, `issues/hpccm-extension-guard.md` (new).

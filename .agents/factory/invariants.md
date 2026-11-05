@@ -130,7 +130,7 @@ ordering is load-bearing:
   `ORDER BY`** so `--dry-run` and the real run select **identical** rows. A `LIMIT` without `ORDER BY`
   returns an arbitrary/unstable subset.
 
-## 5. DuckDB injection surface (all readers)
+## 5. DuckDB injection surface (all readers and the extension loader)
 
 - Every user-supplied value that reaches `read_parquet(...)` or a `WHERE`/`LIKE` clause is an
   injection surface: `--pattern`, `--partition` (`-u`), and the index path. Today only `--pattern` is
@@ -138,6 +138,16 @@ ordering is load-bearing:
 - Route all such values through **one** validated escaping/quoting helper (or bound parameters). Numeric
   filters (`i64`) are injection-safe by type. Forbid raw `format!` of a partition name / index path
   into SQL — in the destructive `xdu-rm` a quote or `../`/glob-meta could escape the intended partition.
+- The extension path is an injection surface too. `engine::load_extension_from` (`src/engine.rs`)
+  puts the absolute path of a pinned extension file into `LOAD '<path>'`. The directory is
+  operator-controlled: `XDU_EXTENSION_DIR` when set and non-empty, taken as given, otherwise
+  `<canonical exe>/../../lib/xdu/extensions` from the canonicalized `current_exe()`. The name is
+  restricted to `PINNED_EXTENSIONS`. Before the `LOAD`, the only SQL it runs, `load_extension_from`
+  refuses a path that is not valid UTF-8 or that contains `'`, rather than escaping it. The unit
+  tests `engine::tests::quoted_directory_is_refused_before_any_sql` and
+  `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold the rule; the second skips on a
+  filesystem that rejects non-UTF-8 names (APFS) and runs on the Linux CI leg. Any new statement in
+  `src/engine.rs` built from a path or an environment value joins this surface on the same terms.
 
 ## 6. Unix-only
 
