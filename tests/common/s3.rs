@@ -499,6 +499,8 @@ pub struct ProxyRecord {
     pub content_range: Option<String>,
     /// Everything sent back to the client: status line, headers and body.
     pub bytes_to_client: u64,
+    /// The names of the request's `x-amz-*` headers, lowercased.
+    pub amz_headers: Vec<String>,
 }
 
 impl ProxyRecord {
@@ -765,6 +767,12 @@ fn relay(mut client: TcpStream, upstream: SocketAddr, state: &ProxyState) -> io:
         status,
         content_range: response.header("content-range").map(str::to_string),
         bytes_to_client: (head.len() + response_body.len()) as u64,
+        amz_headers: request
+            .headers
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .filter(|name| name.starts_with("x-amz-"))
+            .collect(),
     });
     Ok(())
 }
@@ -842,6 +850,237 @@ impl Hermetic {
                 .collect();
             assert!(left.is_empty(), "{what} was written: {left:#?}");
         }
+    }
+}
+
+/// Accept on `listener` until `stopping` is set, handing each connection to `serve` on its own
+/// thread. `stop_acceptor` wakes it with one connection of its own, which is never served.
+fn spawn_acceptor(
+    listener: TcpListener,
+    stopping: Arc<AtomicBool>,
+    serve: impl Fn(TcpStream) + Clone + Send + 'static,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(stream) = stream else { continue };
+            let serve = serve.clone();
+            thread::spawn(move || serve(stream));
+        }
+    })
+}
+
+fn stop_acceptor(addr: SocketAddr, stopping: &AtomicBool, acceptor: &mut Option<JoinHandle<()>>) {
+    stopping.store(true, Ordering::SeqCst);
+    let _wake = TcpStream::connect(addr);
+    if let Some(acceptor) = acceptor.take() {
+        acceptor.join().expect("acceptor thread");
+    }
+}
+
+/// A loopback listener that stands for a host no request should reach: it accepts every
+/// connection, keeps the first bytes the client sent, and closes it. It speaks no protocol, so
+/// a TLS client fails its handshake here, but the connection is counted first.
+pub struct CountingListener {
+    addr: SocketAddr,
+    openings: Arc<Mutex<Vec<Vec<u8>>>>,
+    stopping: Arc<AtomicBool>,
+    acceptor: Option<JoinHandle<()>>,
+}
+
+impl CountingListener {
+    pub fn start() -> CountingListener {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("cannot bind the counting listener: {e}"));
+        let addr = listener.local_addr().expect("listener address");
+        let openings = Arc::new(Mutex::new(Vec::new()));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let kept = Arc::clone(&openings);
+        let acceptor = spawn_acceptor(listener, Arc::clone(&stopping), move |mut stream| {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut first = [0u8; 16];
+            let n = stream.read(&mut first).unwrap_or(0);
+            kept.lock().unwrap().push(first[..n].to_vec());
+        });
+        CountingListener {
+            addr,
+            openings,
+            stopping,
+            acceptor: Some(acceptor),
+        }
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The first bytes of every connection accepted so far, one entry per connection.
+    pub fn openings(&self) -> Vec<Vec<u8>> {
+        self.openings.lock().unwrap().clone()
+    }
+}
+
+impl Drop for CountingListener {
+    fn drop(&mut self) {
+        stop_acceptor(self.addr, &self.stopping, &mut self.acceptor);
+    }
+}
+
+/// An HTTP `CONNECT` proxy on loopback that records the target of every tunnel asked of it and
+/// opens a tunnel only to `tunnel_to`; any other target is refused with a 403. A client pointed
+/// at it may name any host, remote ones included, and nothing leaves loopback, since the
+/// client hands the host name to the proxy instead of resolving it.
+pub struct ConnectRecorder {
+    addr: SocketAddr,
+    targets: Arc<Mutex<Vec<String>>>,
+    stopping: Arc<AtomicBool>,
+    acceptor: Option<JoinHandle<()>>,
+}
+
+impl ConnectRecorder {
+    pub fn start(tunnel_to: SocketAddr) -> ConnectRecorder {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("cannot bind the CONNECT recorder: {e}"));
+        let addr = listener.local_addr().expect("recorder address");
+        let targets = Arc::new(Mutex::new(Vec::new()));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let kept = Arc::clone(&targets);
+        let acceptor = spawn_acceptor(listener, Arc::clone(&stopping), move |mut client| {
+            let _ = client.set_read_timeout(Some(Duration::from_secs(10)));
+            let Ok(Some((head, _))) = read_head(&mut client) else {
+                return;
+            };
+            let mut parts = head.first_line.split_whitespace();
+            let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            kept.lock().unwrap().push(format!("{method} {target}"));
+            if !method.eq_ignore_ascii_case("CONNECT") || target != tunnel_to.to_string() {
+                let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+                return;
+            }
+            let Ok(mut upstream) = TcpStream::connect(tunnel_to) else {
+                return;
+            };
+            let _ = client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+            let _ = upstream.set_read_timeout(Some(Duration::from_secs(10)));
+            let (Ok(mut client_back), Ok(mut upstream_back)) =
+                (client.try_clone(), upstream.try_clone())
+            else {
+                return;
+            };
+            let back = thread::spawn(move || {
+                let _ = io::copy(&mut upstream_back, &mut client_back);
+                let _ = client_back.shutdown(Shutdown::Both);
+            });
+            let _ = io::copy(&mut client, &mut upstream);
+            let _ = upstream.shutdown(Shutdown::Both);
+            let _ = back.join();
+        });
+        ConnectRecorder {
+            addr,
+            targets,
+            stopping,
+            acceptor: Some(acceptor),
+        }
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// `METHOD target` of every request asked of the proxy so far.
+    pub fn requests(&self) -> Vec<String> {
+        self.targets.lock().unwrap().clone()
+    }
+}
+
+impl Drop for ConnectRecorder {
+    fn drop(&mut self) {
+        stop_acceptor(self.addr, &self.stopping, &mut self.acceptor);
+    }
+}
+
+/// A loopback endpoint that refuses every request with `status` and an AWS-shaped error body
+/// echoing the request's signed headers, as S3's `SignatureDoesNotMatch` body echoes its
+/// canonical request and an `InvalidToken` body echoes the token. A client that prints the
+/// body it was sent prints whatever it signed, a session token included.
+pub struct EchoingRefusal {
+    addr: SocketAddr,
+    requests: Arc<AtomicUsize>,
+    stopping: Arc<AtomicBool>,
+    acceptor: Option<JoinHandle<()>>,
+}
+
+impl EchoingRefusal {
+    pub fn start(status: u16, code: &'static str) -> EchoingRefusal {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("cannot bind the echoing endpoint: {e}"));
+        let addr = listener.local_addr().expect("echoing endpoint address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let counted = Arc::clone(&requests);
+        let acceptor = spawn_acceptor(listener, Arc::clone(&stopping), move |mut client| {
+            let _ = client.set_read_timeout(Some(IO_TIMEOUT));
+            let Ok(Some((head, mut body))) = read_head(&mut client) else {
+                return;
+            };
+            counted.fetch_add(1, Ordering::SeqCst);
+            let length: usize = head
+                .header("content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let mut chunk = [0u8; 8192];
+            while body.len() < length {
+                match client.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => body.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let mut canonical = format!("{}\n", head.first_line);
+            for (name, value) in &head.headers {
+                canonical.push_str(&format!("{}:{}\n", name.to_ascii_lowercase(), value));
+            }
+            let token = head.header("x-amz-security-token").unwrap_or("");
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code>\
+                 <Message>The request signature we calculated does not match the signature \
+                 you provided.</Message><Token-0>{token}</Token-0>\
+                 <CanonicalRequest>{canonical}</CanonicalRequest></Error>"
+            );
+            let reason = if status == 403 {
+                "Forbidden"
+            } else {
+                "Bad Request"
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/xml\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+                xml.len()
+            );
+            let _ = client.write_all(response.as_bytes());
+            let _ = client.shutdown(Shutdown::Both);
+        });
+        EchoingRefusal {
+            addr,
+            requests,
+            stopping,
+            acceptor: Some(acceptor),
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    pub fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for EchoingRefusal {
+    fn drop(&mut self) {
+        stop_acceptor(self.addr, &self.stopping, &mut self.acceptor);
     }
 }
 

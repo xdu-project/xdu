@@ -261,7 +261,8 @@ pub struct S3Settings {
     pub secret_access_key: String,
     pub session_token: Option<String>,
     pub region: String,
-    /// `None` is AWS's own endpoint.
+    /// The override the resolver's sources name; `None` is AWS's regional endpoint, which
+    /// `endpoint_authority` spells out.
     pub endpoint: Option<S3Endpoint>,
     /// Path-style addressing (`host/bucket/key`). On whenever an endpoint override is set,
     /// since S3-compatible stores rarely serve virtual-hosted names; off for AWS itself.
@@ -344,14 +345,21 @@ impl S3Settings {
                 })?,
         };
 
-        let region = match env_text(env, "AWS_REGION")? {
-            Some(region) => region,
+        let (region, region_source) = match env_text(env, "AWS_REGION")? {
+            Some(region) => (region, "AWS_REGION".to_string()),
             None => match env_text(env, "AWS_DEFAULT_REGION")? {
-                Some(region) => region,
-                None => config_section
-                    .and_then(|s| s.value("region"))
-                    .map(str::to_string)
-                    .unwrap_or_else(|| DEFAULT_REGION.to_string()),
+                Some(region) => (region, "AWS_DEFAULT_REGION".to_string()),
+                None => match config_section.and_then(|s| s.value("region")) {
+                    Some(region) => (
+                        region.to_string(),
+                        format!(
+                            "the region of profile '{}' in {}",
+                            profile,
+                            describe_file(config_file.as_deref())
+                        ),
+                    ),
+                    None => (DEFAULT_REGION.to_string(), "the default region".to_string()),
+                },
             },
         };
 
@@ -362,6 +370,15 @@ impl S3Settings {
             config_file.as_deref(),
             &profile,
         )?;
+        // With no override the region names the host both clients address, so it must be a
+        // region name and nothing that could carry a host or a path into the URL.
+        if endpoint.is_none() && !is_aws_region_name(&region) {
+            bail!(
+                "{region_source} is not an AWS region name (lowercase letters, digits and '-'), \
+                 and with no endpoint override the region names the S3 host; fix it, or name \
+                 an S3-compatible endpoint with AWS_ENDPOINT_URL_S3"
+            );
+        }
         let path_style = endpoint.is_some();
 
         Ok(S3Settings {
@@ -374,37 +391,75 @@ impl S3Settings {
         })
     }
 
+    /// The `host[:port]` every client addresses: the override's, or AWS's regional S3
+    /// endpoint, `s3.<region>.amazonaws.com`.
+    pub fn endpoint_authority(&self) -> String {
+        match &self.endpoint {
+            Some(endpoint) => endpoint.authority().to_string(),
+            None => format!("s3.{}.amazonaws.com", self.region),
+        }
+    }
+
+    /// Whether requests go over TLS: always for AWS, as the override's scheme says otherwise.
+    pub fn use_ssl(&self) -> bool {
+        self.endpoint.as_ref().is_none_or(S3Endpoint::use_ssl)
+    }
+
+    /// The endpoint URL the writer's client takes for `bucket`: the host itself for path-style
+    /// addressing, else the bucket's virtual-hosted name under it. Built from
+    /// `endpoint_authority`, as the readers' `ENDPOINT` is, so both reach the same host.
+    pub fn client_endpoint_url(&self, bucket: &str) -> String {
+        let scheme = if self.use_ssl() { "https" } else { "http" };
+        let authority = self.endpoint_authority();
+        if self.path_style {
+            format!("{scheme}://{authority}")
+        } else {
+            format!("{scheme}://{bucket}.{authority}")
+        }
+    }
+
     /// The `CREATE SECRET` a reader connection runs, and the values it binds.
     ///
-    /// Every value is a bound parameter; the text is fixed but for which optional clauses
-    /// appear, chosen by presence. A secret held this way shows as `redacted` in DuckDB's
-    /// `duckdb_secrets()`, appears in no `duckdb_settings()` row, and, matching every `s3://`
-    /// path, outranks whatever `httpfs` read from `AWS_*` or `DUCKDB_S3_*` when it loaded.
+    /// Every value is a bound parameter, and the text is fixed. The secret names every key
+    /// `httpfs` would otherwise take from a setting, because for a key the secret lacks it falls
+    /// back to the `s3_*` setting of that name, which it fills from the environment when it
+    /// loads: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`
+    /// and `AWS_DEFAULT_REGION`, `DUCKDB_S3_ENDPOINT`, `DUCKDB_S3_USE_SSL`,
+    /// `DUCKDB_S3_REQUESTER_PAYS` and `DUCKDB_S3_KMS_KEY_ID`. So `ENDPOINT` is bound even for
+    /// AWS, a missing session token is bound as empty (no token header is sent), requester-pays
+    /// is off as the writer's is, and the KMS key is empty (it would only mark writes, which a
+    /// reader never makes). `URL_STYLE` and `URL_COMPATIBILITY_MODE` have no environment source.
+    /// Held this way the secret shows as `redacted` in `duckdb_secrets()` and appears in no
+    /// `duckdb_settings()` row.
     pub fn duckdb_secret_statement(&self) -> (String, Vec<Value>) {
-        let mut sql = format!(
+        let sql = format!(
             "CREATE TEMPORARY SECRET {DUCKDB_SECRET_NAME} (TYPE s3, PROVIDER config, \
-             KEY_ID ?, SECRET ?, REGION ?, URL_STYLE ?, USE_SSL ?"
+             KEY_ID ?, SECRET ?, SESSION_TOKEN ?, REGION ?, ENDPOINT ?, URL_STYLE ?, USE_SSL ?, \
+             REQUESTER_PAYS ?, KMS_KEY_ID ?)"
         );
         let url_style = if self.path_style { "path" } else { "vhost" };
-        let use_ssl = self.endpoint.as_ref().is_none_or(S3Endpoint::use_ssl);
-        let mut params = vec![
+        let params = vec![
             Value::Text(self.access_key_id.clone()),
             Value::Text(self.secret_access_key.clone()),
+            Value::Text(self.session_token.clone().unwrap_or_default()),
             Value::Text(self.region.clone()),
+            Value::Text(self.endpoint_authority()),
             Value::Text(url_style.to_string()),
-            Value::Boolean(use_ssl),
+            Value::Boolean(self.use_ssl()),
+            Value::Boolean(false),
+            Value::Text(String::new()),
         ];
-        if let Some(token) = &self.session_token {
-            sql.push_str(", SESSION_TOKEN ?");
-            params.push(Value::Text(token.clone()));
-        }
-        if let Some(endpoint) = &self.endpoint {
-            sql.push_str(", ENDPOINT ?");
-            params.push(Value::Text(endpoint.authority().to_string()));
-        }
-        sql.push(')');
         (sql, params)
     }
+}
+
+/// An AWS region name: lowercase letters, digits and `-`, as `us-east-1` or `eu-central-2`.
+fn is_aws_region_name(region: &str) -> bool {
+    !region.is_empty()
+        && !region.starts_with('-')
+        && region
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// A variable's value as text, treating set-but-empty as unset.
@@ -549,8 +604,12 @@ fn config_profile<'a>(config: &'a Ini, profile: &str) -> Option<&'a IniSection> 
 
 /// The subset of the AWS shared-file INI dialect the resolver needs.
 ///
-/// Sections are `[name]`; keys are case-folded and values trimmed; whole-line `#` and `;`
-/// comments are skipped. A key with an empty value opens a nested block whose indented
+/// Sections are `[name]`, optionally followed by a `#` or `;` comment, with whitespace inside
+/// the brackets not part of the name; names are case-sensitive. A line opening with `[` that is
+/// not such a header starts a section no lookup can name, so the keys under it reach no
+/// profile. Keys are case-folded and values trimmed; whole-line `#` and `;` comments are
+/// skipped. A `#` or `;` after a value is part of the value, as Python's `configparser` (and
+/// so the AWS CLI) reads it. A key with an empty value opens a nested block whose indented
 /// `key = value` lines belong to it, the form a `services` section uses for `s3 =` followed
 /// by `  endpoint_url = …`. Generic INI crates flatten that block, which is why this is
 /// hand-rolled.
@@ -592,13 +651,13 @@ impl Ini {
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
                 continue;
             }
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                let name = trimmed[1..trimmed.len() - 1]
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                ini.sections.entry(name.clone()).or_default();
-                current = Some(name);
+            if let Some(inner) = trimmed.strip_prefix('[') {
+                // Every line opening with `[` ends the section above, so a header this parser
+                // cannot read never hands its keys to the previous profile.
+                current = section_name(inner);
+                if let Some(name) = &current {
+                    ini.sections.entry(name.clone()).or_default();
+                }
                 open_block = None;
                 continue;
             }
@@ -630,6 +689,19 @@ impl Ini {
     fn section(&self, name: &str) -> Option<&IniSection> {
         self.sections.get(name)
     }
+}
+
+/// The name a section header gives, from the text after its `[`: what lies before the first
+/// `]`, with runs of whitespace collapsed to one space and none at either end. After the `]`
+/// only a `#` or `;` comment may follow. Anything else is no header, so `None`.
+fn section_name(inner: &str) -> Option<String> {
+    let (name, tail) = inner.split_once(']')?;
+    let tail = tail.trim_start();
+    if !(tail.is_empty() || tail.starts_with(['#', ';'])) {
+        return None;
+    }
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!name.is_empty()).then_some(name)
 }
 
 /// Why a top-level source directory cannot be a partition of an S3 index, or `None` when it
@@ -739,12 +811,14 @@ pub struct S3Sink {
     store: Arc<dyn ObjectStore>,
     runtime: tokio::runtime::Runtime,
     locator: S3Locator,
+    /// The secret and session token, struck from any error text as a last guard.
+    redact: Vec<String>,
 }
 
 impl S3Sink {
     /// A sink for `locator`, with the client built from `settings` alone: the static key pair,
-    /// region and endpoint the resolver found, never the client's own environment or metadata
-    /// lookups. Nothing is sent until `preflight`.
+    /// region and endpoint the resolver found, the endpoint always given explicitly, never the
+    /// client's own environment or metadata lookups. Nothing is sent until `preflight`.
     pub fn connect(locator: &S3Locator, settings: &S3Settings) -> Result<S3Sink> {
         install_crypto_provider();
         let mut builder = AmazonS3Builder::new()
@@ -753,21 +827,28 @@ impl S3Sink {
             .with_access_key_id(&settings.access_key_id)
             .with_secret_access_key(&settings.secret_access_key)
             .with_virtual_hosted_style_request(!settings.path_style)
+            .with_endpoint(settings.client_endpoint_url(locator.bucket()))
+            .with_allow_http(!settings.use_ssl())
             .with_retry(retry_config())
             .with_disable_bulk_delete(true)
             .with_http_connector(DirectConnector);
         if let Some(token) = &settings.session_token {
             builder = builder.with_token(token);
         }
-        if let Some(endpoint) = &settings.endpoint {
-            builder = builder
-                .with_endpoint(endpoint.url())
-                .with_allow_http(!endpoint.use_ssl());
-        }
         let store = builder
             .build()
             .with_context(|| format!("cannot configure an S3 client for {locator}"))?;
-        S3Sink::with_store(Arc::new(store), locator)
+        let mut sink = S3Sink::with_store(Arc::new(store), locator)?;
+        sink.redact = [
+            Some(&settings.secret_access_key),
+            settings.session_token.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .collect();
+        Ok(sink)
     }
 
     /// The same sink over any object store; unit tests use an in-memory one.
@@ -791,6 +872,7 @@ impl S3Sink {
             store,
             runtime,
             locator: locator.clone(),
+            redact: Vec::new(),
         })
     }
 
@@ -846,7 +928,13 @@ impl S3Sink {
     }
 
     /// Name the cause of a failed request: the endpoint unreachable, the credentials refused,
-    /// the bucket missing, or the store's own words. No credential is ever part of the text.
+    /// the bucket missing, or the store's own words.
+    ///
+    /// The store's words stop before the response body. An S3 error body can echo the request
+    /// as signed, header values included, so a session token rides in a `SignatureDoesNotMatch`
+    /// body and an `InvalidToken` body names the token outright. What is kept is the status
+    /// and the body's error code, which `error_detail` reads out, and as a last guard the
+    /// secret and token are struck from the text should a client's wording ever change.
     fn request_error(&self, what: &str, err: object_store::Error) -> anyhow::Error {
         let index = &self.locator;
         let status = match &err {
@@ -857,11 +945,12 @@ impl S3Sink {
             // text of the error it wraps.
             _ => error_chain(&err).find_map(|e| status_in_text(&e.to_string())),
         };
+        let detail = self.redacted(&error_detail(&err.to_string(), status));
         match status {
             Some(401 | 403) => anyhow!(
                 "the S3 endpoint refused the credentials while {what} for {index}; check \
                  AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, \
-                 and that they may write there ({err})"
+                 and that they may write there ({detail})"
             ),
             Some(404) => anyhow!(
                 "bucket '{}' does not exist at the S3 endpoint (HTTP 404 while {what} for {index})",
@@ -870,11 +959,57 @@ impl S3Sink {
             _ if is_unreachable(&err) => anyhow!(
                 "cannot reach the S3 endpoint while {what} for {index}: no connection could be \
                  established; check AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL or the profile's \
-                 endpoint_url ({err})"
+                 endpoint_url ({detail})"
             ),
-            _ => anyhow!("S3 request failed while {what} for {index}: {err}"),
+            _ => anyhow!("S3 request failed while {what} for {index}: {detail}"),
         }
     }
+
+    fn redacted(&self, text: &str) -> String {
+        self.redact.iter().fold(text.to_string(), |text, value| {
+            text.replace(value.as_str(), "<redacted>")
+        })
+    }
+}
+
+/// Where the S3 client's error text starts quoting the response body.
+const BODY_LEAD: &str = "Server returned ";
+
+/// A failed request's text with the response body left out: the client's words up to where
+/// it would quote the body, then the HTTP status and the body's S3 error code, if any.
+fn error_detail(text: &str, status: Option<u16>) -> String {
+    let (head, body) = match text.find(BODY_LEAD) {
+        Some(at) => (&text[..at], &text[at..]),
+        None => (text, ""),
+    };
+    let mut detail = head
+        .trim_end()
+        .trim_end_matches(['-', ':'])
+        .trim_end()
+        .to_string();
+    let mut tail: Vec<String> = Vec::new();
+    if let Some(status) = status {
+        tail.push(format!("HTTP {status}"));
+    }
+    if let Some(code) = s3_error_code(body) {
+        tail.push(code.to_string());
+    }
+    if !tail.is_empty() {
+        if !detail.is_empty() {
+            detail.push_str(" - ");
+        }
+        detail.push_str(&tail.join(" "));
+    }
+    detail
+}
+
+/// The `<Code>` of an S3 error body, when it is a plain identifier such as `AccessDenied`.
+fn s3_error_code(body: &str) -> Option<&str> {
+    let start = body.find("<Code>")? + "<Code>".len();
+    let len = body[start..].find("</Code>")?;
+    let code = &body[start..start + len];
+    (!code.is_empty() && code.len() <= 64 && code.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then_some(code)
 }
 
 /// `err` and every error beneath it.
@@ -1237,6 +1372,105 @@ s3 =
         assert!(err.contains("neither"), "{err}");
     }
 
+    /// Two profiles in the credentials file, the second header written `header_tail`.
+    fn two_profile_credentials(header_tail: &str) -> String {
+        format!(
+            "[default]\naws_access_key_id = default-id\naws_secret_access_key = default-key\n\n\
+             [other]{header_tail}\naws_access_key_id = other-id\naws_secret_access_key = other-key\n"
+        )
+    }
+
+    #[test]
+    fn a_comment_after_a_section_header_keeps_the_profiles_apart() {
+        for tail in [
+            " # second account",
+            " ; second account",
+            "# tight",
+            "\t; tab",
+        ] {
+            let files = Files::new(&two_profile_credentials(tail), "");
+            let default = resolve(&files.env(&[]));
+            assert_eq!(default.access_key_id, "default-id", "{tail:?}");
+            assert_eq!(default.secret_access_key, "default-key", "{tail:?}");
+            let other = resolve(&files.env(&[("AWS_PROFILE", "other")]));
+            assert_eq!(other.access_key_id, "other-id", "{tail:?}");
+            assert_eq!(other.secret_access_key, "other-key", "{tail:?}");
+        }
+        // The config file's `[profile name]` form, with a comment on the header.
+        let files = Files::new(
+            "",
+            "[default]\nregion = eu-west-1\n[profile other] # staging\nregion = ap-south-1\n\
+             aws_access_key_id = cfg-id\naws_secret_access_key = cfg-key\n",
+        );
+        let other = resolve(&files.env(&[("AWS_PROFILE", "other")]));
+        assert_eq!(other.region, "ap-south-1");
+        assert_eq!(other.access_key_id, "cfg-id");
+    }
+
+    #[test]
+    fn a_malformed_section_header_takes_no_keys_from_or_into_another_profile() {
+        // Text after the closing bracket that is not a comment, or no closing bracket: the
+        // keys under it belong to no profile, never to the one above.
+        for tail in [" trailing", "x"] {
+            let files = Files::new(&two_profile_credentials(tail), "");
+            let default = resolve(&files.env(&[]));
+            assert_eq!(default.access_key_id, "default-id", "{tail:?}");
+            assert_eq!(default.secret_access_key, "default-key", "{tail:?}");
+        }
+        let unclosed = "[default]\naws_access_key_id = default-id\naws_secret_access_key = default-key\n\
+                        [other\naws_access_key_id = other-id\naws_secret_access_key = other-key\n";
+        let files = Files::new(unclosed, "");
+        assert_eq!(resolve(&files.env(&[])).access_key_id, "default-id");
+        let err = resolve_err(&files.env(&[("AWS_PROFILE", "other")]));
+        assert!(err.contains("neither"), "{err}");
+    }
+
+    #[test]
+    fn section_headers_follow_the_shared_file_rules() {
+        // Whitespace inside the brackets is not part of the name.
+        let files = Files::new(
+            "[ spaced ]\naws_access_key_id = spaced-id\naws_secret_access_key = spaced-key\n",
+            "[profile   wide]\nregion = ap-south-1\n\
+             aws_access_key_id = wide-id\naws_secret_access_key = wide-key\n",
+        );
+        assert_eq!(
+            resolve(&files.env(&[("AWS_PROFILE", "spaced")])).access_key_id,
+            "spaced-id"
+        );
+        assert_eq!(
+            resolve(&files.env(&[("AWS_PROFILE", "wide")])).region,
+            "ap-south-1"
+        );
+        // Profile names are case-sensitive, and so is the `profile` prefix; keys are not.
+        let files = Files::new(
+            "[Work]\nAWS_ACCESS_KEY_ID = upper-id\nAws_Secret_Access_Key = upper-key\n",
+            "[Profile lower]\nregion = ap-south-1\n",
+        );
+        assert_eq!(
+            resolve(&files.env(&[("AWS_PROFILE", "Work")])).access_key_id,
+            "upper-id"
+        );
+        let err = resolve_err(&files.env(&[("AWS_PROFILE", "work")]));
+        assert!(err.contains("neither"), "{err}");
+        let err = resolve_err(&files.env(&[("AWS_PROFILE", "lower")]));
+        assert!(err.contains("neither"), "{err}");
+        // `[profile name]` belongs to the config file only: in the credentials file it names no
+        // profile, so its keys are not the profile's.
+        let files = Files::new(
+            "[profile cred]\naws_access_key_id = wrong-id\naws_secret_access_key = wrong-key\n",
+            "",
+        );
+        let err = resolve_err(&files.env(&[("AWS_PROFILE", "cred")]));
+        assert!(err.contains("neither"), "{err}");
+        // In the config file `[profile default]` is the default profile, ahead of `[default]`.
+        let files = Files::new(
+            "",
+            "[default]\nregion = eu-west-1\n[profile default]\nregion = ap-south-1\n\
+             aws_access_key_id = pd-id\naws_secret_access_key = pd-key\n",
+        );
+        assert_eq!(resolve(&files.env(&[])).region, "ap-south-1");
+    }
+
     #[test]
     fn region_precedence() {
         let files = Files::new(CREDENTIALS, CONFIG);
@@ -1458,23 +1692,145 @@ s3 =
                 token,
                 "{sql}"
             );
-            assert_eq!(sql.contains("SESSION_TOKEN ?"), token, "{sql}");
-            assert_eq!(sql.contains("ENDPOINT ?"), endpoint, "{sql}");
+        }
+    }
+
+    /// The statement's clauses, each paired with the value bound to it.
+    fn bound_clauses(s: &S3Settings) -> Vec<(String, Value)> {
+        let (sql, params) = s.duckdb_secret_statement();
+        let names: Vec<String> = sql
+            .split([',', '(', ')'])
+            .filter(|clause| clause.trim_end().ends_with('?'))
+            .map(|clause| clause.trim().trim_end_matches('?').trim().to_string())
+            .collect();
+        assert_eq!(names.len(), params.len(), "{sql}");
+        names.into_iter().zip(params).collect()
+    }
+
+    #[test]
+    fn the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on() {
+        // httpfs fills these settings from the environment when it loads and falls back on
+        // any the secret leaves out, so each is bound whatever the resolver found.
+        let expected = [
+            "KEY_ID",
+            "SECRET",
+            "SESSION_TOKEN",
+            "REGION",
+            "ENDPOINT",
+            "URL_STYLE",
+            "USE_SSL",
+            "REQUESTER_PAYS",
+            "KMS_KEY_ID",
+        ];
+        let (first, _) = settings(false, false).duckdb_secret_statement();
+        for (token, endpoint) in [(false, false), (true, false), (false, true), (true, true)] {
+            let s = settings(token, endpoint);
+            assert_eq!(s.duckdb_secret_statement().0, first);
+            let names: Vec<String> = bound_clauses(&s).into_iter().map(|(n, _)| n).collect();
+            assert_eq!(names, expected);
         }
     }
 
     #[test]
     fn the_secret_statement_addresses_by_endpoint() {
-        let (_, aws) = settings(false, false).duckdb_secret_statement();
-        assert_eq!(aws[3], Value::Text("vhost".to_string()));
-        assert_eq!(aws[4], Value::Boolean(true));
-        let (_, local) = settings(false, true).duckdb_secret_statement();
-        assert_eq!(local[3], Value::Text("path".to_string()));
-        assert_eq!(local[4], Value::Boolean(false));
+        let bound = |s: &S3Settings, name: &str| {
+            bound_clauses(s)
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v)
+                .unwrap()
+        };
+        let text = |v: &str| Value::Text(v.to_string());
+
+        // No override: AWS's regional endpoint, by name, over TLS, virtual-hosted.
+        let aws = settings(false, false);
+        assert_eq!(bound(&aws, "ENDPOINT"), text("s3.us-east-1.amazonaws.com"));
+        assert_eq!(bound(&aws, "URL_STYLE"), text("vhost"));
+        assert_eq!(bound(&aws, "USE_SSL"), Value::Boolean(true));
+        assert_eq!(bound(&aws, "SESSION_TOKEN"), text(""));
+        assert_eq!(bound(&aws, "REQUESTER_PAYS"), Value::Boolean(false));
+        assert_eq!(bound(&aws, "KMS_KEY_ID"), text(""));
+
+        let local = settings(true, true);
+        assert_eq!(bound(&local, "ENDPOINT"), text("127.0.0.1:9000"));
+        assert_eq!(bound(&local, "URL_STYLE"), text("path"));
+        assert_eq!(bound(&local, "USE_SSL"), Value::Boolean(false));
+        assert_eq!(bound(&local, "SESSION_TOKEN"), text(TOKEN));
+    }
+
+    #[test]
+    fn the_writer_and_the_readers_address_the_same_host() {
+        let files = Files::new("", "");
+        let creds = [
+            ("AWS_ACCESS_KEY_ID", "key-id-AK19"),
+            ("AWS_SECRET_ACCESS_KEY", SECRET),
+        ];
+        let with = |extra: &[(&str, &str)]| {
+            let mut vars = creds.to_vec();
+            vars.extend_from_slice(extra);
+            resolve(&files.env(&vars))
+        };
+
+        let aws = with(&[("AWS_REGION", "eu-central-2")]);
+        assert_eq!(aws.endpoint_authority(), "s3.eu-central-2.amazonaws.com");
         assert_eq!(
-            local.last(),
-            Some(&Value::Text("127.0.0.1:9000".to_string()))
+            aws.client_endpoint_url("bkt"),
+            "https://bkt.s3.eu-central-2.amazonaws.com"
         );
+        let (_, params) = aws.duckdb_secret_statement();
+        assert!(params.contains(&Value::Text(aws.endpoint_authority())));
+
+        let local = with(&[("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9000")]);
+        assert_eq!(local.client_endpoint_url("bkt"), "http://127.0.0.1:9000");
+        let (_, params) = local.duckdb_secret_statement();
+        assert!(params.contains(&Value::Text("127.0.0.1:9000".to_string())));
+
+        let tls = with(&[("AWS_ENDPOINT_URL", "https://store.example:8443")]);
+        assert_eq!(tls.client_endpoint_url("bkt"), "https://store.example:8443");
+        assert!(tls.use_ssl());
+    }
+
+    #[test]
+    fn a_region_that_would_name_another_host_is_refused_for_aws() {
+        let files = Files::new("", "");
+        for region in [
+            "evil.example/",
+            "us-east-1.evil",
+            "US-EAST-1",
+            "-x",
+            "a b",
+            "x@y",
+        ] {
+            let err = resolve_err(&files.env(&[
+                ("AWS_ACCESS_KEY_ID", "key-id-AK19"),
+                ("AWS_SECRET_ACCESS_KEY", SECRET),
+                ("AWS_REGION", region),
+            ]));
+            assert!(
+                err.contains("AWS_REGION is not an AWS region name"),
+                "{region}: {err}"
+            );
+            assert!(
+                !err.contains(region),
+                "{region}: the error echoed the value: {err}"
+            );
+            assert!(!err.contains(SECRET), "the error echoed the secret: {err}");
+        }
+        let bad_profile = Files::new("", "[default]\nregion = evil.example\n");
+        let err = resolve_err(&bad_profile.env(&[
+            ("AWS_ACCESS_KEY_ID", "key-id-AK19"),
+            ("AWS_SECRET_ACCESS_KEY", SECRET),
+        ]));
+        assert!(err.contains("the region of profile 'default'"), "{err}");
+        assert!(!err.contains("evil.example"), "{err}");
+        // With an override the region only scopes the signature, as a store's own names do.
+        let ok = resolve(&files.env(&[
+            ("AWS_ACCESS_KEY_ID", "key-id-AK19"),
+            ("AWS_SECRET_ACCESS_KEY", SECRET),
+            ("AWS_REGION", "Garage.Local"),
+            ("AWS_ENDPOINT_URL", "http://127.0.0.1:9000"),
+        ]));
+        assert_eq!(ok.region, "Garage.Local");
     }
 
     // ---- the writer ---------------------------------------------------------
@@ -1573,6 +1929,51 @@ s3 =
         );
         assert_eq!(status_in_text("error trying to connect: refused"), None);
         assert_eq!(status_in_text("status code: 4"), None);
+    }
+
+    #[test]
+    fn error_detail_keeps_the_status_and_code_and_drops_the_body() {
+        let text = "Generic S3 error: Error performing list request: Error performing GET \
+                    http://h/b?list-type=2 in 2ms - Server returned non-2xx status code: 403 \
+                    Forbidden: <Error><Code>SignatureDoesNotMatch</Code><CanonicalRequest>GET\n\
+                    x-amz-security-token:t0k3n</CanonicalRequest></Error>";
+        let detail = error_detail(text, Some(403));
+        assert_eq!(
+            detail,
+            "Generic S3 error: Error performing list request: Error performing GET \
+             http://h/b?list-type=2 in 2ms - HTTP 403 SignatureDoesNotMatch"
+        );
+        let response = "Error performing PUT http://h/b/k in 1ms - Server returned error \
+                        response: <Error><Code>InvalidToken</Code><Token-0>t0k3n</Token-0></Error>";
+        assert_eq!(
+            error_detail(response, Some(400)),
+            "Error performing PUT http://h/b/k in 1ms - HTTP 400 InvalidToken"
+        );
+        // No body: the text stands, with the status after it.
+        assert_eq!(
+            error_detail("error trying to connect: refused", None),
+            "error trying to connect: refused"
+        );
+        // A code that is not a plain identifier is not repeated.
+        assert_eq!(s3_error_code("<Code>t0k3n here</Code>"), None);
+        assert_eq!(s3_error_code("<Code></Code>"), None);
+        assert_eq!(
+            s3_error_code("<Code>AccessDenied</Code>"),
+            Some("AccessDenied")
+        );
+    }
+
+    #[test]
+    fn the_sinks_errors_strike_the_secret_and_token() {
+        let (mut sink, _) = memory_sink("s3://bkt/idx");
+        sink.redact = vec![SECRET.to_string(), TOKEN.to_string()];
+        let err = object_store::Error::Generic {
+            store: "S3",
+            source: format!("echoed {SECRET} and {TOKEN}").into(),
+        };
+        let text = format!("{:#}", sink.request_error("testing", err));
+        assert!(!text.contains(SECRET) && !text.contains(TOKEN), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
     }
 
     #[test]

@@ -83,7 +83,8 @@ Additional instructions provided with the invocation: $ARGUMENTS
 - **Read-only session.** This skill makes no source edits; it writes `REVIEW.md` and updates the
   `TECH.md` `review` block via `set_phase.py`.
 - **Mandatory human gate** when any CONFIRMED finding touches the high-blast-radius core
-  (`src/bin/xdu-rm.rs`, `src/bin/xdu.rs`, `src/crawl.rs`, `src/lib.rs`, `src/cli.rs`) or a
+  (`src/bin/xdu-rm.rs`, `src/bin/xdu.rs`, `src/crawl.rs`, `src/lib.rs`, `src/cli.rs`, `src/s3.rs`,
+  `src/view_query.rs`, `src/engine.rs`) or a
   destructive-rm / schema-stability / atomic-write / SQL-injection invariant (`invariants.md`
   §4 / §1 / §2 / §5, including their lettered subsections) — regardless of auto-loop.
   `invariants.md`'s *High-blast-radius files* header is the authoritative copy of that path list;

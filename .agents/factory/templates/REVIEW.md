@@ -44,7 +44,8 @@ subsections** such as §2b/§2c; a §13 project-conventions violation is **HIGH*
 ## Human-gate triggers
 
 Set if any CONFIRMED finding touches the high-blast-radius core (`src/bin/xdu-rm.rs`,
-`src/bin/xdu.rs`, `src/crawl.rs`, `src/lib.rs`, `src/cli.rs`) or a destructive-rm / schema-stability /
+`src/bin/xdu.rs`, `src/crawl.rs`, `src/lib.rs`, `src/cli.rs`, `src/s3.rs`, `src/view_query.rs`,
+`src/engine.rs`) or a destructive-rm / schema-stability /
 atomic-write / SQL-injection invariant — these **always** require human sign-off before
 `xdu-publish`, regardless of auto-loop. (`invariants.md`'s *High-blast-radius files* header is the
 authoritative path list; this copy may only ever **widen** to match it.)

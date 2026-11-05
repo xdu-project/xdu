@@ -19,7 +19,11 @@ subsystems.
 `src/bin/xdu-rm.rs` (destructive) · `src/bin/xdu.rs` (crawl concurrency scaffold + marker sequencing) ·
 `src/crawl.rs` (atomic finalize + stale-chunk prune + reserved-index-name collision rejection) ·
 `src/lib.rs` (schema + `QueryFilters`/SQL + `index_glob` + layout constants + `RESERVED_INDEX_NAMES`) ·
-`src/cli.rs` (the one CLI definition)
+`src/cli.rs` (the one CLI definition) ·
+`src/s3.rs` (`S3Sink`'s chunk PUTs, prune and marker sequencing + the S3 partition-name refusal +
+the one credential resolver and the reader's bound `CREATE SECRET`) ·
+`src/view_query.rs` (every `xdu-view` statement) ·
+`src/engine.rs` (the one connection open, the extension load and `open_s3_connection`)
 
 ---
 
@@ -83,11 +87,17 @@ ordering is load-bearing:
   `lossy_paths`, `format`), so an `--allow-errors` run still records how much it skipped. `format`
   carries the run-level index format version (`INDEX_FORMAT_VERSION`); it is what the readers'
   version gate checks.
-- All three readers call `lib::index_version_error` before `lib::index_completion_warning`: a marker
-  stating no understood version — absent marker included — is a **refusal** (no rows, no deletions),
-  never a warning. The warning stays soft and covers only a versioned marker recording tolerated
-  errors, which remains queryable. The read is size-capped (`MARKER_READ_LIMIT`) and must not block,
-  so a FIFO or an enormous file left at that path cannot hang or exhaust a reader.
+- All three readers call `lib::index_version_error` before `lib::index_completion_warning` on a local
+  index; on an `s3://` index `xdu-find` and `xdu-view` read the marker once with
+  `lib::read_completion_marker_s3`, then call `lib::marker_version_error` before
+  `lib::marker_completion_warning` on that read (the local pair are these two over the local read).
+  A marker stating no understood version — absent marker included — is a **refusal** (no rows, no
+  deletions), never a warning. The warning stays soft and covers only a versioned marker recording
+  tolerated errors, which remains queryable. The read is size-capped (`MARKER_READ_LIMIT`) and must
+  not block, so a FIFO or an enormous file left at that path cannot hang or exhaust a reader. Locally
+  that is one `stat` before any open; over S3 it is a LIST proving the prefix holds objects, then a
+  HEAD for the marker's size (a missing key is an absent marker), and a marker over the cap is refused
+  as `MarkerRead::Oversized` without its GET.
 - **Known limitation (recorded, not fixed):** the marker describes the whole index but its counts come
   from one run, so a `--partition`-scoped run clears and rewrites it from its own stats and can retire a
   still-correct warning — `issues/marker-scoped-run-attestation.md`. Do not fix this incidentally; it
@@ -178,8 +188,12 @@ ordering is load-bearing:
   `src/engine.rs` built from a path or an environment value joins this surface on the same terms.
 - `engine::open_s3_connection` is on the engine surface too. After the `LOAD` it runs one prepared
   `CREATE TEMPORARY SECRET` (text from `S3Settings::duckdb_secret_statement`) whose every value,
-  the key pair, session token, region, URL style, SSL flag and endpoint, is a bound parameter; the
-  text varies only by which fixed optional clauses appear. No credential is ever SQL text, and
+  the key pair, session token, region, endpoint, URL style, SSL flag, requester-pays flag and KMS
+  key, is a bound parameter; the text is fixed. It binds every key `httpfs` would otherwise take
+  from the `s3_*` setting it fills from the environment at load (`AWS_*`, `DUCKDB_S3_*`), the
+  endpoint included when it is AWS's own, so no stray variable can redirect or re-sign a reader:
+  `s3::tests::the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on` and
+  the `harness_stray_*` wire tests hold that. No credential is ever SQL text, and
   `duckdb_secrets()` lists the secret redacted.
 
 ## 6. Unix-only

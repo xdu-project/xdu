@@ -213,6 +213,7 @@ assume `nightly` — use the pinned toolchain.
 cargo build --release                                   # all bins (bundled DuckDB C++ is the slow part)
 cargo test                                              # lib unit tests + tests/ integration
 cargo test --test rm_tests                              # one integration file
+XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 43   # S3 wire tier (see Testing)
 cargo clippy --all-targets --all-features -- -D warnings   # lint gate (must be clean)
 cargo fmt --all -- --check                              # format gate
 
@@ -321,6 +322,8 @@ src/
   bin/xdu-rm.rs     # destructive bulk delete (safe mode, confirm, dry-run, parallel)
   bin/gen-completions.rs   # emits share/ completions from cli.rs
 tests/           # crawl_tests.rs, rm_tests.rs, offline_tests.rs (integration); common/ = shared helpers
+                 # s3_tests.rs + s3-wire.sh: the S3 wire tier and its CI gate (see Testing);
+                 # common/s3.rs = the loopback S3 endpoint, counting proxy, hermetic child env
 examples/extension-probe.rs   # release-time probe, never installed: `manifest` prints engine version,
                  # platform, source_id + pinned set; `load` loads that set from the extension
                  # directory on one engine connection. Built in the same `cargo build` as the bins;
@@ -422,18 +425,23 @@ xdu-find / xdu-view / xdu-rm ◀── warn if absent/errors ┘  ◀── Duck
 
 ## CLI surface (`src/cli.rs` is the one definition)
 
-- `xdu DIR -o/--outdir DIR [-j/--jobs N (env XDU_JOBS, dflt 4)] [-B/--buffsize N (100000)]
+- `xdu DIR -o/--outdir DIR|s3://BUCKET/PREFIX [-j/--jobs N (env XDU_JOBS, dflt 4)] [-B/--buffsize N (100000)]
   [--apparent-size] [-k/--block-size SIZE] [-p/--partition NAMES] [--allow-errors]`
   — `--allow-errors` is **opt-in**: by default any walk/stat error fails the run non-zero and no
   completion marker is written; with it, unreadable entries are counted, reported on stderr, the run
   exits 0, and the marker records the tolerated `errors=N`.
-- `xdu-find -i/--index DIR (env XDU_INDEX) [-p/--pattern PATTERN] [--regex] [-u/--partition NAME]
+- `xdu-find -i/--index DIR|s3://BUCKET/PREFIX (env XDU_INDEX) [-p/--pattern PATTERN] [--regex] [-u/--partition NAME]
   [--min-size/--max-size SIZE] [--older-than/--newer-than DAYS] [-f/--format path|size|atime|csv|json]
   [-l/--limit N] [-c/--count] [--top N]`
-- `xdu-view -i/--index DIR [-u/--partition NAME] [-p/--pattern PATTERN] [--regex] [--min/max-size]
+- `xdu-view -i/--index DIR|s3://BUCKET/PREFIX (env XDU_INDEX) [-u/--partition NAME] [-p/--pattern PATTERN] [--regex] [--min/max-size]
   [--older/newer-than] [-s/--sort name|size-asc|size-desc|count-asc|count-desc|age-asc|age-desc]`
 - `xdu-rm -i/--index DIR [-p/--pattern PATTERN] [--regex] [-u/--partition] [--min/max-size]
   [--older/newer-than] [-l/--limit N] [-n/--dry-run] [--safe] [-f/--force] [-v/--verbose] [-j/--jobs (env XDU_JOBS)]`
+  — `xdu-rm` takes a local index only and refuses an `s3://` one, from `-i` or `XDU_INDEX`.
+- An `s3://` locator (lowercase scheme only) takes its credentials, region and endpoint from the
+  `AWS_*` variables and the shared credentials and config files, through `s3::S3Settings::resolve`,
+  the one resolver both directions use. The readers need the pinned `httpfs` from
+  `lib/xdu/extensions/` (or `XDU_EXTENSION_DIR`); the writer needs no extension.
 
 **Footgun:** `-p` means `--partition` in `xdu` but `--pattern` in the three query tools (where
 partition moves to `-u`). Same short flag, different meaning per binary — do not "fix" one side in
@@ -520,7 +528,13 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   `index_glob` (the one place the index layout becomes SQL), and the `ROOT_PARTITION` /
   `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list that guards both.
 - **`src/engine.rs`** — the one place a DuckDB connection opens (autoload and autoinstall off), and
-  `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5).
+  `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5);
+  `open_s3_connection` adds the reader's one bound `CREATE SECRET`.
+- **`src/s3.rs`** — the S3 side of invariants 2 and 2b (`S3Sink`: one PUT per chunk, the LIST and
+  DELETE prune past gaps, the marker DELETE first and PUT last), the S3 partition-name refusal, and the
+  one credential resolver. Its `CREATE SECRET` must bind every key `httpfs` would otherwise take from
+  the environment, and no request error may print a response body (one can echo the session token).
+- **`src/view_query.rs`** — every `xdu-view` statement, on the invariant 5 surface.
 - **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning (through
   `IndexSink`; `LocalSink` is the local protocol); the reserved-index-name collision rejection in
   `build_work_queue`; completion-marker write/clear ordering.
@@ -553,6 +567,23 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   autoload refused that is a reader that cannot read its own index. Any other extension ships as a
   file in `lib/xdu/extensions/` and loads by path (`XDU_EXTENSION_DIR` overrides the directory);
   nothing is ever fetched at runtime.
+- **The S3 wire tier is a standing CI gate that plain `cargo test` skips.** `tests/s3_tests.rs`
+  holds two tiers. A few tests need only the binaries and run in every `cargo test`; the rest talk
+  to an in-process `s3s` endpoint on loopback through the pinned `httpfs`, so they are `#[ignore]`d
+  and plain `cargo test` lists them as ignored. To run them, fetch the pinned `httpfs` once into a
+  directory the binaries never look in by default — **never** `target/lib/xdu/extensions`, which
+  would hide a reader that wrongly loads it for a local index — and run the gate script:
+  `cargo build --locked --example extension-probe`, then
+  `sh packaging/extensions/fetch.sh target/debug/examples/extension-probe target/test-ext`, then
+  `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" N`. The script passes only when
+  every test `-- --list --include-ignored` lists also passed and that count is at least `N`, since
+  under `--include-ignored` libtest always prints `0 ignored`. CI's `Tests` workflow fetches the
+  extension and runs the script on both test legs as the "S3 tests" step, with `N` set to the file's
+  listed count by hand: **raise it in the commit that adds a test**. A selection by prefix
+  (`harness_`, `find_`, `write_`, `view_`) runs one family. Wire tests never return early (the script
+  refuses an early `return`); the fixture panics when it cannot bind or find the extension. Spawned
+  binaries run hermetic (`tests/common/s3.rs`'s `Hermetic`: no `AWS_*`, `DUCKDB_*` or `*_PROXY`,
+  empty `HOME`, `TMPDIR` and working directory, checked empty afterwards).
 - **Verify by driving the CLI, not just tests.** Use `.agents/factory/bin/temp_index.sh` so a drive
   hits a throwaway index, never a real one. Exit 0 is necessary but not sufficient — assert a concrete
   post-condition (row count, a stdout token, files actually gone/kept).
@@ -591,6 +622,7 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   see its skill.
 - **Pre-release gate (mirrored by CI and `/xdu-release`):** `cargo fmt --all -- --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` must all pass clean.
+  `cargo test` skips the S3 wire tier; CI runs it through `tests/s3-wire.sh` (see Testing).
 
 ## Working on this codebase as an agent
 

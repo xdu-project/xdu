@@ -94,7 +94,10 @@ touches:
 - the high-blast-radius core: `src/bin/xdu-rm.rs` (destructive), `src/bin/xdu.rs` (crawl concurrency
   scaffold + marker sequencing), `src/crawl.rs` (atomic finalize + stale-chunk prune +
   reserved-index-name collision rejection), `src/lib.rs` (schema + `QueryFilters`/SQL + `index_glob`
-  + layout constants + `RESERVED_INDEX_NAMES`), or `src/cli.rs` (the one CLI definition); **or**
+  + layout constants + `RESERVED_INDEX_NAMES`), `src/cli.rs` (the one CLI definition), `src/s3.rs`
+  (S3 chunk/prune/marker sequencing + S3 partition-name refusal + the credential resolver and the
+  reader's bound secret), `src/view_query.rs` (every `xdu-view` statement), or `src/engine.rs` (the
+  one connection open, the extension load and `open_s3_connection`); **or**
 - a destructive-`rm` / schema-stability / atomic-write / SQL-injection invariant
   (`invariants.md` §4 / §1 / §2 / §5).
 

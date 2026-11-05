@@ -4,12 +4,15 @@
 //! tests talk to a loopback S3 endpoint through the pinned `httpfs`, so they are
 //! `#[ignore]`d: a machine without the extension lists them as ignored rather than passing them.
 //! CI fetches the extension and runs this file with `--include-ignored` through
-//! `spec/s3-index-target/verify/wire.sh`, which fails unless every listed test passed.
+//! `tests/s3-wire.sh`, which fails unless every listed test passed.
 //!
 //! Wire tests are named by family (`harness_`, then the reader, writer and viewer families),
-//! so a phase's gate selects its own. Each goes through the counting proxy and asserts that no
-//! GET of a chunk covered the whole object. None returns early: `TestS3::start()` panics when
-//! it cannot run, so an opted-in run cannot report a test that did not happen as passed.
+//! so a run can select one family. Each that reads an index goes through the counting proxy and
+//! asserts that no GET of a chunk covered the whole object; the two that ask where a reader's
+//! requests go and what a refusal's body leaves on stderr use loopback listeners of their own,
+//! since no object is read. None returns early: `TestS3::start()` and `test_extension_dir()`
+//! panic when they cannot run, so an opted-in run cannot report a test that did not happen as
+//! passed.
 
 mod common;
 
@@ -149,6 +152,9 @@ fn stray_environment_parent() {
     .env("DUCKDB_S3_ENDPOINT", STRAY_ENDPOINT)
     .env("AWS_ACCESS_KEY_ID", STRAY_KEY_ID)
     .env("AWS_SECRET_ACCESS_KEY", WRONG_SECRET_KEY);
+    for (name, value) in STRAY_SETTINGS {
+        cmd.env(name, value);
+    }
     let (out, err, ok) = output_of(&mut cmd);
     assert!(ok, "the child read failed:\n{out}\n{err}");
     assert!(
@@ -161,10 +167,39 @@ fn stray_environment_parent() {
 
     let chunk_keys: BTreeSet<String> = s3.parquet_sizes(PREFIX).keys().cloned().collect();
     assert_eq!(range_fetched_keys(&s3), chunk_keys);
+    // The resolved settings carry no session token and no requester-pays or KMS choice, so a
+    // request carrying one took it from the stray environment.
+    for request in s3.requests() {
+        for header in &request.amz_headers {
+            assert!(
+                !(header == "x-amz-security-token"
+                    || header == "x-amz-request-payer"
+                    || header.starts_with("x-amz-server-side-encryption")),
+                "a request carried {header} from the stray environment: {request:?}"
+            );
+        }
+    }
     s3.assert_no_whole_parquet_get();
     s3.assert_proxy_clean();
     hermetic.assert_left_empty();
 }
+
+/// The other variables httpfs reads into its `s3_*` settings when it loads, each with a value
+/// the resolved settings contradict, and the setting it fills.
+const STRAY_SETTINGS: [(&str, &str); 5] = [
+    ("AWS_SESSION_TOKEN", "stray-session-token"),
+    ("AWS_REGION", "stray-region-1"),
+    ("DUCKDB_S3_USE_SSL", "true"),
+    ("DUCKDB_S3_REQUESTER_PAYS", "true"),
+    ("DUCKDB_S3_KMS_KEY_ID", "stray-kms-key"),
+];
+const STRAY_SETTING_NAMES: [&str; 5] = [
+    "s3_session_token",
+    "s3_region",
+    "s3_use_ssl",
+    "s3_requester_pays",
+    "s3_kms_key_id",
+];
 
 fn stray_environment_child(proxy_url: &str) {
     assert_eq!(
@@ -189,6 +224,16 @@ fn stray_environment_child(proxy_url: &str) {
         "httpfs ignored DUCKDB_S3_ENDPOINT"
     );
     assert_eq!(key_id, STRAY_KEY_ID, "httpfs ignored AWS_ACCESS_KEY_ID");
+    for ((var, value), setting) in STRAY_SETTINGS.iter().zip(STRAY_SETTING_NAMES) {
+        let taken: String = conn
+            .query_row(
+                &format!("SELECT current_setting('{setting}')::VARCHAR"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(&taken, value, "httpfs ignored {var}");
+    }
 
     let s3_url = format!("s3://{}/{PREFIX}/*/*.parquet", common::s3::BUCKET);
     let count: i64 = conn
@@ -198,6 +243,108 @@ fn stray_environment_child(proxy_url: &str) {
         .unwrap_or_else(|e| panic!("the stray environment redirected the read: {e}"));
     println!("stray-environment child counted {count} rows");
     assert_eq!(count, ROWS as i64);
+}
+
+/// Set in the re-executed child to the CONNECT recorder's address.
+const AWS_CHILD_VAR: &str = "XDU_TEST_AWS_ENDPOINT_RECORDER";
+/// A bucket whose virtual-hosted name joins a stray endpoint of `1:<port>` into
+/// `127.0.0.1:<port>`, so a reader that took the stray endpoint lands on the listener.
+const LOOPBACK_BUCKET: &str = "127.0.0";
+/// The host the resolver picks for AWS in `us-east-1`, as a reader names it to a proxy.
+const AWS_REGIONAL_TARGET: &str = "127.0.0.s3.us-east-1.amazonaws.com:443";
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn harness_stray_duckdb_s3_endpoint_is_not_taken_when_the_resolver_picks_aws() {
+    // Nothing in the resolver's sources names an endpoint, so it picks AWS's regional one; a
+    // DUCKDB_S3_ENDPOINT in the environment must not move the reader elsewhere. The stray
+    // endpoint is a loopback listener. The reader's HTTP proxy, a setting only this test sets,
+    // is a CONNECT recorder that tunnels to that listener alone, so whatever host the reader
+    // names, nothing leaves loopback.
+    match std::env::var(AWS_CHILD_VAR) {
+        Ok(recorder) => aws_endpoint_child(&recorder),
+        Err(_) => aws_endpoint_parent(),
+    }
+}
+
+fn aws_endpoint_parent() {
+    let extension_dir = test_extension_dir();
+    let stray = common::s3::CountingListener::start();
+    let recorder = common::s3::ConnectRecorder::start(stray.addr());
+    let hermetic = Hermetic::new();
+    let exe = std::env::current_exe().unwrap();
+    let mut cmd = hermetic.command_for(&exe);
+    cmd.args([
+        "harness_stray_duckdb_s3_endpoint_is_not_taken_when_the_resolver_picks_aws",
+        "--exact",
+        "--include-ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env(AWS_CHILD_VAR, recorder.addr().to_string())
+    .env(EXTENSION_DIR_VAR, &extension_dir)
+    .env("DUCKDB_S3_ENDPOINT", format!("1:{}", stray.addr().port()));
+    let (out, err, ok) = output_of(&mut cmd);
+    assert!(ok, "the child failed:\n{out}\n{err}");
+    assert!(out.contains("1 passed"), "the child ran no test:\n{out}");
+    assert_no_secret("the child's stdout", &out);
+    assert_no_secret("the child's stderr", &err);
+
+    let openings = stray.openings();
+    assert!(
+        openings.is_empty(),
+        "{} connection(s) reached the DUCKDB_S3_ENDPOINT listener; first bytes {openings:?}; \
+         recorder saw {:?}",
+        openings.len(),
+        recorder.requests()
+    );
+    let requests = recorder.requests();
+    println!(
+        "aws-endpoint: the DUCKDB_S3_ENDPOINT listener saw 0 connections; the proxy saw {requests:?}"
+    );
+    assert!(
+        !requests.is_empty(),
+        "the reader asked the proxy for nothing, so the test proves nothing:\n{out}\n{err}"
+    );
+    for request in &requests {
+        assert_eq!(
+            request,
+            &format!("CONNECT {AWS_REGIONAL_TARGET}"),
+            "the reader addressed a host other than AWS's regional endpoint: {requests:?}"
+        );
+    }
+    hermetic.assert_left_empty();
+}
+
+fn aws_endpoint_child(recorder: &str) {
+    let stray = std::env::var("DUCKDB_S3_ENDPOINT").expect("the stray endpoint is set");
+    let env = common::s3::MapEnv::new(&[
+        ("AWS_ACCESS_KEY_ID", ACCESS_KEY),
+        ("AWS_SECRET_ACCESS_KEY", SECRET_KEY),
+        ("AWS_REGION", "us-east-1"),
+    ]);
+    let settings = xdu::s3::S3Settings::resolve(&env).expect("fixture settings resolve");
+    assert!(settings.endpoint.is_none(), "{settings:?}");
+    let conn = open_s3_connection_from(&settings, &test_extension_dir())
+        .unwrap_or_else(|e| panic!("open_s3_connection failed: {e:#}"));
+    let taken: String = conn
+        .query_row("SELECT current_setting('s3_endpoint')", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(taken, stray, "httpfs ignored DUCKDB_S3_ENDPOINT");
+    conn.execute_batch(&format!(
+        "SET http_proxy = '{recorder}'; SET http_retries = 0;"
+    ))
+    .unwrap();
+
+    let url = format!("s3://{LOOPBACK_BUCKET}/idx/*/*.parquet");
+    let result = conn.query_row("SELECT count(*) FROM read_parquet(?)", [url], |row| {
+        row.get::<_, i64>(0)
+    });
+    // Neither host serves S3 here, so the read fails; where it went is the parent's question.
+    println!("aws-endpoint child read: {result:?}");
+    assert!(result.is_err(), "a read succeeded with no S3 behind it");
 }
 
 #[test]
@@ -899,14 +1046,6 @@ fn write_aws_files(hermetic: &Hermetic, credentials: &str, config: &str) {
 fn find_credentials_from_a_profile_in_the_shared_files() {
     let (s3, _work) = seeded();
     let hermetic = Hermetic::new();
-    write_aws_files(
-        &hermetic,
-        &format!(
-            "[default]\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {WRONG_SECRET_KEY}\n\n\
-             [xdu-reader]\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {SECRET_KEY}\n"
-        ),
-        "[profile xdu-reader]\nregion = us-east-1\n",
-    );
     let profile_find = |profile: Option<&str>| {
         let mut cmd = hermetic.command("xdu-find");
         cmd.env("XDU_EXTENSION_DIR", s3.extension_dir())
@@ -918,16 +1057,30 @@ fn find_credentials_from_a_profile_in_the_shared_files() {
         run(&mut cmd)
     };
 
-    let (out, err, ok) = profile_find(Some("xdu-reader"));
-    assert!(ok, "the profile's credentials were not used: {err}");
-    assert_eq!(out.trim(), ROWS.to_string());
-    // Control: without AWS_PROFILE the default profile, which holds the wrong secret, is used.
-    let (out, err, ok) = profile_find(None);
-    assert!(
-        !ok && out.is_empty(),
-        "the default profile's wrong secret was accepted"
-    );
-    assert!(err.contains("refused the credentials"), "{err}");
+    // A comment after a section header leaves the profiles apart, as it does for AWS's tools.
+    for header_tail in ["", " # the reader's account"] {
+        write_aws_files(
+            &hermetic,
+            &format!(
+                "[default]\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {WRONG_SECRET_KEY}\n\n\
+                 [xdu-reader]{header_tail}\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {SECRET_KEY}\n"
+            ),
+            "[profile xdu-reader]\nregion = us-east-1\n",
+        );
+        let (out, err, ok) = profile_find(Some("xdu-reader"));
+        assert!(
+            ok,
+            "{header_tail:?}: the profile's credentials were not used: {err}"
+        );
+        assert_eq!(out.trim(), ROWS.to_string());
+        // Control: without AWS_PROFILE the default profile, which holds the wrong secret, is used.
+        let (out, err, ok) = profile_find(None);
+        assert!(
+            !ok && out.is_empty(),
+            "{header_tail:?}: the default profile's wrong secret was accepted"
+        );
+        assert!(err.contains("refused the credentials"), "{err}");
+    }
     assert_clean(&s3, &hermetic);
 }
 
@@ -1581,6 +1734,74 @@ fn write_endpoint_and_credential_failures_leave_the_index_untouched() {
     }
     hermetic.assert_left_empty();
     s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_refusal_bodies_that_echo_the_session_token_are_not_printed() {
+    // S3's SignatureDoesNotMatch body echoes the canonical request, signed headers and their
+    // values included, so a session token rides in it; InvalidToken echoes the token itself.
+    // Neither direction may print such a body. This endpoint answers every request that way,
+    // with no proxy in front: there is no object to meter.
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 3)]);
+    let hermetic = Hermetic::new();
+    for (status, code, cause) in [
+        (403, "SignatureDoesNotMatch", "refused the credentials"),
+        (400, "InvalidToken", "S3 request failed"),
+    ] {
+        let endpoint = common::s3::EchoingRefusal::start(status, code);
+        let with_credentials = |cmd: &mut Command| {
+            cmd.env("AWS_ACCESS_KEY_ID", ACCESS_KEY)
+                .env("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
+                .env("AWS_SESSION_TOKEN", SESSION_TOKEN)
+                .env("AWS_ENDPOINT_URL", endpoint.url());
+        };
+        let mut write = hermetic.command("xdu");
+        with_credentials(&mut write);
+        write.args(xdu_args(
+            &source,
+            &format!("s3://{BUCKET}/{WRITE_PREFIX}"),
+            "2",
+        ));
+        let mut find = hermetic.command("xdu-find");
+        with_credentials(&mut find);
+        find.env("XDU_EXTENSION_DIR", test_extension_dir()).args([
+            "-i",
+            &format!("s3://{BUCKET}/{PREFIX}"),
+            "--count",
+        ]);
+
+        for (tool, mut cmd) in [("xdu", write), ("xdu-find", find)] {
+            let before = endpoint.requests();
+            let (out, err, ok) = run(&mut cmd);
+            let case = format!("{tool} against HTTP {status} {code}");
+            assert!(!ok, "{case}: succeeded");
+            assert!(
+                endpoint.requests() > before,
+                "{case}: never reached the endpoint, so the test proves nothing: {err}"
+            );
+            assert!(out.is_empty(), "{case}: {out}");
+            assert_no_secret(&format!("{case}: stdout"), &out);
+            assert_no_secret(&format!("{case}: stderr"), &err);
+            assert!(
+                !err.contains("CanonicalRequest") && !err.contains("x-amz-"),
+                "{case}: stderr carries the response body: {err}"
+            );
+            if tool == "xdu" {
+                assert!(
+                    err.contains(cause),
+                    "{case}: stderr does not say '{cause}': {err}"
+                );
+                assert!(
+                    err.contains(code),
+                    "{case}: stderr does not name {code}: {err}"
+                );
+            }
+        }
+    }
+    hermetic.assert_left_empty();
 }
 
 #[test]

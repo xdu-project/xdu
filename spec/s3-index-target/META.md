@@ -145,3 +145,20 @@ is skipped by the parser):
   triggers it. Add the rule "a diff that gives a listed duty a new home widens every list in the
   same diff", worded for new code as well as moved code.
 - **Confidence:** high · **Effort:** small
+
+## F8 — Remediation's sweep rule bars the harness edits the rubric's widening rule requires
+`origin=xdu-build:remediation-cycle-1 severity=medium category=instruction status=open target=.agents/skills/xdu-build/SKILL.md`
+- **What happened:** review finding 2 asked that the high-blast path lists be widened to the
+  files that now hold the listed duties. Four of the five lists are harness files: `invariants.md`,
+  `review-rubric.md`, `xdu-review`'s SKILL.md and `templates/REVIEW.md`. Step 2.3 says a harness
+  change "must not ride in on a product branch". The rubric says a diff that moves a duty
+  "re-derives all of them in the same diff". The two rules point opposite ways. This run went
+  ahead only because the gate judge ruled it.
+- **Skill cause:** Step 2.3's four-homes test treats every edit under `.agents/` as a change to
+  what an agent is told. A path-list widening is a different kind of edit: the rubric itself
+  requires it to follow product code. The skill does not carve it out.
+- **Recommended fix:** in Step 2.3, exempt widenings the rubric requires. A diff that gives a
+  listed duty a new home widens every copy of the list in the same diff, and widening is the only
+  harness edit allowed. Anything else under `.agents/` still goes through META and
+  `/xdu-harness`.
+- **Confidence:** high · **Effort:** small

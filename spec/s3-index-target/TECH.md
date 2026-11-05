@@ -3,15 +3,15 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: blocked
+status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: done
+current_phase: P1
 last_updated: '2026-11-05'
 phases:
 - id: P1
   name: Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
-  status: done
+  status: in_progress
   satisfies:
   - R5
   - R7
@@ -21,13 +21,22 @@ phases:
   parallel: false
   hammerable: false
   hill: downhill
-  verify: 'set -eu; sh spec/s3-index-target/verify/wire.sh harness_ 5; cargo test
-    --locked --lib s3:: >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]*
-    passed" target/p1-lib.log; cargo test --locked --test rm_tests --test offline_tests
-    --test find_tests --test s3_tests; if grep -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)"
+  verify: 'set -eu; sh tests/s3-wire.sh harness_ 6; cargo test --locked --lib s3::
+    >target/p1-lib.log 2>&1; grep -qE "test result: ok. [1-9][0-9]* passed" target/p1-lib.log;
+    for t in the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on
+    the_secret_statement_addresses_by_endpoint the_writer_and_the_readers_address_the_same_host
+    a_region_that_would_name_another_host_is_refused_for_aws a_comment_after_a_section_header_keeps_the_profiles_apart
+    a_malformed_section_header_takes_no_keys_from_or_into_another_profile section_headers_follow_the_shared_file_rules;
+    do grep -qF "test s3::tests::$t ... ok" target/p1-lib.log; done; if grep -nF ''sql.push_str(",
+    '' src/s3.rs; then echo "an optional CREATE SECRET clause is back" >&2; exit 1;
+    fi; cargo test --locked --test rm_tests --test offline_tests --test find_tests
+    --test s3_tests; if grep -rnE "let _ = .*load_extension|load_extension\(.*\)\.ok\(\)"
     src; then exit 1; fi; grep -qF "include-ignored" .github/workflows/test.yaml;
-    grep -qF "fetch.sh" .github/workflows/test.yaml; cargo clippy --locked --all-targets
-    --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
+    grep -qF "fetch.sh" .github/workflows/test.yaml; grep -qF ''sh tests/s3-wire.sh
+    ""'' .github/workflows/test.yaml; if grep -rnE ''(^|[^a-z])spec/'' .github/workflows/;
+    then echo "a workflow runs something under spec/" >&2; exit 1; fi; cargo clippy
+    --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+    echo P1-GATE-GREEN'
 - id: P2
   name: xdu-find queries an s3:// index in place (demo path)
   status: done
@@ -53,7 +62,7 @@ phases:
     P2-GATE-GREEN
 - id: P3
   name: xdu -o s3:// builds the index into the bucket
-  status: done
+  status: in_progress
   satisfies:
   - R1
   - R4
@@ -65,16 +74,20 @@ phases:
   hammerable: false
   hill: downhill
   attempts: 1
-  verify: set -eu; sh spec/s3-index-target/verify/wire.sh write_ 10; cargo test --locked;
-    .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\" --count";
-    grep -qF "AWS_PROFILE" doc/xdu.1.scd; grep -A20 "check share/man/man1/xdu.1" .github/workflows/test.yaml
-    | grep -qF "AWS_PROFILE"; for c in openssl-sys native-tls aws-lc-sys; do if out=$(cargo
-    tree --locked -e normal --target all -i $c 2>&1); then echo "$c is in the runtime
-    tree" >&2; exit 1; fi; case "$out" in *"did not match any packages"*) ;; *) printf
-    '%s\n' "$out" >&2; echo "cargo tree failed while looking for $c" >&2; exit 1;;
-    esac; done; cargo tree --locked -e normal --target all -i ring >/dev/null; cargo
-    clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all --
-    --check; echo P3-GATE-GREEN
+  verify: 'set -eu; sh tests/s3-wire.sh write_ 11; cargo test --locked; .agents/factory/bin/temp_index.sh
+    sh -c "xdu-find -i \"\$XDU_INDEX\" --count"; grep -qF "AWS_PROFILE" doc/xdu.1.scd;
+    grep -A20 "check share/man/man1/xdu.1" .github/workflows/test.yaml | grep -qF
+    "AWS_PROFILE"; for c in openssl-sys native-tls aws-lc-sys; do if out=$(cargo tree
+    --locked -e normal --target all -i $c 2>&1); then echo "$c is in the runtime tree"
+    >&2; exit 1; fi; case "$out" in *"did not match any packages"*) ;; *) printf ''%s\n''
+    "$out" >&2; echo "cargo tree failed while looking for $c" >&2; exit 1;; esac;
+    done; cargo tree --locked -e normal --target all -i ring >/dev/null; if sed -n
+    ''1,/^#\[cfg(test)\]/p'' src/s3.rs | grep -nE ''\{(err|e|error|source)(:[^}]*)?\}'';
+    then echo "src/s3.rs formats a raw client error into a message" >&2; exit 1; fi;
+    cargo test --locked --lib s3:: >target/p3-lib.log 2>&1; for t in error_detail_keeps_the_status_and_code_and_drops_the_body
+    the_sinks_errors_strike_the_secret_and_token; do grep -qF "test s3::tests::$t
+    ... ok" target/p3-lib.log; done; cargo clippy --locked --all-targets --all-features
+    -- -D warnings; cargo fmt --all -- --check; echo P3-GATE-GREEN'
 - id: P4
   name: xdu-view browses an s3:// index in place
   status: done
@@ -94,7 +107,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: done
+  status: in_progress
   satisfies:
   - R9
   - R10
@@ -103,12 +116,27 @@ phases:
   parallel: false
   hammerable: false
   hill: uphill
-  verify: set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters
+  verify: 'set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters
     s3-proxy-support; do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md;
-    grep -qF "issues/$f.md" ROADMAP.md; done; sh spec/s3-index-target/verify/wire.sh
-    "" 34; cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml;
-    cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
-    -- --check; echo P5-GATE-GREEN
+    grep -qF "issues/$f.md" ROADMAP.md; done; listed=$(cargo test --locked --test
+    s3_tests -- --list --include-ignored 2>/dev/null | grep -c '': test$''); grep
+    -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml; sh tests/s3-wire.sh
+    "" "$listed"; cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml;
+    for f in .agents/factory/invariants.md .agents/factory/review-rubric.md .agents/skills/xdu-review/SKILL.md
+    .agents/factory/templates/REVIEW.md; do for p in src/s3.rs src/view_query.rs src/engine.rs;
+    do grep -qF "$p" "$f" || { echo "$f does not name $p" >&2; exit 1; }; done; done;
+    risk=$(sed -n ''/^## High-risk files/,/^## Testing/p'' AGENTS.md); for p in src/s3.rs
+    src/view_query.rs src/engine.rs; do case "$risk" in *"$p"*) ;; *) echo "AGENTS.md
+    High-risk does not name $p" >&2; exit 1;; esac; done; testing=$(sed -n ''/^##
+    Testing/,/^## Packaging/p'' AGENTS.md); for w in tests/s3-wire.sh include-ignored
+    XDU_TEST_EXTENSION_DIR fetch.sh; do case "$testing" in *"$w"*) ;; *) echo "AGENTS.md
+    Testing does not name $w" >&2; exit 1;; esac; done; grep -qF ''read_completion_marker_s3''
+    .agents/factory/invariants.md; grep -qF ''marker_version_error'' .agents/factory/invariants.md;
+    grep -qF ''`xdu DIR -o/--outdir DIR|s3://'' AGENTS.md; grep -qF ''`xdu-find -i/--index
+    DIR|s3://'' AGENTS.md; grep -qF ''`xdu-view -i/--index DIR|s3://'' AGENTS.md;
+    if grep -nE "^[[:space:]]*[''.]" doc/*.scd; then exit 1; fi; cargo clippy --locked
+    --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo
+    P5-GATE-GREEN'
 review:
   last_reviewed_commit: 435239ce522752a6f894ac30f0aa237354b9e3e4
   verdict: changes-requested
@@ -159,6 +187,8 @@ departs from it.
   phase's prefix and reaches its minimum. Under `--include-ignored` libtest always prints
   `0 ignored`, so that phrase is never the gate
   ([`research/06`](research/06-adversarial-review.md)).
+  *Amended at review cycle 1:* the gate is now `tests/s3-wire.sh`, a standing CI gate;
+  `verify/wire.sh` is a pointer that execs it, kept so the recorded gates run.
 - **Test naming.** All wire tests live in `tests/s3_tests.rs`, are `#[ignore = "needs the pinned
   httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]`, and carry a
   per-phase prefix (`harness_`, `find_`, `write_`, `view_`) so each `verify:` selects its own. Names
@@ -197,6 +227,70 @@ departs from it.
   pointed read-only at a PyYAML 6.0.3 already unpacked in the shared uv cache: the same
   interpreter and library `uv run` would supply. Nothing was written to that cache, and no
   `verify:` command changed.
+
+## Review cycle 1 — remediation triage
+
+[`REVIEW.md`](REVIEW.md) (cycle 1, changes-requested at `435239c`) raised six CONFIRMED findings.
+The reviewer recommended treating the human gate as applying (finding 2 widens the lists to
+`src/s3.rs`, where findings 1, 3 and 4 sit). **The gate judge confirmed the gate applies and ruled:
+fix all six now, with no stop.** Widening the five harness path lists rides in this diff on that
+ruling, though `xdu-build` Step 2.3 keeps harness changes off product branches (META F8).
+
+- **F1 (HIGH) → P1.** The reader's `CREATE SECRET` bound `ENDPOINT` only for an override, so with
+  AWS resolved `httpfs` fell back to its `s3_endpoint` setting, which it fills from
+  `DUCKDB_S3_ENDPOINT`. Fixed by making the statement text fixed: every key `httpfs` would take
+  from an environment-filled setting is bound. The resolver names the host for both directions
+  (`S3Settings::endpoint_authority`: the override, else `s3.<region>.amazonaws.com`); the writer
+  now gives object_store that host explicitly (`client_endpoint_url`), the same URL it built
+  implicitly. Class sweep (probed against the pinned `httpfs` v1.4.4): at load it fills
+  `s3_access_key_id`, `s3_secret_access_key`, `s3_session_token`, `s3_region` (from `AWS_*`) and
+  `s3_endpoint`, `s3_use_ssl`, `s3_requester_pays`, `s3_kms_key_id` (from `DUCKDB_S3_*`); it reads
+  no proxy variable, no `URL_STYLE` and no `URL_COMPATIBILITY_MODE` from the environment. Three
+  more fallbacks were live: `SESSION_TOKEN` (bound only when present), `REQUESTER_PAYS` and
+  `KMS_KEY_ID` (never bound). All are bound now: an empty token (no header is sent, proved on the
+  wire), requester-pays off as the writer's is, an empty KMS key (it marks writes only). Sibling:
+  with no override the region becomes part of the host, so the resolver refuses a region that is
+  not `[a-z0-9-]` (naming its source, not its value); the three reader/writer man pages say so.
+- **F3 (MEDIUM) → P1.** `Ini::parse` took a header only when the line ended in `]`. Now any line
+  opening with `[` ends the section above; `[name]` may carry a trailing `#`/`;` comment, and any
+  other malformed header starts a section no lookup can name, so its keys reach no profile
+  (sibling: `[other] trailing` and an unclosed `[other` merged the same way). The sweep of the
+  shared-file rules found the rest already right and now pinned by unit tests: whitespace inside
+  the brackets, case-sensitive names and `profile` prefix, `[profile x]` ignored in the
+  credentials file, `[profile default]` ahead of `[default]`. Not changed, recorded for the
+  foreman: a `#`/`;` after a property value is part of the value here, as botocore reads it; the
+  AWS SDKs' profile parser strips it when whitespace precedes it. Either way a wrong value fails
+  closed (a refused signature or a named error).
+- **F4 (MEDIUM) → P3.** `S3Sink::request_error` printed object_store's text, which quotes the
+  response body. It now keeps the client's words up to the body, then the status and the body's
+  S3 `<Code>`, and strikes the secret and token from the text as a last guard. Class sweep: every
+  `S3Sink` request routes through `request_error`; `connect`'s and `load_ini`'s contexts carry no
+  body, header or credential; nothing presigns; object_store's retry `info!` lines go nowhere,
+  since no binary installs a logger. The reader (`lib::s3_request_error`) already dropped the text
+  on 401/403; the new wire test drives it against a 400 `InvalidToken` body too, and DuckDB's text
+  carries no body.
+- **F2 (HIGH, harness) → P5.** `src/s3.rs`, `src/view_query.rs` and `src/engine.rs` join the path
+  list in `invariants.md`, `review-rubric.md`, `xdu-review`'s SKILL.md, `templates/REVIEW.md` and
+  `AGENTS.md` High-risk (which already named `src/engine.rs`). Widening only.
+- **F5 (MEDIUM) → P1 (workflow) and P5 (manual).** The wire gate moved to `tests/s3-wire.sh` and
+  the workflow runs it from there with the minimum at the listed 43. The spec copy stays as a
+  pointer that execs it, so the recorded phase gates still run. `AGENTS.md` Testing, Commands, the
+  pre-release-gate bullet and the repository map document the tier. `invariants.md` §13's "record,
+  not a gate" sentence stays true. The script no longer exports `XDU_TEST_S3_REQUIRED`, which
+  nothing read.
+- **F6 (MEDIUM) → P5.** §2b names `read_completion_marker_s3`, `marker_version_error` and
+  `marker_completion_warning`, and the S3 bound (LIST, HEAD for the size, `MarkerRead::Oversized`
+  refused unfetched). §5 describes the fixed statement. `AGENTS.md` CLI surface shows `s3://` for
+  `-o` and `-i`, and `xdu-rm`'s refusal.
+- **One commit for P1, P3 and P5.** They share same-commit obligations: the workflow's minimum must
+  equal the listed count the new P1 and P3 tests raise; the resolver's region refusal pairs with
+  its man-page sentence; and the gate's move changes the path every gate runs.
+- **Run A / run B.** The fix changes `src/` and `.github/workflows/`, so the CI evidence in
+  `evidence/p1-ci.md`, `p3-ci.md` and `p5-ci.md` no longer describes the head. This remediation is
+  run A: local gates green, P1, P3 and P5 left `in_progress`. Run B reads the CI run of the pushed
+  head (bullets below) and marks them done. The release workflow does not run on this diff (its
+  pull-request paths name `src/engine.rs`, not `src/s3.rs`, and nothing in `Cargo.*` changed), so
+  P1's and P3's release-leg evidence stays at `b6673d3`.
 
 ---
 
@@ -276,6 +370,30 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
 - **Touches:** `src/s3.rs`, `src/lib.rs`, `src/engine.rs`, `src/bin/xdu-find.rs` (prologue only),
   `src/bin/xdu-rm.rs`, `Cargo.toml`, `Cargo.lock`, `tests/common/`, `tests/s3_tests.rs`,
   `tests/rm_tests.rs`, `doc/xdu-rm.1.scd`, `.github/workflows/test.yaml`.
+
+> **Amendment (P1, review cycle 1 remediation):** F1, F3 and the workflow half of F5 (triage
+> above). Gate retuned: `tests/s3-wire.sh harness_ 6`, the new resolver and statement unit tests
+> by name, and two class predicates: no optional `CREATE SECRET` clause (`sql.push_str(", `
+> absent from `src/s3.rs`) and no workflow running anything under `spec/`.
+>
+> - [x] Red first, F1: `harness_stray_duckdb_s3_endpoint_is_not_taken_when_the_resolver_picks_aws`
+>   on the old code: "1 connection(s) reached the DUCKDB_S3_ENDPOINT listener; first bytes
+>   [[22, 3, 1, …]]; recorder saw ["CONNECT 127.0.0.1:<port>"]". Fixed: 0 connections, and every
+>   request the reader made was `CONNECT 127.0.0.s3.us-east-1.amazonaws.com:443` to a loopback
+>   recorder that tunnels nowhere else. The child sets `http_proxy` on its own connection so
+>   nothing leaves loopback.
+> - [x] Red first, the sweep: the stray-environment test now also sets `AWS_SESSION_TOKEN`,
+>   `AWS_REGION`, `DUCKDB_S3_USE_SSL`, `DUCKDB_S3_REQUESTER_PAYS` and `DUCKDB_S3_KMS_KEY_ID`,
+>   asserts `httpfs` took each, and that no request carried `x-amz-security-token`,
+>   `x-amz-request-payer` or an SSE header. Old code: "a request carried x-amz-request-payer from
+>   the stray environment" (the same request carried `x-amz-security-token`). Fixed: green.
+> - [x] Red first, F3: the new unit tests failed on the old parser (`default` resolved to
+>   `other-id`), and `find_credentials_from_a_profile_in_the_shared_files` now drives both header
+>   forms through `xdu-find`; against the old parser it fails with "no S3 credentials".
+> - [ ] Run B: evidence below.
+>
+> **Run B evidence (cycle 1):** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
+> `s3-wire: '' 43 of 43 passed`. Record in `evidence/p1-ci.md` under a "Review cycle 1" heading.
 
 ## Phase P2 — xdu-find queries an s3:// index in place (demo path)
 **Satisfies:** R2, R3, R4, R6, R9 · **Depends on:** P1 · **Size:** ~0.75 day
@@ -493,6 +611,23 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
   `doc/xdu.1.scd`, `README.md`, `AGENTS.md`, `.agents/factory/invariants.md`,
   `.github/workflows/test.yaml`.
 
+> **Amendment (P3, review cycle 1 remediation):** F4 (triage above). Gate retuned: the wire gate
+> at its new path with `write_ 11`, the `error_detail` and redaction unit tests by name, and the
+> class predicate that no line of `src/s3.rs` outside its tests formats a raw client error
+> (`{err}`, `{e}`, `{error}` or `{source}`); the old code has three.
+>
+> - [x] Red first: `write_refusal_bodies_that_echo_the_session_token_are_not_printed` on the old
+>   code: "stderr carries a secret: … refused the credentials … (Generic S3 error: … Server
+>   returned non-2xx status code: 403 Forbidden: <?xml …><Code>SignatureDoesNotMatch</Code>…
+>   <Token-0>xdu-test-session-token-…</Token-0>". Fixed: the writer prints
+>   "… - HTTP 403 SignatureDoesNotMatch" and "… - HTTP 400 InvalidToken"; `xdu-find` prints its
+>   cause and no body in both cases.
+> - [ ] Run B: evidence below.
+>
+> **Run B evidence (cycle 1):** the test legs' `s3-wire: '' 43 of 43 passed` (shared with P1).
+> No release run: the release workflow's paths do not cover this diff, so the release-leg
+> evidence in `evidence/p3-ci.md` stays at `b6673d3`. Record in `evidence/p3-ci.md`.
+
 ## Phase P4 — xdu-view browses an s3:// index in place
 **Satisfies:** R2, R6, R9 · **Depends on:** P3 · **Size:** ~0.5 day
 **Goal:** `xdu-view -i s3://…` shows what it shows locally. This is the designed cut: if the cycle
@@ -608,6 +743,21 @@ by count, and every deferral recorded.
   green on all four pages).*
 - **Verify:** see frontmatter.
 - **Touches:** `issues/`, `ROADMAP.md`, `.github/workflows/test.yaml`, `AGENTS.md`, `doc/*.scd`.
+
+> **Amendment (P5, review cycle 1 remediation):** F2, F6, the manual half of F5, and the region
+> sentence on the three reader/writer man pages (triage above). Gate retuned: the workflow's
+> minimum must equal the file's listed count and the whole file must pass at it; all five path
+> lists name `src/s3.rs`, `src/view_query.rs` and `src/engine.rs` (AGENTS.md's within its
+> High-risk section); AGENTS.md Testing names the script, `--include-ignored`,
+> `XDU_TEST_EXTENSION_DIR` and the fetch; §2b names the S3 symbols; the CLI surface shows `s3://`.
+>
+> - [x] Man pages: scdoc is not installed here, so the region sentence was not rendered. It adds
+>   no asserted literal (no `AWS_*`, `XDU_*` or `s3://` text) and no line opens with `.` or `'`.
+> - [ ] Run B: evidence below.
+>
+> **Run B evidence (cycle 1):** both test legs' `s3-wire: '' 43 of 43 passed`, equal to the
+> workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published
+> man-page text"; the Lint job green. Record in `evidence/p5-ci.md`.
 
 ---
 

@@ -119,7 +119,9 @@ it does (see *xdu-find*(1)).
 
 *AWS_REGION*, *AWS_DEFAULT_REGION*
 	The region, in that order, ahead of the profile's; us-east-1 when none is
-	set.
+	set. With no endpoint set below, the region also names the host,
+	s3.REGION.amazonaws.com, so it must be a region name: lowercase letters,
+	digits and hyphens.
 
 *AWS_ENDPOINT_URL_S3*, *AWS_ENDPOINT_URL*
 	An endpoint to use in place of AWS S3, as http:// or https:// with a host
