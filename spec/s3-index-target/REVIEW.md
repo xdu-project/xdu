@@ -544,3 +544,258 @@ Four findings, all CONFIRMED. Finding 1 was raised by both reviewers independent
 ### Optional completeness sub-pass (separate reviewer; may see TECH.md)
 
 Not run (no `completeness` argument).
+
+## Review cycle 3 — changes-requested (2026-11-05)
+
+- **Reviewed commit:** fdc32709a5dbc8c2d2cf4b9c1eeba7bc9768347a  ·  **Base:** `origin/main`
+  (merge-base `a0cdd95`)  ·  **Date:** 2026-11-05
+- **Verdict:** changes-requested
+- **Cycle:** 3 of ≤3, mirroring `review.cycle` in `TECH.md`. This is the last cycle in the bound
+  and the third without convergence, so the skill stops and escalates to the human.
+
+### How this review ran
+
+- **Mode:** a fresh blind pass over the full spec-excluded diff, graded against the GOAL as it
+  stands, not only cycle 2's remediation. It used the `debate` variant for the third time,
+  because the diff touches the coupled core. Reviewer A argued "ship" and B argued "block".
+  Neither saw the other's output or any earlier cycle's findings.
+- **What the reviewers saw:**
+  - `GOAL.md`, `invariants.md` and `review-rubric.md`, verbatim at `fdc3270`, in one brief file
+    built with `cat` under the review's scratch directory in `target/` (meta-note F9, seen
+    again).
+  - The spec-excluded diff (`git diff origin/main...HEAD -- . ':(exclude)spec/'`),
+    `git log --oneline`, `AGENTS.md`, and the runnable worktree.
+  - They were barred from all of `spec/` beyond the brief, from commit bodies, from `target/ci/`
+    and from build scratch they did not create. They were told not to run `tests/s3-wire.sh`,
+    whose fixed log names under `target/` the orchestrator's run owns, and to run the wire tier
+    with `cargo test` into their own scratch instead.
+- **Contract drift:** the same three GOAL commits as cycles 1 and 2 (`e4ba7d0`, `e3593e9`,
+  `0f0edbd`), and none since. The gate judge confirmed them under the maintainer's standing
+  mandate, so this cycle grades the GOAL as it stands.
+- **Artifact-deliverable R-IDs:** none. The orchestrator owns the CI-run halves of R3 and R10,
+  graded from the CI logs below.
+
+### Verification run
+
+"A" and "B" are the blind reviewers; "O" is the orchestrator.
+
+- `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 46`, the relative form
+  `AGENTS.md` documents (O) → exit 0:
+  - `s3-wire: '' 46 of 46 passed`
+  - `s3-count-bytes: received 138351 of 16784047 stored bytes (0.824%), 21 requests: LIST 2, HEAD
+    10, GET 9`
+  - `write-unsafe-names: 4 case(s), non-UTF-8 case skipped: the filesystem refuses the name`
+    (APFS)
+- The `harness_` tier in the same relative form, five times in a row while both reviewers were
+  building and testing on the same host (O) → 5 of 5 runs `7 passed; 0 failed`.
+- `cargo test --locked --offline --test s3_tests -- --include-ignored` with an absolute extension
+  directory (A, B) → `46 passed; 0 failed`. A's meter negative control printed
+  `s3-scan-bytes: ... (90.271%)`. With the extension directory unset or empty, a wire test fails
+  with a panic naming the cause (B).
+- `cargo test --locked --offline` (A, B) → exit 0. lib passed 157 tests; `s3_tests` reported
+  `4 passed; 0 failed; 42 ignored`.
+- `cargo fmt --all -- --check` and `cargo clippy --locked --offline --all-targets --all-features
+  -- -D warnings` (A, B) → exit 0. `cargo tree -e normal` holds no `openssl-sys`, `native-tls` or
+  `aws-lc-sys` (A, B).
+- **Negative controls (A).** Each was built from a `git archive` export in A's scratch, with its
+  own `CARGO_TARGET_DIR`. Each mutated file was restored by copy and checked with `cmp`.
+  - Moving `clear_marker` ahead of `check_top_level` made
+    `write_unsafe_partition_name_is_refused_before_the_clear` fail.
+  - Interpolating the S3 glob as SQL text made `find_prefix_with_a_quote_matches_local` and
+    `view_quotes_in_the_prefix_and_a_directory_match_local` fail, while the plain parity test
+    still passed.
+- **CLI drives (A, B)** against loopback S3 stand-ins they wrote. Each server started and stopped
+  within one Bash call, and a connect to every port was refused afterwards.
+  - **Parity:** local and S3 matched for `--count`, `--top`, the default listing, `-f csv`, sorted
+    output and every `-u NAME`. The names covered 9 (A) and 17 (B) awkward partition names plus
+    `__root__`, odd prefixes, and a bucket-root index.
+  - **Re-runs (A, B):** a 1205-chunk partition re-run down to 3 chunks pruned 1202 (A). A
+    `-j 8 -B 7` run of 221 chunks re-run with `-B 50` left 37 keys, the same as local (B).
+  - **Echo bodies and failure modes (A, B):** error bodies that echo the token printed 0
+    occurrences. A dead endpoint, missing credentials and a missing extension each name their
+    cause, exit 1, print no stdout and leave `HOME` empty.
+  - **Proxies and `xdu-rm` (A, B):** dead proxy variables were ignored by both directions, as
+    documented. `xdu-rm` refuses through both `-i` and `XDU_INDEX`.
+  - **TLS (B, re-run by O):** finding 1 below.
+- **Cycle 2's finding 3 and 4 probes, re-run by O at this head.** `xdu` and `xdu-find`, each given
+  `s3://AKIDEXAMPLE:topsecret-Zq9@bucket/p\xff`, `s3://AKIDEXAMPLE:top/secret-Zq9@bucket/p` and
+  `s3://127.0.0.1:9#/idx`, exit 1. The output holds 0 occurrences of the key or the secret, and
+  names the credentials refusal or the bucket's `:`.
+- **The `xdu-view` TUI was not driven interactively:** `openpty: Operation not permitted` (A, B).
+  Its R2 part rests on the `view_*` wire tests and the pre-terminal refusal tests.
+- **CI (O): Tests run 42072876646 on the merge ref `f48b4f0`.** That is `40a9813` merged into
+  `a0cdd95`. `a0cdd95` is an ancestor of `40a9813`, so the merge's tree is `40a9813`'s.
+  `fdc3270` differs from `40a9813` only in `spec/`, `ROADMAP.md` and
+  `issues/s3-legacy-bucket-names.md` (`git diff --stat 40a9813 fdc3270`), and no workflow reads
+  either of the last two.
+  - Both legs ran the `S3 tests` step: `test result: ok. 46 passed; 0 failed`, then `s3-wire: ''
+    46 of 46 passed`, then the same `s3-count-bytes` line at 0.824%. Linux ran the non-UTF-8 case
+    (`5 case(s), non-UTF-8 case ran`). macOS skipped it, naming the filesystem's refusal.
+  - The plain `Test` step reports `s3_tests` as `4 passed; 0 failed; 42 ignored` on both legs,
+    and both always-run tests that cycle 2 added pass there.
+  - Packaging printed `OK: every asserted literal survived into the published man-page text`.
+  - These logs have no `##[error]` line: Tests 42072876646, Release 42072876624 (5 jobs, at
+    `40a9813`), Publish Image 42072876756 (2 validate jobs), and Publish Image 42094256569 (2
+    validate jobs, on `fdc3270`'s merge ref `7cd747e`).
+  - **Not observed:** a Tests run on `fdc3270` itself. No log of one was available.
+  - O checked all 40 timestamped lines quoted under "Review cycle 2" in `evidence/p1-ci.md` and
+    `p5-ci.md` with `grep -F` against the three logs, and every one matched.
+- **Man-page render (local): unavailable again.** `scdoc` is not installed, and this session
+  installs nothing. A and B checked the `.scd` sources against CI's `Nx:` counts at source level,
+  and the counts matched. No line opens with `.` or `'`. CI's distro-`scdoc` count gate is green,
+  but the published text has still not been read locally. That remains an unclosed gap for the
+  human (`AGENTS.md`'s Commands section has the install line).
+- **Tree state (O).** `git status --porcelain` was empty after both hand-backs and after O's
+  probes. `target/test-ext/httpfs.duckdb_extension` is unchanged and predates the review.
+  `target/lib/` does not exist. O's run of `tests/s3-wire.sh` rewrote `target/wire-all.log` and
+  `target/wire-all.list`, the script's fixed names.
+  - The review's scratch is under `target/review3-tmp/`, which is git-ignored, and it could not
+    be removed: `del` fails there with "Operation not permitted". A's directory reports 36G
+    apparent size. That is mostly a copy-on-write clone of `target/debug`, and free space fell by
+    about 1 GiB.
+
+### Cycle 2 findings at this head (O)
+
+| Cycle 2 finding | Status at `fdc3270` |
+|---|---|
+| 1. `AGENTS.md` describes only the local marker gate | Closed. Architecture names `read_completion_marker_s3`, `marker_version_error`, `marker_completion_warning` and `MarkerRead::Oversized`. A checked the named symbols against the code. |
+| 2. The documented wire-gate command fails 21 of 43 | Closed. O ran the documented relative form: `46 of 46 passed`. |
+| 3. A `host:port#` bucket moves the writer | Closed. `S3Locator::parse` holds the bucket to S3's naming rules. `a_bucket_that_names_a_host_and_port_reaches_no_host` passes locally and on both CI legs. O's probe was refused naming the `:`. |
+| 4. A non-UTF-8 locator echoes the credentials | Closed. The `@` check runs first, on the bytes. `a_locator_carrying_credentials_is_refused_without_printing_them` passes on both CI legs. O's three probes leaked 0 times. |
+| 5. Flaky proxy count (foreman-observed) | Closed as far as can be observed. `harness_a_connection_that_carries_nothing_is_not_a_request` passes on both CI legs, and `harness_` passed 5 of 5 under concurrent load (O). |
+
+### Requirement → evidence matrix
+
+| R-ID | Implemented by | Verified how (who) | Status |
+|------|----------------|--------------------|--------|
+| R1 | `s3::S3Sink`, `check_s3_partition_names`; `crawl::IndexSink`/`LocalSink`; ordering in `bin/xdu.rs` | `write_*` wire tests; parity, prune and pagination drives (A, B); clear-order negative control (A); CI both legs (O) | ✅ |
+| R2 | `lib::parquet_source`, `index_glob_s3`, `read_completion_marker_s3`, `marker_*` gates; `view_query`; both reader bins | `find_*`/`view_*` wire tests; parity drives, no whole-object chunk GET (A, B). TUI not driven | ✅. Finding 1 leaves the results open to forgery by an interceptor |
+| R3 | httpfs ranged reads; nothing staged | `find_count_receives_under_five_percent_of_stored_bytes` at 0.824%, with a 90.271% negative control (A, B, O); both CI legs at 0.824% (O) | ✅ |
+| R4 | `S3Sink::request_error`, `lib::s3_request_error`, pre-flight LIST | `*_failures_*`, read-only and refused-chunk wire tests; dead-endpoint and echo drives (A, B) | ✅ |
+| R5 | `S3Settings::resolve`, `duckdb_secret_statement`; `engine::open_s3_connection_from` | Unit tests, `harness_*`, profile and secret wire tests, echo probes (A, B); locator probes (O) | ✅ for the resolver. Finding 1: one resolver feeds both directions, but only the writer verifies the host it reaches |
+| R6 | bound glob, bound `path LIKE ?`, bound marker URLs | Unit pins; quote-prefix wire tests; glob-as-text negative control (A); `it's` over S3 (A, B) | ✅ |
+| R7 | `engine::load_extension_from` error text; `open_s3_connection` | `s3_index_without_httpfs_names_the_path_and_both_remedies`, `local_tools_ignore_a_garbage_httpfs`, `offline_tests`; empty-directory drives (A, B) | ✅ |
+| R8 | early refusal in `src/bin/xdu-rm.rs` | `rm_tests` case; `-i` and `XDU_INDEX` drives (A, B) | ✅ |
+| R9 | the four `doc/*.scd` pages; README "Indexes in S3"; CI literal list | Source-level counts (A, B); CI count gate green (O); **render not read locally** | ✅ (gap noted) |
+| R10 | in-process `s3s` endpoint, `#[ignore]` tier, `tests/s3-wire.sh`, CI step with a minimum of 46 | 46/46 locally (A, B, O) and on both CI legs (O); plain `cargo test` lists 42 ignored (A, B, O) | ✅ |
+
+**Unmapped changes**, none blocking:
+
+- The README's `-b 100000` becomes `-B 100000`.
+- Four deferral seeds beyond the GOAL's three, each with a `ROADMAP.md` entry.
+  `issues/s3-legacy-bucket-names.md` is new since cycle 2.
+- `Cargo.lock` moves crates the S3 work does not name: `clap` goes from 4.5.58 to 4.6.7, `chrono`
+  from 0.4.43 to 0.4.45 and `regex` from 1.12.3 to 1.13.1, with others (B, confirmed by O).
+  `duckdb`, `arrow` and `parquet` are unchanged, so the GOAL's no-bump non-goal holds, and CI is
+  green on the result.
+
+### Findings
+
+One finding, CONFIRMED. B raised it; A did not examine TLS. It is not an `invariants.md` §1–§12
+violation, so it is not auto-CRITICAL.
+
+#### [HIGH/CONFIRMED] 1. The S3 readers accept any TLS server certificate; the writer verifies
+- **Where:** `src/engine.rs:171-178` (`open_s3_connection_from`). The function loads `httpfs` and
+  runs the bound `CREATE SECRET`, and sets nothing about certificate verification. B reads
+  httpfs's `enable_server_cert_verification` as off by default (DuckDB's documented default), and
+  `strings` on the pinned extension shows the setting and `ca_cert_file` exist. Nothing in
+  `src/`, `tests/`, `doc/`, `README.md`, `AGENTS.md`, `issues/` or `ROADMAP.md` mentions either
+  setting.
+  - The writer's client (`src/s3.rs:852-866`, reqwest over rustls with its default verification)
+    does verify.
+- **Failure scenario:**
+  - A reader resolves to HTTPS by default: every AWS read, and any `https://` endpoint override.
+  - Anyone on the network path who presents a certificate of their own completes the handshake.
+    The reader then sends its signed requests, with the session token when one is set.
+  - It returns whatever index the interceptor serves. That discloses every path, owner and size
+    in the crawled tree, and lets the interceptor forge query results.
+  - The writer refuses the same endpoint, so the two directions apply different trust to one
+    resolved endpoint. That is the writer–reader coherence the GOAL names as the risk to design
+    against.
+  - No R-ID names TLS, so this is not claimed as a contract breach. It is graded HIGH as a real
+    bug on the common path, per the rubric.
+- **Evidence:** O re-ran B's probe with its own script. It used B's file-backed loopback S3
+  stand-in, with a self-signed certificate whose subject and issuer are both `CN=127.0.0.1` and
+  which is in no trust store. The server started and stopped inside the one call, and its port
+  refused a connect afterwards.
+  - Over plain HTTP, `xdu SRC -o s3://bkt/idx` exited 0, and `xdu-find -i s3://bkt/idx --count`
+    printed `6`.
+  - Over HTTPS with the self-signed certificate (`AWS_ENDPOINT_URL_S3=https://127.0.0.1:PORT`):
+    - `xdu SRC -o s3://bkt/idx2` exited 1, "cannot reach the S3 endpoint while listing the index
+      prefix …". The server logged 0 requests for `idx2`.
+    - `xdu-find -i s3://bkt/idx --count` printed `6` and exited 0, with empty stderr.
+    - `xdu-find -i s3://bkt/idx -u beta` printed the partition's three paths.
+    - The server served those reads 13 requests over TLS: 4 LIST, 4 marker HEAD, 2 marker GET and
+      3 chunk GET.
+  - B's own runs matched this. A handshake-only TLS server logged `4 HANDSHAKE OK` for the reader
+    and `4 TLS SSLError` for the writer. Through B's TLS stand-in the reader printed `137` and the
+    writer exited 1.
+  - The real AWS path is the same code, but it was not exercised, since this host has no network
+    beyond loopback.
+- **Touches:** the high-blast `src/engine.rs` ("the one connection open, the extension load and
+  `open_s3_connection`"). It sits beside R5 (one resolver for both directions), R2 (the same
+  answers a local copy gives) and the GOAL's Outcome ("on any host").
+- **Why the fix is not a one-liner:**
+  - Turning verification on is one fixed-text `SET` after the `LOAD`.
+  - Which roots the reader then trusts is a design call. `httpfs` brings its own TLS stack and
+    `ca_cert_file`, and the writer trusts the platform store. On a host whose roots are not where
+    that stack looks (macOS keeps them in the keychain), or on an air-gapped site with a private
+    CA, verification could fail every real read.
+  - The loopback acceptance cannot show which, because its endpoint speaks plain HTTP.
+
+**Considered and dropped** (A and B, merged):
+
+- **The marker HEAD-then-GET race:** the local reader has the same stat-then-read window, so this
+  is parity (A, B).
+- **Reader error bodies leaking the token:** DuckDB's error text carries no body; 0 hits (A, B).
+- **Proxy variables honoured despite the docs:** dead proxies saw 0 requests from either side (A,
+  B).
+- **The local `-u "it's"` parser error:** the recorded §5 exception for local paths, which the
+  GOAL lists as a Non-goal (A, B).
+- **Listing pagination past 1000 keys:** the prune and the glob both work (A).
+- **Redaction mangling the text around a one-character probe secret:** cosmetic; nothing leaked
+  (A).
+- **A literal `~` in `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE`:** expansion is not required
+  (A, B).
+- **httpfs filling `s3_*` settings from `AWS_*` at `LOAD`:** this makes the code comment saying
+  the secret appears in "no `duckdb_settings()` row" untrue under environment credentials. But
+  nothing prints settings, and the secret listing is redacted, so no output carries it (B).
+- **A half key pair in the config file failing resolution when the credentials file holds a whole
+  pair:** deliberate fail-closed design (B).
+- **The `**` marker LIST cost, and tokio's DNS threads missing from §7's thread budget:**
+  throughput is a non-goal, and the budget gap is a nit (A, B).
+- **`view_query::root_files` swallowing errors:** old local behaviour, moved unchanged (A).
+- **The S3 open-and-gate block duplicated in both readers:** each step is a library call, and the
+  shape mirrors the local pattern (A, B).
+- **The writer wording a TLS failure as "cannot reach":** message nuance only (B).
+- **AWS China endpoints, and virtual-hosted TLS for dotted bucket names:** real-provider
+  behaviour, outside the loopback acceptance (B).
+- **`encode_chunk` and `target/wire-*.log` absent from `AGENTS.md`:** no gate is degraded (B).
+
+### Human-gate triggers
+
+- **Triggered by path.** Finding 1 is CONFIRMED and sits in `src/engine.rs`, which is on the
+  authoritative list. It breaks none of §1, §2, §4 or §5 as written: no credential becomes SQL
+  text, and the marker ordering holds.
+- **Bounded loop exhausted.** This is cycle 3, the last in the bound, and the third without
+  convergence. The skill stops here. It does not recommend `/xdu-build` without the human.
+- **For the human: the finding needs a design decision before any fix.** Two routes:
+  1. **Fix it in a fourth, human-approved build cycle.**
+     - Readers turn verification on with fixed SQL text after the `LOAD`.
+     - A GOAL amendment says which roots both directions trust: the platform store, a
+       resolver-chosen CA file fed to both `httpfs`'s `ca_cert_file` and the writer, or both.
+     - A wire test gives all three tools a self-signed TLS endpoint, and each must refuse it.
+     - A test endpoint signed by a test CA, which the chosen source names, must be accepted.
+     - `invariants.md` §5 gains the rule so the next review checks it.
+     - The open risk is that a root source the loopback endpoint cannot prove may break real AWS
+       reads on one of the release platforms.
+  2. **Amend the GOAL to record it as a known limitation.** File a seed and a `ROADMAP.md` entry,
+     and state on `xdu-find.1`, `xdu-view.1` and in the README that the readers do not verify
+     the server's certificate.
+  - **Recommendation: route 1.** The readers send signed requests to AWS over HTTPS by default,
+    and they are the half of the pilot every host runs.
+- **Also for the human:** the local man-page render is still unread (above).
+
+### Optional completeness sub-pass (separate reviewer; may see TECH.md)
+
+Not run (no `completeness` argument).

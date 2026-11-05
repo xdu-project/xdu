@@ -178,7 +178,7 @@ is skipped by the parser):
 - **Recommended fix:** in Step 2, prefer a brief file assembled verbatim by `cat` from the
   committed files at the reviewed head, outside `spec/`, and have `REVIEW.md` record that it was
   used. Blindness is unchanged: the file holds only the three allowed texts.
-- **Confidence:** med · **Effort:** small
+- **Confidence:** med · **Effort:** small · seen again (review cycle 3)
 
 ## F10 — A command a remediation writes into the manual is never run in the form it was written
 `origin=xdu-build:remediation-cycle-2 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-build/SKILL.md`
@@ -195,3 +195,24 @@ is skipped by the parser):
   command needs a network or a destructive target, runs it with only that argument redirected,
   and says so).
 - **Confidence:** high · **Effort:** small
+
+## F11 — The rubric defines security severity only for the SQL-injection surface
+`origin=xdu-review:step-3 severity=medium category=instruction status=open target=.agents/factory/review-rubric.md`
+- **What happened:** cycle 3 confirmed that the S3 readers accept any TLS certificate while the
+  writer verifies. The defect had been present since cycle 1 and survived two `debate` rounds. To
+  grade it, the orchestrator had to decide whether "security weakening (the DuckDB SQL-injection
+  surface)" in the CRITICAL row is an example or the whole class. It chose HIGH, as a real bug
+  on a common path.
+- **Skill cause:** the severity table names one security surface by its parenthetical. Nothing
+  in the rubric or in `invariants.md` names transport trust, though a diff that adds a network
+  path brings that surface with it. Under "no speculative hardening", nothing pointed a reviewer
+  there, so finding it depended on one reviewer's initiative.
+- **Recommended fix:**
+  - In `review-rubric.md`'s severity table, say whether security weakening outside the
+    SQL-injection surface is CRITICAL or HIGH.
+  - In Scope, add that a diff that opens a network path is checked for server authentication on
+    every client it adds, and for parity between them. A reproduced gap there is a correctness
+    finding, not hardening.
+  - The product rule itself belongs in `invariants.md` via the build that fixes the finding, not
+    here.
+- **Confidence:** med · **Effort:** small

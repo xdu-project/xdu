@@ -3,7 +3,7 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_review
+status: blocked
 branch: feature/s3-index-target
 base: main
 current_phase: done
@@ -154,11 +154,11 @@ phases:
     letters" $f; done; cargo clippy --locked --all-targets --all-features -- -D warnings;
     cargo fmt --all -- --check; echo P5-GATE-GREEN'
 review:
-  last_reviewed_commit: ef4fedfb859756bb5a52f1461cd7cb5e48e9aeea
+  last_reviewed_commit: fdc32709a5dbc8c2d2cf4b9c1eeba7bc9768347a
   verdict: changes-requested
-  blocked_reason: 'review cycle 2: AGENTS.md marker bullet and wire-gate path; two
-    s3.rs locator edges'
-  cycle: 2
+  blocked_reason: 'review cycle 3: S3 readers accept any TLS certificate (engine.rs);
+    bound exhausted, human gate'
+  cycle: 3
 ---
 # TECH.md — Build an index into S3 and query it in place
 
