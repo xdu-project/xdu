@@ -6,7 +6,7 @@ appetite: big
 status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: P3
+current_phase: P4
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -53,7 +53,7 @@ phases:
     P2-GATE-GREEN
 - id: P3
   name: xdu -o s3:// builds the index into the bucket
-  status: in_progress
+  status: done
   satisfies:
   - R1
   - R4
@@ -63,16 +63,18 @@ phases:
   - P2
   parallel: false
   hammerable: false
-  hill: crest
+  hill: downhill
   attempts: 1
   verify: set -eu; sh spec/s3-index-target/verify/wire.sh write_ 10; cargo test --locked;
     .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\" --count";
     grep -qF "AWS_PROFILE" doc/xdu.1.scd; grep -A20 "check share/man/man1/xdu.1" .github/workflows/test.yaml
-    | grep -qF "AWS_PROFILE"; for c in openssl-sys native-tls aws-lc-sys; do if cargo
-    tree --locked -e normal -i $c >/dev/null 2>&1; then echo "$c is in the runtime
-    tree" >&2; exit 1; fi; done; cargo tree --locked -e normal -i ring >/dev/null;
-    cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
-    -- --check; echo P3-GATE-GREEN
+    | grep -qF "AWS_PROFILE"; for c in openssl-sys native-tls aws-lc-sys; do if out=$(cargo
+    tree --locked -e normal --target all -i $c 2>&1); then echo "$c is in the runtime
+    tree" >&2; exit 1; fi; case "$out" in *"did not match any packages"*) ;; *) printf
+    '%s\n' "$out" >&2; echo "cargo tree failed while looking for $c" >&2; exit 1;;
+    esac; done; cargo tree --locked -e normal --target all -i ring >/dev/null; cargo
+    clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all --
+    --check; echo P3-GATE-GREEN
 - id: P4
   name: xdu-view browses an s3:// index in place
   status: pending
@@ -404,7 +406,9 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
     would percent-encode), and object_store encodes every non-ASCII byte, so a directory such as
     `café` is refused for an S3 output, as are `.`/`..`, controls, glob metacharacters and the
     characters AWS advises against. Building keys raw instead would admit non-ASCII names, at the
-    price of an unprobed reader path; left to the foreman.
+    price of an unprobed reader path; left to the foreman. *Foreman ruling at P3 run B:* keep
+    refusing them; the raw-key alternative is a P5 ledger seed,
+    `issues/s3-non-ascii-partition-names.md`.
   - **The prefix is checked too.** A prefix with an empty, `.` or `..` segment or a character the
     client encodes is refused before any request, since the writer's keys would differ from the
     readers' glob.
@@ -450,6 +454,13 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
   `aws-lc-sys` (`cargo tree -e normal -i …`, in `verify:`), and does hold `ring`. Record in the
   commit body that the manylinux_2_28 leg's glibc/NEEDED check must pass on the first push (ring is
   proven there only as a build dependency).
+  *Gate amendment at P3 run B, on the foreman's ruling (META F5):* the probe read cargo's exit
+  status, so any cargo failure (an unreachable registry, a bad target) passed as "absent", and it
+  looked at the host target only. The stored `verify:` now counts a crate absent only when
+  `cargo tree` says `did not match any packages`, fails on any other non-zero exit, and asks
+  with `--target all`, the `ring` probe included. Changed through `set_phase.py --verify-file`
+  and read back byte for byte. Red-first: a bad target, a cold `CARGO_HOME` with no network,
+  and a present crate (`ring` put in the forbidden list) each fail it; the real tree passes.
 - [x] `doc/xdu.1.scd`: `-o` accepts `s3://BUCKET/PREFIX`; S3 paragraph (chunks sent as they
   finalize, nothing assembled locally, proxy variables not used); `ENVIRONMENT` gains the ten
   `AWS_*` names; CI literal counts. `README.md`: the build half of `### Indexes in S3`.
@@ -466,7 +477,10 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
   `floor breach`, `runtime breach` or `unexpected dynamic needs` line; then
   `extension-check: ok platform=linux_amd64 engine=v1.4.4` and the `linux_arm64` line. This is
   the proof that ring and object_store build and link in manylinux_2_28; a failure here invokes the
-  dependency-floor rule above.
+  dependency-floor rule above. *Recorded by run B in [`evidence/p3-ci.md`](evidence/p3-ci.md)
+  (tests run 42020057385, N = 36 on both legs, the non-UTF-8 name case ran on ubuntu; release
+  run 42020057315, every Linux binary at `GLIBC_2.28`, no breach line; the macOS x86_64 leg's
+  cold-cache release build took 39m 29s inside its 90-minute timeout).*
 - **Verify:** see frontmatter.
 - **Touches:** `Cargo.toml`, `Cargo.lock`, `src/crawl.rs`, `src/s3.rs`, `src/bin/xdu.rs`, `tests/`,
   `doc/xdu.1.scd`, `README.md`, `AGENTS.md`, `.agents/factory/invariants.md`,
@@ -511,6 +525,10 @@ by count, and every deferral recorded.
   `Assertion failed: (min_val <= input)` in `compress_integral.cpp`, while the release build
   answers correctly. The P2 filter test avoids that combination (see P2's run A amendments). File
   it as an `issues/` file with a `ROADMAP.md` entry.
+  Also `issues/s3-non-ascii-partition-names.md` (foreman ruling at P3 run B): `xdu -o s3://`
+  refuses a top-level directory with a non-ASCII name, because object_store percent-encodes it
+  in a key; building keys raw would admit such names, but needs a reader-parity wire test first,
+  since httpfs's handling of non-ASCII keys is unprobed.
 - [ ] If P4 was cut by amendment, record `issues/s3-index-view.md` and its ROADMAP entry here.
 - **Run B evidence:** test legs as above with N ≥ 34 (the final `<min>` in the workflow equals the
   listed count); the Packaging job's literal step green on all four pages.

@@ -109,3 +109,5 @@ is skipped by the parser):
   (or each release target). Add that rule to the gate-writing guidance and retune P3's `verify:`
   through `set_phase.py --verify-file` at the foreman's word.
 - **Confidence:** high · **Effort:** small
+- **P3 run B:** on the foreman's ruling, P3's `verify:` was retuned this way (TECH, P3 gate
+  amendment). The finding stays open for the gate-writing guidance itself.
