@@ -86,3 +86,37 @@ The workflow's minimum is 43, the file's listed count. Both legs passed all of t
   published man-page text":
   `2026-11-05T15:45:14.2401794Z OK: every asserted literal survived into the published man-page text`
 - Job `Lint (fmt + clippy)` checked out the same merge (`2026-11-05T15:44:46.8193770Z HEAD is now at 0d80d6a …`) and logged no `##[error]`.
+
+## Review cycle 2 (remediation run B, head `40a9813`)
+
+Run B of the review-cycle-2 remediation copied these lines verbatim from the CI logs of
+`40a9813` on draft PR #33. A record, not a gate.
+
+- **No CI run for `012b2e6`.** The remediation landed as two commits, `012b2e6` (F1 to F4) and
+  `40a9813` (F5). GitHub triggered no run for `012b2e6`; tests run 42072876646, on `40a9813`,
+  covers both commits.
+- **Tests workflow, run 42072876646.** It ran on `pull_request` and checked out the merge ref
+  `pull/33/merge`. That merge is `f48b4f0`, the head `40a9813` merged into `main` at `a0cdd95`.
+  `main` has not moved past `a0cdd95`, the merge base, so the merge's tree is `40a9813`'s.
+  - Job `Test (ubuntu-24.04)`, step `Run actions/checkout@9c091bb…`:
+    `2026-11-05T17:17:20.1174828Z HEAD is now at f48b4f0 Merge 40a9813d0341a9344272d28dba737fc7a115d5ba into a0cdd95201e6cf2dff44f68ab3c6362dae907143`
+  - Job `Test (macos-15)`, same step:
+    `2026-11-05T17:17:23.1085970Z HEAD is now at f48b4f0 Merge 40a9813d0341a9344272d28dba737fc7a115d5ba into a0cdd95201e6cf2dff44f68ab3c6362dae907143`
+- No log of the run holds a `##[error]` line.
+
+### The S3 wire tests (tests run 42072876646, step "S3 tests")
+
+The workflow's minimum is 46, the file's listed count, and both legs passed all 46.
+
+- Job `Test (ubuntu-24.04)`:
+  `2026-11-05T17:37:58.4965501Z s3-wire: '' 46 of 46 passed`
+- Job `Test (macos-15)`:
+  `2026-11-05T17:20:46.0564470Z s3-wire: '' 46 of 46 passed`
+
+### Man-page literals and lint (tests run 42072876646)
+
+- Job `Packaging (man + completions generate)`, step "Assert critical literals survive into the
+  published man-page text":
+  `2026-11-05T17:18:07.9156425Z OK: every asserted literal survived into the published man-page text`
+- Job `Lint (fmt + clippy)` checked out the same merge
+  (`2026-11-05T17:17:19.6168457Z HEAD is now at f48b4f0 …`) and logged no `##[error]`.

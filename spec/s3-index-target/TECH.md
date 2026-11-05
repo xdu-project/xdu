@@ -3,15 +3,15 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_progress
+status: in_review
 branch: feature/s3-index-target
 base: main
-current_phase: P1
+current_phase: done
 last_updated: '2026-11-05'
 phases:
 - id: P1
   name: Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
-  status: in_progress
+  status: done
   satisfies:
   - R5
   - R7
@@ -113,7 +113,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: in_progress
+  status: done
   satisfies:
   - R9
   - R10
@@ -123,36 +123,36 @@ phases:
   hammerable: false
   hill: uphill
   verify: 'set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters
-    s3-proxy-support; do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md;
-    grep -qF "issues/$f.md" ROADMAP.md; done; listed=$(cargo test --locked --test
-    s3_tests -- --list --include-ignored 2>/dev/null | grep -c '': test$''); grep
-    -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml; grep -qF "XDU_TEST_EXTENSION_DIR=target/test-ext
-    sh tests/s3-wire.sh \"\" $listed" AGENTS.md; XDU_TEST_EXTENSION_DIR=target/test-ext
-    sh tests/s3-wire.sh "" "$listed"; cargo test --locked; grep -qF "include-ignored"
-    .github/workflows/test.yaml; for f in .agents/factory/invariants.md .agents/factory/review-rubric.md
-    .agents/skills/xdu-review/SKILL.md .agents/factory/templates/REVIEW.md; do for
-    p in src/s3.rs src/view_query.rs src/engine.rs; do grep -qF "$p" "$f" || { echo
-    "$f does not name $p" >&2; exit 1; }; done; done; risk=$(sed -n ''/^## High-risk
-    files/,/^## Testing/p'' AGENTS.md); for p in src/s3.rs src/view_query.rs src/engine.rs;
-    do case "$risk" in *"$p"*) ;; *) echo "AGENTS.md High-risk does not name $p" >&2;
-    exit 1;; esac; done; testing=$(sed -n ''/^## Testing/,/^## Packaging/p'' AGENTS.md);
-    for w in tests/s3-wire.sh include-ignored XDU_TEST_EXTENSION_DIR fetch.sh; do
-    case "$testing" in *"$w"*) ;; *) echo "AGENTS.md Testing does not name $w" >&2;
-    exit 1;; esac; done; grep -qF ''read_completion_marker_s3'' .agents/factory/invariants.md;
-    grep -qF ''marker_version_error'' .agents/factory/invariants.md; grep -qF ''`xdu
-    DIR -o/--outdir DIR|s3://'' AGENTS.md; grep -qF ''`xdu-find -i/--index DIR|s3://''
-    AGENTS.md; grep -qF ''`xdu-view -i/--index DIR|s3://'' AGENTS.md; if grep -nE
-    "^[[:space:]]*[''.]" doc/*.scd; then exit 1; fi; arch=$(sed -n ''/^## Architecture/,/^##
-    CLI surface/p'' AGENTS.md); for s in lib::read_completion_marker_s3 lib::marker_version_error
-    lib::marker_completion_warning MarkerRead::Oversized lib::index_version_error
-    lib::parquet_source; do case "$arch" in *"$s"*) ;; *) echo "AGENTS.md Architecture
-    does not name $s" >&2; exit 1;; esac; done; if grep -nE ''readers call .lib::index_version_error.
-    first|warn if absent|# read/write\. Only the crawler|is the \*\*one\*\* place
-    this layout'' AGENTS.md .agents/factory/invariants.md; then echo "a local-only
-    marker or glob claim is back" >&2; exit 1; fi; for f in doc/xdu.1.scd doc/xdu-find.1.scd
-    doc/xdu-view.1.scd; do grep -qF "3 to 63 lowercase letters" $f; done; cargo clippy
-    --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
-    echo P5-GATE-GREEN'
+    s3-proxy-support s3-legacy-bucket-names; do test -s issues/$f.md; grep -qF "##
+    Problem" issues/$f.md; grep -qF "issues/$f.md" ROADMAP.md; done; listed=$(cargo
+    test --locked --test s3_tests -- --list --include-ignored 2>/dev/null | grep -c
+    '': test$''); grep -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml;
+    grep -qF "XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh \"\" $listed"
+    AGENTS.md; XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" "$listed";
+    cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml; for
+    f in .agents/factory/invariants.md .agents/factory/review-rubric.md .agents/skills/xdu-review/SKILL.md
+    .agents/factory/templates/REVIEW.md; do for p in src/s3.rs src/view_query.rs src/engine.rs;
+    do grep -qF "$p" "$f" || { echo "$f does not name $p" >&2; exit 1; }; done; done;
+    risk=$(sed -n ''/^## High-risk files/,/^## Testing/p'' AGENTS.md); for p in src/s3.rs
+    src/view_query.rs src/engine.rs; do case "$risk" in *"$p"*) ;; *) echo "AGENTS.md
+    High-risk does not name $p" >&2; exit 1;; esac; done; testing=$(sed -n ''/^##
+    Testing/,/^## Packaging/p'' AGENTS.md); for w in tests/s3-wire.sh include-ignored
+    XDU_TEST_EXTENSION_DIR fetch.sh; do case "$testing" in *"$w"*) ;; *) echo "AGENTS.md
+    Testing does not name $w" >&2; exit 1;; esac; done; grep -qF ''read_completion_marker_s3''
+    .agents/factory/invariants.md; grep -qF ''marker_version_error'' .agents/factory/invariants.md;
+    grep -qF ''`xdu DIR -o/--outdir DIR|s3://'' AGENTS.md; grep -qF ''`xdu-find -i/--index
+    DIR|s3://'' AGENTS.md; grep -qF ''`xdu-view -i/--index DIR|s3://'' AGENTS.md;
+    if grep -nE "^[[:space:]]*[''.]" doc/*.scd; then exit 1; fi; arch=$(sed -n ''/^##
+    Architecture/,/^## CLI surface/p'' AGENTS.md); for s in lib::read_completion_marker_s3
+    lib::marker_version_error lib::marker_completion_warning MarkerRead::Oversized
+    lib::index_version_error lib::parquet_source; do case "$arch" in *"$s"*) ;; *)
+    echo "AGENTS.md Architecture does not name $s" >&2; exit 1;; esac; done; if grep
+    -nE ''readers call .lib::index_version_error. first|warn if absent|# read/write\.
+    Only the crawler|is the \*\*one\*\* place this layout'' AGENTS.md .agents/factory/invariants.md;
+    then echo "a local-only marker or glob claim is back" >&2; exit 1; fi; for f in
+    doc/xdu.1.scd doc/xdu-find.1.scd doc/xdu-view.1.scd; do grep -qF "3 to 63 lowercase
+    letters" $f; done; cargo clippy --locked --all-targets --all-features -- -D warnings;
+    cargo fmt --all -- --check; echo P5-GATE-GREEN'
 review:
   last_reviewed_commit: ef4fedfb859756bb5a52f1461cd7cb5e48e9aeea
   verdict: changes-requested
@@ -430,6 +430,21 @@ siblings.
   the Architecture section to name the S3 marker symbols, refuses the four old local-only phrases
   in `AGENTS.md` and `invariants.md`, and requires the bucket rule on the three pages. Each new
   negative predicate fired on `aafbeda`'s text and passes on this tree.
+- **Ruling, 2026-11-05 (foreman, run B): legacy bucket names become a seed.** F3's allow-list
+  refuses buckets whose names carry capitals or `_`. S3-compatible stores and legacy AWS buckets
+  can still have them, and path-style requests could serve them with an allow-list that still
+  cannot reach the URL authority. The refusal stays in this cycle; the work is filed as
+  `issues/s3-legacy-bucket-names.md` with a `ROADMAP.md` entry after the non-ASCII one, and the
+  `S3 as an index target` entry now counts six deferrals. P5's gate enforces its seed list, so the
+  new seed joins that list through `set_phase.py --verify-file`; the stored command was read back
+  and is byte-identical to the staged file, and no other phase's gate changed. With the seed moved
+  aside the seed loop exits 1; restored, it passes.
+- **Closed 2026-11-05 (run B).** GitHub triggered no CI run for `012b2e6`; tests run 42072876646
+  (merge ref `f48b4f0`, `40a9813` into `a0cdd95`, still `main`), release run 42072876624 and image
+  run 42072876756, all on `40a9813`, cover both remediation commits. Their lines are quoted under
+  "Review cycle 2" in `evidence/p1-ci.md` and `p5-ci.md`, each checked with `grep -F` against the
+  logs. The P1 and P5 gates were re-run from their stored text and are green; every phase is done
+  and the FSM is `in_review` for review cycle 3.
 
 ---
 
@@ -557,7 +572,12 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
 >   on the old proxy accounting and passes; two mutations of the new recorder (an unrecorded GET,
 >   a GET sent to the endpoint outside the record) each fail it. Gate retuned: `harness_ 7`, and
 >   the new test named in the harness log.
-> - [ ] Run B: record the evidence below.
+> - [x] Run B: both test legs print `s3-wire: '' 46 of 46 passed` and `ok` for the three named
+>   tests (tests run 42072876646, merge ref `f48b4f0`); step "Test" reports `4 passed; 0 failed;
+>   42 ignored` on both legs; release run 42072876624 at `40a9813` gives `extension-check: ok …
+>   engine=v1.4.4` on all four legs and `needs max GLIBC_2.28` for all four binaries on both
+>   Linux legs. `012b2e6` had no CI run. Recorded in `evidence/p1-ci.md`; the P1 gate re-ran
+>   green.
 >
 > **Run B evidence (cycle 2):** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
 > `s3-wire: '' 46 of 46 passed`, and in that step's log
@@ -945,7 +965,11 @@ by count, and every deferral recorded.
 >
 > - [x] Man pages: scdoc is not installed here, so the paragraph was not rendered. It adds no
 >   asserted literal (no `AWS_*`, `XDU_*` or `s3://` text) and no line opens with `.` or `'`.
-> - [ ] Run B: record the evidence below.
+> - [x] Deferral ledger (foreman ruling at run B, triage above): `issues/s3-legacy-bucket-names.md`
+>   and its `ROADMAP.md` entry filed; the gate's seed list names it.
+> - [x] Run B: both legs `s3-wire: '' 46 of 46 passed`, equal to the minimum; the Packaging
+>   literal step printed its `OK:` line; Lint green (tests run 42072876646, merge ref `f48b4f0`).
+>   Recorded in `evidence/p5-ci.md`; the P5 gate re-ran green.
 >
 > **Run B evidence (cycle 2):** both test legs' `s3-wire: '' 46 of 46 passed`, equal to the
 > workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published

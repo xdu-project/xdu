@@ -42,7 +42,7 @@ range requests: measured against an 80.1 MiB index, `--count` moved 0.13 MiB and
 3.94 MiB, where a staging design pays the full 80.1 MiB every time. The intention is that a query
 costs what the query asks for, not what the index weighs.
 
-*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: in flight as a pilot (build into a bucket; `xdu-find` and `xdu-view` query in place) — see `spec/s3-index-target/`; its deferrals are the five entries after `S3 as a crawl source` and the debug-build DuckDB entry*
+*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: in flight as a pilot (build into a bucket; `xdu-find` and `xdu-view` query in place) — see `spec/s3-index-target/`; its deferrals are the six entries after `S3 as a crawl source` and the debug-build DuckDB entry*
 **Seed:** [`issues/s3-index-target.md`](issues/s3-index-target.md)
 
 ## S3 as a crawl source
@@ -100,6 +100,17 @@ wire test shows how `httpfs` lists and reports such keys.
 
 *Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (TECH P3, foreman ruling at P3 run B)*
 **Seed:** [`issues/s3-non-ascii-partition-names.md`](issues/s3-non-ascii-partition-names.md)
+
+## Reach S3 buckets whose names carry capitals or `_`
+
+Every tool refuses an `s3://` bucket whose name holds an uppercase letter or `_`, since S3's current
+naming rules are the allow-list that keeps a locator out of the URL authority. Some S3-compatible
+stores still create such buckets, and AWS still serves legacy ones. Path-style requests, where the
+bucket is a path segment and never part of the host, could reach them, with a wider allow-list that
+still cannot reach the authority in either direction.
+
+*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (TECH review cycle 2 triage, foreman ruling at run B)*
+**Seed:** [`issues/s3-legacy-bucket-names.md`](issues/s3-legacy-bucket-names.md)
 
 ## Bind the index path and partition names in local-index reader SQL
 
