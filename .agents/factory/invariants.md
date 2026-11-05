@@ -155,6 +155,14 @@ ordering is load-bearing:
   `tests::test_parquet_source_keeps_local_sql_byte_for_byte` pins the local text, and the wire test
   `find_prefix_with_a_quote_matches_local` holds the S3 rule with a `'` in the prefix. Any new
   reader statement over an S3 index takes its source from `parquet_source` on the same terms.
+- `xdu-view`'s statements live in `lib::view_query`, each built by a pure `*_sql` function. They
+  take their source from `parquet_source` too, and the S3 arm also binds the directory prefix a
+  listing matches with `path LIKE ?`; the local arm keeps the prefix in a `LIKE` literal, as
+  before.
+  The unit test `view_query::tests::local_view_sql_is_byte_for_byte_what_xdu_view_sent` pins every
+  local statement against a frozen copy of the binary's old builders, and the wire test
+  `view_quotes_in_the_prefix_and_a_directory_match_local` holds the S3 rule with a `'` in both the
+  prefix and a listed directory.
 - Route all such values through **one** validated escaping/quoting helper (or bound parameters). Numeric
   filters (`i64`) are injection-safe by type. Forbid raw `format!` of a partition name / index path
   into SQL — in the destructive `xdu-rm` a quote or `../`/glob-meta could escape the intended partition.

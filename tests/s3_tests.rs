@@ -32,7 +32,8 @@ use common::s3::{
     test_extension_dir, varied_source_tree, wide_source_tree,
 };
 use xdu::engine::open_s3_connection_from;
-use xdu::{COMPLETION_MARKER, MARKER_READ_LIMIT};
+use xdu::view_query::{self, DirEntry};
+use xdu::{COMPLETION_MARKER, IndexLocator, MARKER_READ_LIMIT, QueryFilters, SortMode};
 
 /// Where the seeded index lives in the bucket.
 const PREFIX: &str = "idx";
@@ -1855,4 +1856,415 @@ fn write_absent_prefix_or_bucket_root_starts_a_new_index() {
     assert_eq!(root, expected);
     hermetic.assert_left_empty();
     s3.assert_proxy_clean();
+}
+
+// =============================================================================
+// xdu-view over an s3:// index
+// =============================================================================
+
+/// A local index built by `xdu` from `varied_source_tree` and the same files in a bucket, each
+/// with its own connection, so xdu-view's queries can be compared without a terminal.
+struct ViewParity {
+    s3: TestS3,
+    local: IndexLocator,
+    local_conn: Connection,
+    remote: IndexLocator,
+    remote_conn: Connection,
+    prefix: String,
+    _work: TempDir,
+}
+
+impl ViewParity {
+    fn new(prefix: &str) -> ViewParity {
+        let s3 = TestS3::start();
+        let work = TempDir::new().unwrap();
+        let source = work.path().join("source");
+        let index = work.path().join("index");
+        varied_source_tree(&source);
+        build_index(&source, &index);
+        s3.seed_index(&index, prefix);
+        ViewParity::over(s3, work, &index, prefix)
+    }
+
+    fn over(s3: TestS3, work: TempDir, index: &Path, prefix: &str) -> ViewParity {
+        let remote = IndexLocator::parse(OsString::from(s3.url(prefix)).as_os_str()).unwrap();
+        assert!(matches!(remote, IndexLocator::S3(_)), "{remote:?}");
+        let remote_conn = open_s3_connection_from(&s3.settings(), s3.extension_dir())
+            .unwrap_or_else(|e| panic!("open_s3_connection failed: {e:#}"));
+        ViewParity {
+            local: IndexLocator::Local(index.canonicalize().unwrap()),
+            local_conn: xdu::engine::open_connection().unwrap(),
+            remote,
+            remote_conn,
+            prefix: prefix.to_string(),
+            s3,
+            _work: work,
+        }
+    }
+
+    /// Run one view query against both indexes; a failure on either side fails the test.
+    fn both<T>(
+        &self,
+        what: &str,
+        query: impl Fn(&Connection, &IndexLocator) -> anyhow::Result<T>,
+    ) -> (T, T) {
+        let local =
+            query(&self.local_conn, &self.local).unwrap_or_else(|e| panic!("{what}, local: {e:#}"));
+        let remote =
+            query(&self.remote_conn, &self.remote).unwrap_or_else(|e| panic!("{what}, S3: {e:#}"));
+        (local, remote)
+    }
+
+    /// The partition list, the `__root__` files and every listing of `dirs` in both layouts,
+    /// equal over S3 and locally for `filters` and `sort_mode`. Returns how many entries were
+    /// compared.
+    fn compare(
+        &self,
+        partitions: &[&str],
+        dirs: &[(&str, String)],
+        filters: &QueryFilters,
+        sort_mode: SortMode,
+    ) -> usize {
+        let what = format!("{sort_mode:?} with {filters:?}");
+        let mut compared = 0;
+        let (local, remote) = self.both(&format!("partitions, {what}"), |conn, index| {
+            view_query::partitions(conn, index, filters, sort_mode)
+        });
+        compared += assert_same_view("partitions", Some(sort_mode), &local, &remote);
+        let (local, remote) = self.both(&format!("root files, {what}"), |conn, index| {
+            view_query::root_files(conn, index, filters)
+        });
+        compared += assert_same_view("root files", None, &local, &remote);
+        for partition in partitions {
+            let (local, remote) = self.both(&format!("root of {partition}"), |conn, index| {
+                view_query::partition_root(conn, index, partition)
+            });
+            assert!(!local.is_empty(), "{partition} has no root");
+            assert_eq!(local, remote, "root of {partition}");
+        }
+        for (partition, dir) in dirs {
+            let (list, remote_list) = self.both(&format!("list {dir}, {what}"), |conn, index| {
+                view_query::list_directory(conn, index, partition, dir, filters, sort_mode)
+            });
+            compared += assert_same_view(dir, Some(sort_mode), &list, &remote_list);
+            let (tree, remote_tree) = self.both(&format!("tree {dir}, {what}"), |conn, index| {
+                view_query::tree_directory(conn, index, partition, dir, filters, sort_mode)
+            });
+            compared += assert_same_view(dir, Some(sort_mode), &tree, &remote_tree);
+            // The two views send one statement in two layouts.
+            assert_same_view(dir, Some(sort_mode), &list, &tree);
+        }
+        compared
+    }
+
+    /// Every directory of the `alice` subtree, from the directory above its root down to the
+    /// deepest, and `bob`'s root.
+    fn dirs(&self) -> Vec<(&'static str, String)> {
+        let (local, remote) = self.both("partition roots", |conn, index| {
+            Ok((
+                view_query::partition_root(conn, index, "alice")?,
+                view_query::partition_root(conn, index, "bob")?,
+            ))
+        });
+        assert_eq!(local, remote, "partition roots");
+        let (alice, bob) = local;
+        assert!(alice.ends_with("/alice/a"), "{alice}");
+        let top = alice.trim_end_matches("/a").to_string();
+        vec![
+            ("alice", top.clone()),
+            ("alice", alice),
+            ("alice", format!("{top}/b")),
+            ("alice", format!("{top}/b/c")),
+            ("bob", bob),
+        ]
+    }
+
+    /// No chunk was fetched whole, every chunk read went through the proxy by a bounded range,
+    /// and at least one was read.
+    fn finish(&self) {
+        self.s3.assert_no_whole_parquet_get();
+        let chunks: BTreeSet<String> = self.s3.parquet_sizes(&self.prefix).into_keys().collect();
+        assert!(!chunks.is_empty(), "the bucket holds no chunk");
+        let fetched = range_fetched_keys(&self.s3);
+        assert!(
+            fetched.is_subset(&chunks) && !fetched.is_empty(),
+            "range-fetched {fetched:?}, stored {chunks:?}"
+        );
+        self.s3.assert_proxy_clean();
+    }
+}
+
+/// What `sort_mode` orders entries by: the sequence of these must match, while entries that tie
+/// on it may come in either order, since the statements order by nothing else.
+fn sort_key(entry: &DirEntry, sort_mode: SortMode) -> (i64, String) {
+    match sort_mode {
+        SortMode::Name => (i64::from(!entry.is_dir), entry.name.clone()),
+        SortMode::SizeDesc | SortMode::SizeAsc => (entry.total_size, String::new()),
+        SortMode::CountDesc | SortMode::CountAsc => (entry.file_count, String::new()),
+        SortMode::AgeDesc | SortMode::AgeAsc => (entry.latest_atime, String::new()),
+    }
+}
+
+/// `remote` holds exactly the entries of `local`, in an order `sort_mode` allows (any order
+/// when there is none). Returns the number of entries.
+fn assert_same_view(
+    what: &str,
+    sort_mode: Option<SortMode>,
+    local: &[DirEntry],
+    remote: &[DirEntry],
+) -> usize {
+    if let Some(sort_mode) = sort_mode {
+        let keys = |entries: &[DirEntry]| -> Vec<(i64, String)> {
+            entries.iter().map(|e| sort_key(e, sort_mode)).collect()
+        };
+        assert_eq!(keys(local), keys(remote), "{what}: order differs");
+    }
+    let by_path = |entries: &[DirEntry]| -> BTreeMap<String, DirEntry> {
+        let map: BTreeMap<String, DirEntry> = entries
+            .iter()
+            .map(|e| (e.path.clone(), e.clone()))
+            .collect();
+        assert_eq!(map.len(), entries.len(), "{what}: a path repeats");
+        map
+    };
+    assert_eq!(by_path(local), by_path(remote), "{what}");
+    local.len()
+}
+
+fn view_filter_sets() -> Vec<QueryFilters> {
+    vec![
+        QueryFilters::new()
+            .with_path_pattern(Some("*.log".to_string()), false)
+            .unwrap(),
+        QueryFilters::new()
+            .with_path_pattern(Some("\\.txt$".to_string()), true)
+            .unwrap(),
+        QueryFilters::new().with_min_size(Some("1K")).unwrap(),
+        QueryFilters::new().with_max_size(Some("600")).unwrap(),
+        QueryFilters::new().with_older_than(Some(30)),
+        QueryFilters::new().with_newer_than(Some(10)),
+        QueryFilters::new()
+            .with_path_pattern(Some("*.log".to_string()), false)
+            .unwrap()
+            .with_older_than(Some(10))
+            .with_max_size(Some("1200"))
+            .unwrap(),
+    ]
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn view_partition_list_matches_local_for_every_sort() {
+    let parity = ViewParity::new(PREFIX);
+    let mut compared = 0;
+    for sort_mode in SortMode::ALL {
+        compared += parity.compare(&["alice", "bob"], &[], &QueryFilters::new(), sort_mode);
+    }
+    // Two partitions and 250 loose files, every sort.
+    assert_eq!(compared, 7 * (2 + 250));
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn view_directories_match_local_for_every_sort() {
+    let parity = ViewParity::new(PREFIX);
+    let dirs = parity.dirs();
+    let nested = parity.both("alice/b", |conn, index| {
+        view_query::list_directory(
+            conn,
+            index,
+            "alice",
+            &dirs[2].1,
+            &QueryFilters::new(),
+            SortMode::Name,
+        )
+    });
+    // The nested directory lists its one subdirectory, holding all 300 files below it.
+    assert_eq!(nested.1.len(), 1, "{:?}", nested.1);
+    assert!(nested.1[0].is_dir && nested.1[0].file_count == 300);
+    let mut compared = 0;
+    for sort_mode in SortMode::ALL {
+        compared += parity.compare(&["alice", "bob"], &dirs, &QueryFilters::new(), sort_mode);
+    }
+    assert!(compared > 7 * 1400, "only {compared} entries compared");
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn view_filtered_views_match_local() {
+    let parity = ViewParity::new(PREFIX);
+    let dirs = parity.dirs();
+    let mut compared = 0;
+    for filters in view_filter_sets() {
+        assert!(filters.is_active());
+        for sort_mode in [SortMode::Name, SortMode::SizeDesc, SortMode::AgeAsc] {
+            let n = parity.compare(&["alice", "bob"], &dirs, &filters, sort_mode);
+            assert!(n > 0, "{filters:?} matched nothing locally");
+            compared += n;
+        }
+    }
+    assert!(compared > 0);
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn view_quotes_in_the_prefix_and_a_directory_match_local() {
+    // A quote in the prefix would end the glob's literal in SQL text, and one in a directory
+    // name would end the LIKE literal; bound, each is just a byte.
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    let index = work.path().join("index");
+    varied_source_tree(&source);
+    // Longer than alice's root files, so the shortest path, and the partition root, stay put.
+    let long = "q".repeat(190);
+    let mut quoted_names: Vec<String> = ["one.txt", "two.log", "three.txt"]
+        .iter()
+        .map(|name| format!("{long}-{name}"))
+        .collect();
+    for name in &quoted_names {
+        create_test_file(&source.join("alice/b/it's").join(name), 64).unwrap();
+    }
+    quoted_names.sort();
+    build_index(&source, &index);
+    s3.seed_index(&index, "it's/idx");
+    let parity = ViewParity::over(s3, work, &index, "it's/idx");
+
+    let dirs = parity.dirs();
+    let compared = parity.compare(
+        &["alice", "bob"],
+        &dirs,
+        &QueryFilters::new(),
+        SortMode::Name,
+    );
+    assert!(compared > 0);
+
+    // The quoted directory's own listing, over S3 only: the local statement writes the prefix
+    // into a LIKE literal, which the quote ends.
+    let nested = &dirs[2].1;
+    assert!(nested.ends_with("/alice/b"), "{nested}");
+    let quoted = view_query::list_directory(
+        &parity.remote_conn,
+        &parity.remote,
+        "alice",
+        &format!("{nested}/it's"),
+        &QueryFilters::new(),
+        SortMode::Name,
+    )
+    .unwrap_or_else(|e| panic!("listing the quoted directory over S3: {e:#}"));
+    let names: Vec<&str> = quoted.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, quoted_names);
+    assert!(quoted.iter().all(|e| !e.is_dir && e.total_size == 64));
+
+    assert!(
+        parity
+            .s3
+            .requests()
+            .iter()
+            .any(|r| r.target.contains("prefix=it%27s%2Fidx%2F")),
+        "no listing of the quoted prefix reached the endpoint: {:#?}",
+        parity.s3.requests()
+    );
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn view_failures_name_distinct_causes_before_the_terminal() {
+    let (s3, work) = seeded();
+    let index = work.path().join("index");
+    // The same chunks without a marker, and with a marker of a format this reader does not know.
+    for file in common::list_files_recursive(&index) {
+        let rel = file.strip_prefix(&index).unwrap().to_str().unwrap();
+        if rel != COMPLETION_MARKER {
+            s3.seed_object(&format!("nomarker/{rel}"), &fs::read(&file).unwrap());
+            s3.seed_object(&format!("future/{rel}"), &fs::read(&file).unwrap());
+        }
+    }
+    let marker = String::from_utf8(s3.object(&format!("{PREFIX}/{COMPLETION_MARKER}"))).unwrap();
+    assert!(marker.contains("format=2\n"), "{marker}");
+    s3.seed_object(
+        &format!("future/{COMPLETION_MARKER}"),
+        marker.replace("format=2\n", "format=99\n").as_bytes(),
+    );
+
+    let hermetic = Hermetic::new();
+    let view = |locator: &str| {
+        let mut cmd = s3.view_command(&hermetic);
+        cmd.args(["-i", locator]);
+        cmd
+    };
+    let mut cases: Vec<(&str, &str, Command)> = Vec::new();
+    let mut dead = view(&s3.url(PREFIX));
+    dead.env("AWS_ENDPOINT_URL", "http://127.0.0.1:1");
+    cases.push(("unreachable endpoint", "cannot reach the S3 endpoint", dead));
+    let mut wrong = view(&s3.url(PREFIX));
+    wrong.env("AWS_SECRET_ACCESS_KEY", WRONG_SECRET_KEY);
+    cases.push(("wrong secret", "refused the credentials", wrong));
+    let mut none = view(&s3.url(PREFIX));
+    none.env_remove("AWS_ACCESS_KEY_ID")
+        .env_remove("AWS_SECRET_ACCESS_KEY");
+    cases.push(("no credentials", "no S3 credentials", none));
+    cases.push((
+        "missing bucket",
+        "does not exist",
+        view(&format!("s3://no-such-bucket/{PREFIX}")),
+    ));
+    cases.push((
+        "missing prefix",
+        "holds no objects",
+        view(&s3.url("missing")),
+    ));
+    cases.push((
+        "missing marker",
+        "carries no index format version",
+        view(&s3.url("nomarker")),
+    ));
+    cases.push((
+        "unknown format",
+        "index format version 99",
+        view(&s3.url("future")),
+    ));
+    // XDU_INDEX takes the same path as -i.
+    let mut from_env = s3.view_command(&hermetic);
+    from_env.env("XDU_INDEX", s3.url("future"));
+    let mut empty_extensions = view(&s3.url(PREFIX));
+    let no_extensions = TempDir::new().unwrap();
+    empty_extensions.env("XDU_EXTENSION_DIR", no_extensions.path());
+
+    let needles: Vec<&str> = cases.iter().map(|(_, needle, _)| *needle).collect();
+    for (case, needle, mut cmd) in cases {
+        let (out, err, ok) = run(&mut cmd);
+        assert!(!ok, "{case}: xdu-view succeeded");
+        // Nothing reached the terminal: no alternate screen, no frame.
+        assert!(out.is_empty(), "{case}: stdout written: {out:?}");
+        assert!(
+            err.contains(needle),
+            "{case}: stderr does not say '{needle}': {err}"
+        );
+        for other in needles.iter().filter(|n| **n != needle) {
+            assert!(
+                !err.contains(other),
+                "{case}: stderr also says '{other}', so the causes are not distinct: {err}"
+            );
+        }
+    }
+    let (out, err, ok) = run(&mut from_env);
+    assert!(!ok && out.is_empty(), "XDU_INDEX: {out:?} {err}");
+    assert!(err.contains("index format version 99"), "XDU_INDEX: {err}");
+    let (out, err, ok) = run(&mut empty_extensions);
+    assert!(!ok && out.is_empty(), "no extension: {out:?} {err}");
+    assert!(
+        err.contains("release tarball") && err.contains("XDU_EXTENSION_DIR"),
+        "no extension: {err}"
+    );
+
+    assert!(
+        range_fetched_keys(&s3).is_empty(),
+        "a chunk was read in a failing case"
+    );
+    assert_clean(&s3, &hermetic);
 }

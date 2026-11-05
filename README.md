@@ -394,8 +394,8 @@ xdu /data/scratch -o s3://indexes/scratch -j 8
 ```
 
 The index in the bucket is then queried in place: give
-`xdu-find` an `s3://bucket/prefix` locator wherever it takes an index directory, through `-i` or
-`XDU_INDEX`. Each query reads the Parquet footers and only the parts of each chunk it needs, with
+`xdu-find` or `xdu-view` an `s3://bucket/prefix` locator wherever it takes an index directory,
+through `-i` or `XDU_INDEX`. Each query reads the Parquet footers and only the parts of each chunk it needs, with
 HTTP range requests, so a `--count` costs the footers, a small fraction of the index. Nothing is copied
 to local disk and nothing is downloaded at run time; the `httpfs` extension a release ships beside
 the binaries does the reading.
@@ -411,6 +411,7 @@ export AWS_ENDPOINT_URL=https://store.example.org:9000
 
 xdu-find -i s3://indexes/scratch --count
 xdu-find -i s3://indexes/scratch -u alice --min-size 1G -f size
+xdu-view -i s3://indexes/scratch -u alice
 
 # Or once for the session
 export XDU_INDEX=s3://indexes/scratch

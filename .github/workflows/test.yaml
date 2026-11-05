@@ -106,7 +106,7 @@ jobs:
       - name: S3 tests
         env:
           XDU_TEST_EXTENSION_DIR: ${{ runner.temp }}/xdu-ext
-        run: sh spec/s3-index-target/verify/wire.sh "" 36
+        run: sh spec/s3-index-target/verify/wire.sh "" 41
 
   # Mirrors HyperShell's packaging-metadata job: regenerate the shipped artifacts and fail
   # if any are missing. Because man pages come from doc/*.scd and completions come from
@@ -258,18 +258,24 @@ jobs:
           # flag description, once as the ENVIRONMENT entry — so presence alone is satisfied by
           # whichever copy survived, and corrupting the ENVIRONMENT entry publishes a variable
           # name that does not exist. Counted for the same reason `.partial suffix` is.
-          # XDU_EXTENSION_DIR follows the same pattern on xdu-find.1: a cross-reference in S3
-          # INDICES, then its ENVIRONMENT entry. The AWS_* names are counted, on xdu.1 above as
-          # here, so a later cross-reference forces a re-count; AWS_ENDPOINT_URL's count includes
-          # the AWS_ENDPOINT_URL_S3 entry, which contains it, and AWS_PROFILE's includes the
-          # example. On xdu.1, s3://BUCKET/PREFIX is counted twice: under -o and in S3 OUTPUT.
+          # XDU_EXTENSION_DIR follows the same pattern on xdu-find.1 and xdu-view.1: a
+          # cross-reference in S3 INDICES, then its ENVIRONMENT entry. The AWS_* names are
+          # counted, on xdu.1 above as on both reader pages, so a later cross-reference forces a
+          # re-count; AWS_ENDPOINT_URL's count includes the AWS_ENDPOINT_URL_S3 entry, which
+          # contains it, and AWS_PROFILE's includes the example. On xdu.1, s3://BUCKET/PREFIX is
+          # counted twice: under -o and in S3 OUTPUT.
           check share/man/man1/xdu-find.1 '2x:XDU_INDEX' '2x:XDU_EXTENSION_DIR' \
             '2x:lib/xdu/extensions' '1x:cargo install' '1x:release tarball' \
             '1x:s3://BUCKET/PREFIX' '1x:AWS_ACCESS_KEY_ID' '1x:AWS_SECRET_ACCESS_KEY' \
             '1x:AWS_SESSION_TOKEN' '2x:AWS_PROFILE' '1x:AWS_SHARED_CREDENTIALS_FILE' \
             '1x:AWS_CONFIG_FILE' '1x:AWS_REGION' '1x:AWS_DEFAULT_REGION' \
             '1x:AWS_ENDPOINT_URL_S3' '2x:AWS_ENDPOINT_URL'
-          check share/man/man1/xdu-view.1 '2x:XDU_INDEX'
+          check share/man/man1/xdu-view.1 '2x:XDU_INDEX' '2x:XDU_EXTENSION_DIR' \
+            '2x:lib/xdu/extensions' '1x:cargo install' '1x:release tarball' \
+            '1x:s3://BUCKET/PREFIX' '1x:AWS_ACCESS_KEY_ID' '1x:AWS_SECRET_ACCESS_KEY' \
+            '1x:AWS_SESSION_TOKEN' '2x:AWS_PROFILE' '1x:AWS_SHARED_CREDENTIALS_FILE' \
+            '1x:AWS_CONFIG_FILE' '1x:AWS_REGION' '1x:AWS_DEFAULT_REGION' \
+            '1x:AWS_ENDPOINT_URL_S3' '2x:AWS_ENDPOINT_URL'
           check share/man/man1/xdu-rm.1   '2x:XDU_INDEX' '2x:XDU_JOBS'
           # A line starting with `.` or `'` is a roff control request: scdoc drops the period
           # silently, and the intuitive `\.` escape destroys the rest of the line. Rewrap instead.

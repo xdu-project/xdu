@@ -349,6 +349,17 @@ impl TestS3 {
         cmd
     }
 
+    /// `xdu-view` in `hermetic`, set up as `find_command` sets up `xdu-find`. Only its refusals
+    /// are drivable here: an accepted index goes on to need a terminal.
+    pub fn view_command(&self, hermetic: &Hermetic) -> Command {
+        let mut cmd = hermetic.command("xdu-view");
+        cmd.env("XDU_EXTENSION_DIR", self.extension_dir())
+            .env("AWS_ACCESS_KEY_ID", ACCESS_KEY)
+            .env("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
+            .env("AWS_ENDPOINT_URL", self.proxy_url());
+        cmd
+    }
+
     /// `xdu` in `hermetic`, writing through this endpoint's proxy with the accepted key pair
     /// from the environment. The writer needs no extension, so none is offered. The caller adds
     /// the source and `-o`.

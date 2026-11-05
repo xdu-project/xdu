@@ -4,6 +4,7 @@ pub mod cli;
 pub mod crawl;
 pub mod engine;
 pub mod s3;
+pub mod view_query;
 
 pub use s3::{IndexLocator, S3Locator, S3Settings};
 

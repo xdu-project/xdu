@@ -4,7 +4,6 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, stdout};
-use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -20,9 +19,12 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
+use xdu::s3::ProcessEnv;
+use xdu::view_query::{self, DirEntry};
 use xdu::{
-    QueryFilters, ROOT_PARTITION, SortMode, format_bytes, glob_to_regex, index_completion_warning,
-    index_glob, index_version_error, parse_size,
+    IndexLocator, QueryFilters, S3Settings, SortMode, format_bytes, glob_to_regex,
+    index_completion_warning, index_version_error, marker_completion_warning, marker_version_error,
+    parse_size, read_completion_marker_s3,
 };
 
 /// Detect file type from magic bytes, shebangs, text content, and extension.
@@ -323,17 +325,6 @@ fn format_file_count(count: i64) -> String {
 
 use xdu::cli::XduViewArgs;
 
-/// Represents a directory entry in the view
-#[derive(Clone, Debug)]
-struct DirEntry {
-    name: String,
-    path: String,
-    is_dir: bool,
-    total_size: i64,
-    file_count: i64,
-    latest_atime: i64,
-}
-
 /// Overlay target for list-mode Space. Directories are excluded so Space on a
 /// dir is a no-op rather than a preview of something that has no text; Enter
 /// and → still drill in.
@@ -488,7 +479,7 @@ struct Column {
 /// Application state
 struct App {
     conn: Connection,
-    index_path: PathBuf,
+    index: IndexLocator,
 
     /// Current absolute path prefix (the root path for the current partition)
     partition_root: String,
@@ -549,14 +540,14 @@ struct App {
 impl App {
     fn new(
         conn: Connection,
-        index_path: PathBuf,
+        index: IndexLocator,
         initial_partition: Option<String>,
         filters: QueryFilters,
         sort_mode: SortMode,
     ) -> Result<Self> {
         let mut app = App {
             conn,
-            index_path,
+            index,
             partition_root: String::new(),
             current_path: String::new(),
             current_partition: None,
@@ -594,45 +585,7 @@ impl App {
     /// Query individual files from the __root__ partition.
     /// Returns DirEntry items with is_dir=false and file_count=1.
     fn query_root_files(&self) -> Result<Vec<DirEntry>> {
-        let glob = index_glob(&self.index_path, Some(ROOT_PARTITION));
-        let where_clause = self.filters.to_full_where_clause();
-
-        let sql = format!(
-            r#"
-            SELECT path, size, atime
-            FROM read_parquet('{glob}')
-            {where_clause}
-            "#,
-            glob = glob,
-            where_clause = where_clause
-        );
-
-        let mut entries = Vec::new();
-        let mut stmt = match self.conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(_) => return Ok(entries), // No __root__ partition exists
-        };
-        let mut rows = match stmt.query([]) {
-            Ok(r) => r,
-            Err(_) => return Ok(entries),
-        };
-
-        while let Some(row) = rows.next()? {
-            let path: String = row.get(0)?;
-            let size: i64 = row.get(1)?;
-            let atime: i64 = row.get(2)?;
-            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            entries.push(DirEntry {
-                name,
-                path,
-                is_dir: false,
-                total_size: size,
-                file_count: 1,
-                latest_atime: atime,
-            });
-        }
-
-        Ok(entries)
+        view_query::root_files(&self.conn, &self.index, &self.filters)
     }
 
     /// Sort entries in-place according to the current SortMode.
@@ -656,84 +609,9 @@ impl App {
         self.loading = true;
         let start = Instant::now();
 
-        // The partition name is the directory holding the chunk, recovered below from the
-        // `filename` pseudo-column. Not Hive partitioning: the layout uses bare directory names,
-        // so `hive_partitioning=true` would yield no partition column at all.
-        let glob = index_glob(&self.index_path, None);
-
-        // Build filter clause — exclude __root__ (its files are merged as individual entries)
-        let filter_clause = self.filters.to_where_clause();
-        let having_clause = if filter_clause.is_empty() {
-            format!(
-                "HAVING partition IS NOT NULL AND partition != '' AND partition != '{}'",
-                ROOT_PARTITION
-            )
-        } else {
-            format!(
-                "HAVING partition IS NOT NULL AND partition != '' AND partition != '{}' AND SUM(CASE WHEN {} THEN 1 ELSE 0 END) > 0",
-                ROOT_PARTITION, filter_clause
-            )
-        };
-
-        // Query using filename to extract partition from the parquet file path
-        // The partition name is the directory containing the parquet file
-        // When filters are active, only count/sum matching files
-        let sql = if self.filters.is_active() {
-            format!(
-                r#"
-                SELECT 
-                    regexp_extract(filename, '.*/([^/]+)/[^/]+\.parquet$', 1) as partition,
-                    SUM(CASE WHEN {filter} THEN size ELSE 0 END) as total_size,
-                    MAX(CASE WHEN {filter} THEN atime ELSE 0 END) as latest_atime,
-                    SUM(CASE WHEN {filter} THEN 1 ELSE 0 END) as file_count
-                FROM read_parquet('{glob}', filename=true)
-                GROUP BY partition
-                {having}
-                ORDER BY {order}
-                "#,
-                filter = filter_clause,
-                glob = glob,
-                having = having_clause,
-                order = self.sort_mode.to_partition_order_by()
-            )
-        } else {
-            format!(
-                r#"
-                SELECT 
-                    regexp_extract(filename, '.*/([^/]+)/[^/]+\.parquet$', 1) as partition,
-                    SUM(size) as total_size,
-                    MAX(atime) as latest_atime,
-                    COUNT(*) as file_count
-                FROM read_parquet('{glob}', filename=true)
-                GROUP BY partition
-                HAVING partition IS NOT NULL AND partition != '' AND partition != '{root}'
-                ORDER BY {order}
-                "#,
-                glob = glob,
-                root = ROOT_PARTITION,
-                order = self.sort_mode.to_partition_order_by()
-            )
-        };
-
         self.entries.clear();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
-
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(0)?;
-            let total_size: i64 = row.get(1)?;
-            let latest_atime: i64 = row.get(2)?;
-            let file_count: i64 = row.get(3)?;
-
-            self.entries.push(DirEntry {
-                name: name.clone(),
-                path: name,
-                is_dir: true,
-                total_size,
-                file_count,
-                latest_atime,
-            });
-        }
+        self.entries =
+            view_query::partitions(&self.conn, &self.index, &self.filters, self.sort_mode)?;
 
         // Merge individual files from the __root__ partition
         let root_files = self.query_root_files()?;
@@ -753,26 +631,7 @@ impl App {
 
     /// Discover the common root path for a partition
     fn discover_partition_root(&self, partition: &str) -> Result<String> {
-        let glob = index_glob(&self.index_path, Some(partition));
-
-        // Get the shortest path to find the common root
-        let sql = format!(
-            "SELECT path FROM read_parquet('{}') ORDER BY length(path) LIMIT 1",
-            glob
-        );
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
-
-        if let Some(row) = rows.next()? {
-            let sample_path: String = row.get(0)?;
-            // Find the directory containing this file
-            if let Some(pos) = sample_path.rfind('/') {
-                return Ok(sample_path[..pos].to_string());
-            }
-        }
-
-        Ok(String::new())
+        view_query::partition_root(&self.conn, &self.index, partition)
     }
 
     /// Load directory contents for the current path
@@ -781,73 +640,12 @@ impl App {
         let start = Instant::now();
 
         let partition = self.current_partition.as_ref().unwrap();
-        let glob = index_glob(&self.index_path, Some(partition));
 
         // If we don't have a partition root yet, discover it
         if self.partition_root.is_empty() {
             self.partition_root = self.discover_partition_root(partition)?;
             self.current_path = self.partition_root.clone();
         }
-
-        // Build the path prefix we're looking at (with trailing slash for LIKE)
-        let prefix = format!("{}/", self.current_path);
-
-        // Query to get entries at this level
-        // We extract the next path component after the current path prefix
-        let prefix_len = prefix.len();
-
-        // Build filter conditions
-        let filter_clause = self.filters.to_where_clause();
-        let file_filter = if filter_clause.is_empty() {
-            format!("path LIKE '{}%'", prefix)
-        } else {
-            format!("path LIKE '{}%' AND {}", prefix, filter_clause)
-        };
-
-        let order_by = self.sort_mode.to_order_by(self.sort_mode == SortMode::Name);
-
-        let sql = format!(
-            r#"
-            WITH files AS (
-                SELECT 
-                    path,
-                    size,
-                    atime
-                FROM read_parquet('{glob}')
-                WHERE {file_filter}
-            ),
-            components AS (
-                SELECT 
-                    path,
-                    size,
-                    atime,
-                    CASE 
-                        WHEN position('/' IN substr(path, {prefix_len} + 1)) > 0 
-                        THEN substr(path, {prefix_len} + 1, position('/' IN substr(path, {prefix_len} + 1)) - 1)
-                        ELSE substr(path, {prefix_len} + 1)
-                    END as component,
-                    CASE 
-                        WHEN position('/' IN substr(path, {prefix_len} + 1)) > 0 THEN true
-                        ELSE false
-                    END as is_dir
-                FROM files
-            )
-            SELECT 
-                component,
-                bool_or(is_dir) as is_dir,
-                SUM(size) as total_size,
-                COUNT(*) as file_count,
-                MAX(atime) as latest_atime
-            FROM components
-            WHERE component != '' AND component IS NOT NULL
-            GROUP BY component
-            ORDER BY {order_by}
-            "#,
-            glob = glob,
-            file_filter = file_filter,
-            prefix_len = prefix_len,
-            order_by = order_by
-        );
 
         self.entries.clear();
 
@@ -861,25 +659,14 @@ impl App {
             latest_atime: 0,
         });
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
-
-        while let Some(row) = rows.next()? {
-            let component: String = row.get(0)?;
-            let is_dir: bool = row.get(1)?;
-            let total_size: i64 = row.get(2)?;
-            let file_count: i64 = row.get(3)?;
-            let latest_atime: i64 = row.get(4)?;
-
-            self.entries.push(DirEntry {
-                name: component.clone(),
-                path: format!("{}/{}", self.current_path, component),
-                is_dir,
-                total_size,
-                file_count,
-                latest_atime,
-            });
-        }
+        self.entries.extend(view_query::list_directory(
+            &self.conn,
+            &self.index,
+            partition,
+            &self.current_path,
+            &self.filters,
+            self.sort_mode,
+        )?);
 
         let elapsed = start.elapsed().as_secs_f64();
         let filter_info = if self.filters.is_active() {
@@ -1175,76 +962,8 @@ impl App {
 
     /// Create a Column for the partition list.
     fn make_partition_column(&self) -> Result<Column> {
-        let glob = index_glob(&self.index_path, None);
-        let filter_clause = self.filters.to_where_clause();
-        // Exclude __root__ — its files are merged as individual entries
-        let having_clause = if filter_clause.is_empty() {
-            format!(
-                "HAVING partition IS NOT NULL AND partition != '' AND partition != '{}'",
-                ROOT_PARTITION
-            )
-        } else {
-            format!(
-                "HAVING partition IS NOT NULL AND partition != '' AND partition != '{}' AND SUM(CASE WHEN {} THEN 1 ELSE 0 END) > 0",
-                ROOT_PARTITION, filter_clause
-            )
-        };
-
-        let sql = if self.filters.is_active() {
-            format!(
-                r#"
-                SELECT 
-                    regexp_extract(filename, '.*/([^/]+)/[^/]+\.parquet$', 1) as partition,
-                    SUM(CASE WHEN {filter} THEN size ELSE 0 END) as total_size,
-                    MAX(CASE WHEN {filter} THEN atime ELSE 0 END) as latest_atime,
-                    SUM(CASE WHEN {filter} THEN 1 ELSE 0 END) as file_count
-                FROM read_parquet('{glob}', filename=true)
-                GROUP BY partition
-                {having}
-                ORDER BY {order}
-                "#,
-                filter = filter_clause,
-                glob = glob,
-                having = having_clause,
-                order = self.sort_mode.to_partition_order_by()
-            )
-        } else {
-            format!(
-                r#"
-                SELECT 
-                    regexp_extract(filename, '.*/([^/]+)/[^/]+\.parquet$', 1) as partition,
-                    SUM(size) as total_size,
-                    MAX(atime) as latest_atime,
-                    COUNT(*) as file_count
-                FROM read_parquet('{glob}', filename=true)
-                GROUP BY partition
-                HAVING partition IS NOT NULL AND partition != '' AND partition != '{root}'
-                ORDER BY {order}
-                "#,
-                glob = glob,
-                root = ROOT_PARTITION,
-                order = self.sort_mode.to_partition_order_by()
-            )
-        };
-
-        let mut entries = Vec::new();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
-
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(0)?;
-            let total_size: i64 = row.get(1)?;
-            let latest_atime: i64 = row.get(2)?;
-            let file_count: i64 = row.get(3)?;
-            entries.push(DirEntry {
-                name: name.clone(),
-                path: name,
-                is_dir: true,
-                total_size,
-                file_count,
-                latest_atime,
-            });
-        }
+        let mut entries =
+            view_query::partitions(&self.conn, &self.index, &self.filters, self.sort_mode)?;
 
         // Merge individual files from the __root__ partition
         let root_files = self.query_root_files()?;
@@ -1281,76 +1000,14 @@ impl App {
         partition_root: &str,
         path: &str,
     ) -> Result<Column> {
-        let glob = index_glob(&self.index_path, Some(partition));
-        let prefix = format!("{}/", path);
-        let prefix_len = prefix.len();
-
-        let filter_clause = self.filters.to_where_clause();
-        let file_filter = if filter_clause.is_empty() {
-            format!("path LIKE '{}%'", prefix)
-        } else {
-            format!("path LIKE '{}%' AND {}", prefix, filter_clause)
-        };
-
-        let order_by = self.sort_mode.to_order_by(self.sort_mode == SortMode::Name);
-
-        let sql = format!(
-            r#"
-            WITH files AS (
-                SELECT path, size, atime
-                FROM read_parquet('{glob}')
-                WHERE {file_filter}
-            ),
-            components AS (
-                SELECT 
-                    path, size, atime,
-                    CASE 
-                        WHEN position('/' IN substr(path, {prefix_len} + 1)) > 0 
-                        THEN substr(path, {prefix_len} + 1, position('/' IN substr(path, {prefix_len} + 1)) - 1)
-                        ELSE substr(path, {prefix_len} + 1)
-                    END as component,
-                    CASE 
-                        WHEN position('/' IN substr(path, {prefix_len} + 1)) > 0 THEN true
-                        ELSE false
-                    END as is_dir
-                FROM files
-            )
-            SELECT 
-                component,
-                bool_or(is_dir) as is_dir,
-                SUM(size) as total_size,
-                COUNT(*) as file_count,
-                MAX(atime) as latest_atime
-            FROM components
-            WHERE component != '' AND component IS NOT NULL
-            GROUP BY component
-            ORDER BY {order_by}
-            "#,
-            glob = glob,
-            file_filter = file_filter,
-            prefix_len = prefix_len,
-            order_by = order_by
-        );
-
-        let mut entries = Vec::new();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
-
-        while let Some(row) = rows.next()? {
-            let component: String = row.get(0)?;
-            let is_dir: bool = row.get(1)?;
-            let total_size: i64 = row.get(2)?;
-            let file_count: i64 = row.get(3)?;
-            let latest_atime: i64 = row.get(4)?;
-            entries.push(DirEntry {
-                name: component.clone(),
-                path: format!("{}/{}", path, component),
-                is_dir,
-                total_size,
-                file_count,
-                latest_atime,
-            });
-        }
+        let entries = view_query::tree_directory(
+            &self.conn,
+            &self.index,
+            partition,
+            path,
+            &self.filters,
+            self.sort_mode,
+        )?;
 
         let title = path.rsplit('/').next().unwrap_or(partition).to_string();
 
@@ -1880,24 +1537,50 @@ impl App {
 fn main() -> Result<()> {
     let args = XduViewArgs::parse();
 
-    // Resolve index path
-    let index_path = args
-        .index
-        .canonicalize()
-        .with_context(|| format!("Index directory not found: {}", args.index.display()))?;
+    // The index argument is classified on its bytes before anything else. An s3:// locator
+    // resolves its credentials, opens its connection and reads its marker here; every other
+    // argument is a local path and takes the path below unchanged, loading no extension.
+    // Either way every refusal and warning comes before the terminal is touched, so the
+    // diagnostic survives on the terminal instead of being wiped with the alternate screen.
+    let (index, conn) = match IndexLocator::parse(args.index.as_os_str())? {
+        IndexLocator::S3(locator) => {
+            let settings = S3Settings::resolve(&ProcessEnv)?;
+            let conn = xdu::engine::open_s3_connection(&settings)?;
 
-    // Refuse an index whose format version is unknown or unsupported before the
-    // terminal is touched, so the diagnostic survives on the terminal instead of being
-    // wiped with the alternate screen.
-    if let Some(error) = index_version_error(&index_path) {
-        return Err(anyhow::anyhow!(error));
-    }
+            // The marker is read once and both gates judge that one read. A missing prefix,
+            // bucket or endpoint fails here, before any query.
+            let marker = read_completion_marker_s3(&conn, &locator)?;
+            let shown = locator.to_string();
+            if let Some(error) = marker_version_error(&marker, &shown) {
+                return Err(anyhow::anyhow!(error));
+            }
+            if let Some(warning) = marker_completion_warning(&marker, &shown) {
+                eprintln!("{}", warning);
+            }
+            (IndexLocator::S3(locator), Some(conn))
+        }
+        IndexLocator::Local(_) => {
+            // Resolve index path
+            let index_path = args
+                .index
+                .canonicalize()
+                .with_context(|| format!("Index directory not found: {}", args.index.display()))?;
 
-    // Warn before the alternate screen takes over, so the message is still on the
-    // terminal after the TUI exits rather than being wiped with the screen.
-    if let Some(warning) = index_completion_warning(&index_path) {
-        eprintln!("{}", warning);
-    }
+            // Refuse an index whose format version is unknown or unsupported before the
+            // terminal is touched, so the diagnostic survives on the terminal instead of being
+            // wiped with the alternate screen.
+            if let Some(error) = index_version_error(&index_path) {
+                return Err(anyhow::anyhow!(error));
+            }
+
+            // Warn before the alternate screen takes over, so the message is still on the
+            // terminal after the TUI exits rather than being wiped with the screen.
+            if let Some(warning) = index_completion_warning(&index_path) {
+                eprintln!("{}", warning);
+            }
+            (IndexLocator::Local(index_path), None)
+        }
+    };
 
     // Parse sort mode
     let sort_mode: SortMode = args.sort.parse().map_err(|e: String| anyhow::anyhow!(e))?;
@@ -1914,11 +1597,14 @@ fn main() -> Result<()> {
         .with_max_size(args.max_size.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    // Connect to DuckDB
-    let conn = xdu::engine::open_connection()?;
+    // Connect to DuckDB; an S3 index already holds its connection.
+    let conn = match conn {
+        Some(conn) => conn,
+        None => xdu::engine::open_connection()?,
+    };
 
     // Initialize app
-    let mut app = App::new(conn, index_path, args.partition, filters, sort_mode)?;
+    let mut app = App::new(conn, index, args.partition, filters, sort_mode)?;
 
     // Setup terminal
     enable_raw_mode()?;

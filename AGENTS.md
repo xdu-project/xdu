@@ -276,8 +276,9 @@ whichever copy survived, so corrupting exactly one of `doc/xdu.1.scd`'s two `.pa
 occurrences is invisible to it — which is why CI counts that one (`2x:.partial suffix`) instead. The
 same is true of every `*XDU_INDEX*` / `*XDU_JOBS*` / `*XDU_EXTENSION_DIR*`: each appears twice on
 its page, once as a cross-reference (in the flag description, or for `*XDU_EXTENSION_DIR*` in
-`xdu-find.1`'s `S3 INDICES` section) and once as the `ENVIRONMENT` entry, so corrupting only the
-`ENVIRONMENT` entry publishes a variable name that does not exist while a presence check stays green.
+the `S3 INDICES` section of `xdu-find.1` and `xdu-view.1`) and once as the `ENVIRONMENT` entry, so
+corrupting only the `ENVIRONMENT` entry publishes a variable name that does not exist while a
+presence check stays green.
 All of them are counted for that reason, and so are the `AWS_*` names on the pages that list them
 and `xdu.1`'s two `s3://BUCKET/PREFIX` (under `-o` and in `S3 OUTPUT`). **Whether a literal is duplicated is a fact about the page,
 not about the literal** — adding one cross-reference to a `.scd` can duplicate a previously-unique
@@ -311,10 +312,12 @@ src/
   s3.rs          # IndexLocator (classified on the OsStr), the ONE credential resolver (S3Settings)
                  # both directions use, and S3Sink: the crawler's S3 destination (object_store on
                  # ring, PUT/LIST/DELETE, partition-name refusal)
+  view_query.rs  # xdu-view's index queries (partition list, __root__ files, partition root,
+                 # directory listings) over a local or S3 index, out of the bin so tests reach them
   bin/xdu.rs     # indexer: shared-rayon-pool concurrent walk, driver threads, thread::scope error
                  # propagation, progress — the scaffold around lib::crawl
   bin/xdu-find.rs   # DuckDB query CLI
-  bin/xdu-view.rs   # 2487-line ratatui/crossterm TUI (read-only)
+  bin/xdu-view.rs   # ratatui/crossterm TUI (read-only); its queries live in view_query.rs
   bin/xdu-rm.rs     # destructive bulk delete (safe mode, confirm, dry-run, parallel)
   bin/gen-completions.rs   # emits share/ completions from cli.rs
 tests/           # crawl_tests.rs, rm_tests.rs, offline_tests.rs (integration); common/ = shared helpers

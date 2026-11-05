@@ -77,7 +77,7 @@ phases:
     --check; echo P3-GATE-GREEN
 - id: P4
   name: xdu-view browses an s3:// index in place
-  status: pending
+  status: in_progress
   satisfies:
   - R2
   - R6
@@ -86,7 +86,7 @@ phases:
   - P3
   parallel: false
   hammerable: true
-  hill: uphill
+  hill: downhill
   verify: set -eu; sh spec/s3-index-target/verify/wire.sh view_ 5; cargo test --locked;
     grep -qF "XDU_EXTENSION_DIR" doc/xdu-view.1.scd; grep -qF "AWS_ENDPOINT_URL_S3"
     doc/xdu-view.1.scd; grep -A20 "check share/man/man1/xdu-view.1" .github/workflows/test.yaml
@@ -491,20 +491,62 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
 **Goal:** `xdu-view -i s3://…` shows what it shows locally. This is the designed cut: if the cycle
 runs long, P4 is dropped through a GOAL amendment (never silently), and P5 still runs.
 
-- [ ] `src/view_query.rs` (new): the 4 distinct queries and `DirEntry` move out of
+- [x] `src/view_query.rs` (new): the 4 distinct queries and `DirEntry` move out of
   `src/bin/xdu-view.rs`, taking `&IndexLocator` and going through `parquet_source`; the S3 arm also
   binds the data-derived `path LIKE` prefix (PLAN §2.9). Local SQL text unchanged.
-- [ ] `src/bin/xdu-view.rs`: `App` holds `IndexLocator`; S3 prologue as `xdu-find`'s; terminal
+  *Amended in run A:*
+  - **Five statement texts, not four.** `load_directory` (list view) and
+    `make_directory_column_tree` (tree view) send the same statement in two whitespace layouts.
+    Merging them would change one view's local SQL text, which R6 keeps as it is, so each keeps
+    its own builder (`list_directory_sql`, `tree_directory_sql`) over one shared set of parts
+    (`DirectoryQuery`) and one row reader. `load_partitions` and `make_partition_column` were
+    byte-identical and share `partitions_sql`.
+  - **Pure builders.** Each statement is built by a `*_sql` function returning `(text, bound
+    values)`; `root_files`, `partitions`, `partition_root`, `list_directory` and
+    `tree_directory` run them. The in-memory `sort_entries` (§9), the `__root__` merge, the `..`
+    entry and the status lines stay in the binary.
+  - **The byte-for-byte proof.** The unit test
+    `local_view_sql_is_byte_for_byte_what_xdu_view_sent` compares every local statement, over 3
+    filter sets, all 7 sorts and 3 directories (quotes included), with a frozen copy of the
+    binary's old builders kept in the test module. The raw SQL blocks of both the new builders
+    and the frozen copy were cut by script from the binary at `caf72b4`, so no whitespace was
+    retyped; the hand-written fragments were checked against that file by grep.
+- [x] `src/bin/xdu-view.rs`: `App` holds `IndexLocator`; S3 prologue as `xdu-find`'s; terminal
   setup still after `App::new`; §12's restore guard untouched.
-- [ ] Wire tests (`view_` prefix), all through the proxy with no whole-object GET: local vs S3
+  *Run A:* the local arm is the old code moved into the match, and still opens its connection
+  after the filters are parsed; the S3 arm's connection is the one the marker was read on.
+  `cli.rs` is unchanged.
+- [x] Wire tests (`view_` prefix), all through the proxy with no whole-object GET: local vs S3
   `Vec<DirEntry>` equal for root, each partition, a nested directory, every `SortMode`, and a filter
   set; R4 refusals through `run_view` (no TUI) with empty `HOME`/`TMPDIR`/cwd left empty.
-- [ ] `doc/xdu-view.1.scd`: as `xdu-find`'s page in P2; CI literal counts.
+  *Run A:* 5 `view_` tests, 41 in the file; the CI step's minimum rises from 36 to 41.
+  - The parity tests run the `view_query` functions on an in-test connection to each index,
+    since the TUI never runs in CI. Every directory of `alice` (above its root, the root, a
+    nested directory and the one below it) and `bob`'s root, in both layouts, under all 7
+    sorts, and the partition list and `__root__` files; a filtered test runs 7 filter sets
+    under 3 sorts. The statements order by nothing else, so rows that tie on the sort key (every
+    file has a count of 1) may come in either order: the comparison holds the sequence of sort
+    keys equal and the entries equal as a set, which for a unique key is exact equality.
+  - The quote test puts a `'` in the prefix and in a listed directory (`alice/b/it's`). The
+    quoted directory is listed over S3 only: the local statement writes the prefix into a
+    `LIKE` literal, which the quote ends (invariant §5's local note).
+  - The R4 test drives the `xdu-view` binary, whose refusals all come before the terminal is
+    touched: the seven causes of `xdu-find`'s matrix, `XDU_INDEX`, and an empty
+    `XDU_EXTENSION_DIR`, each with empty stdout and its own cause. The accepted path of the
+    binary is not driven: past `App::new` it needs a terminal.
+- [x] `doc/xdu-view.1.scd`: as `xdu-find`'s page in P2; CI literal counts.
+  *Run A:* scdoc is not installed here, so the page was not rendered. The counts were derived
+  from the source with markup and whitespace stripped, by a script that reproduces CI's
+  `xdu-find.1` list exactly when run on that page; `xdu-view.1` carries the same list. The page
+  also says the tree view's file preview reads the file itself, not the index. `README.md`'s
+  `### Indexes in S3` names `xdu-view` beside `xdu-find`; `AGENTS.md` (source map, the
+  duplicated-literal sentence) and `invariants.md` §5 name `view_query`.
 - **Run B evidence:** test legs as above with N ≥ 34; the Packaging job's literal step green with
   the new `xdu-view.1` checks.
 - **Verify:** see frontmatter.
 - **Touches:** `src/view_query.rs`, `src/lib.rs`, `src/bin/xdu-view.rs`, `tests/`,
-  `doc/xdu-view.1.scd`, `.github/workflows/test.yaml`.
+  `doc/xdu-view.1.scd`, `.github/workflows/test.yaml`, `README.md`, `AGENTS.md`,
+  `.agents/factory/invariants.md`.
 
 ## Phase P5 — Close the cycle: full S3 suite, gate literals, deferral ledger
 **Satisfies:** R9, R10 · **Depends on:** P4 · **Size:** ~0.25 day
