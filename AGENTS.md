@@ -301,6 +301,10 @@ src/
                  # construction (incl. the __root__ collision rejection), per-file record building,
                  # PartitionBuffer + atomic finalize, completion-marker read/write. Only the crawler
                  # uses it; the reader tools never do. The concurrency scaffold stays in bin/xdu.rs.
+  engine.rs      # the ONLY place a DuckDB connection is opened: open_connection() turns extension
+                 # autoinstall + autoload off; PINNED_EXTENSIONS (the shipped set), extension_dir()
+                 # (XDU_EXTENSION_DIR, else <canonical exe>/../../lib/xdu/extensions) and
+                 # load_extension() (load by absolute path, or fail naming it; never download)
   bin/xdu.rs     # indexer: shared-rayon-pool concurrent walk, driver threads, thread::scope error
                  # propagation, progress — the scaffold around lib::crawl
   bin/xdu-find.rs   # DuckDB query CLI
@@ -308,9 +312,20 @@ src/
   bin/xdu-rm.rs     # destructive bulk delete (safe mode, confirm, dry-run, parallel)
   bin/gen-completions.rs   # emits share/ completions from cli.rs
 tests/           # crawl_tests.rs, rm_tests.rs, offline_tests.rs (integration); common/ = shared helpers
+examples/extension-probe.rs   # release-time probe, never installed: `manifest` prints engine version,
+                 # platform, source_id + pinned set; `load` loads that set from the extension
+                 # directory on one engine connection. Built in the same `cargo build` as the bins;
+                 # its unit tests run under `cargo test` (`test = true` in Cargo.toml)
+clippy.toml      # `disallowed-methods`: duckdb::Connection::{open,open_in_memory,*_with_flags} fail
+                 # clippy -D warnings everywhere but src/engine.rs, so no connection skips the refusal
 doc/*.scd        # scdoc man page SOURCES (authored); render to share/man/man1/*.1
 share/           # GENERATED (man + completions); git-ignored; built in CI / by /xdu-release
 build.sh install.sh Dockerfile   # packaging / ops scripts
+packaging/extensions/   # footer.sh (check an extension's engine/platform footer), fetch.sh (download the
+                 # probe's pinned set), check.sh (the release gate: runs every shipped binary and
+                 # loads the set from the extracted tarball under a cold HOME, before upload)
+packaging/rpm/   # xdu.spec: ad-hoc / COPR-style EL build from the source tag; no workflow runs it
+                 # (see issues/native-os-packages-deb-rpm.md)
 .agents/         # the spec-driven "software factory" (see below)
 spec/{slug}/     # committed, dated per-feature design records the factory produces (retained on merge)
 issues/{slug}.md # deferred code work, pre-shaped (status: unshaped); /xdu-feature promotes one to a GOAL
@@ -445,7 +460,12 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    `ORDER BY`** so `--dry-run` and the real run select identical rows.
 5. **DuckDB injection surface.** Every user value reaching `read_parquet(...)`/`WHERE` is an
    injection surface. Route it through one validated escaping/quoting helper (or bound parameters);
-   never raw `format!` a partition name or index path into SQL.
+   never raw `format!` a partition name or index path into SQL. The extension path is one too:
+   `engine::load_extension_from` puts the extension file's absolute path, from `XDU_EXTENSION_DIR`
+   or the canonical exe's `../../lib/xdu/extensions`, into `LOAD '<path>'`, and refuses a path
+   containing `'` or not valid UTF-8 before any SQL runs. The unit tests
+   `engine::tests::quoted_directory_is_refused_before_any_sql` and
+   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold that rule.
 6. **Unix-only.** `MetadataExt` (atime; disk usage = `st_blocks`×512) is load-bearing; don't add
    code assuming portability. A future S3/Windows source must special-case (S3 has no atime).
 7. **Shared rayon-pool concurrency.** See Architecture. Preserve the single-pool + driver-thread +
@@ -462,7 +482,8 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
     panic (Drop guard / panic hook, not sequential code — `panic="abort"` is set); previewed file
     bytes are `strip_ansi`-sanitized before rendering.
 13. **Project conventions.** Version single-sourced from `Cargo.toml`; `share/` generated + ignored +
-    CI-asserted; tarball layout (`bin/` + `share/{man,bash-completion,zsh}`) matches `install.sh`;
+    CI-asserted; tarball layout (`bin/` + `share/{man,bash-completion,zsh}` +
+    `lib/xdu/extensions/`) matches `install.sh`;
     non-TTY runs keep stdout clean/pipeable (progress → stderr); reuse shared helpers; **no `spec/`
     R#/P# ids in source** (they restart per feature and collide across branches); prose, comment and
     commit-message voice per § *Prose and comments*, which is hygiene rather than a review finding.
@@ -472,9 +493,11 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
 - **`src/bin/xdu-rm.rs`** — destructive. `--limit` needs a deterministic `ORDER BY`; `--safe` must
   re-verify the criteria it claims to (atime/size today; min-size/newer-than/pattern are gaps); the
   confirm/dry-run/force gates are load-bearing.
-- **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the SQL/injection surface),
+- **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
   `index_glob` (the one place the index layout becomes SQL), and the `ROOT_PARTITION` /
   `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list that guards both.
+- **`src/engine.rs`** — the one place a DuckDB connection opens (autoload and autoinstall off), and
+  `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5).
 - **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning; the
   reserved-index-name collision rejection in `build_work_queue`; completion-marker write/clear ordering.
 - **`src/bin/xdu.rs`** — the shared-pool concurrency model (driver threads, `thread::scope` error
@@ -499,9 +522,13 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   suite to mean a case actually ran.
 - **`offline_tests.rs` guards air-gapped operation.** The readers must answer a query with an empty
   DuckDB extension cache and write nothing into it; the test redirects `HOME` and asserts that
-  directory stays empty. This is why `Cargo.toml` asks `duckdb` for `parquet` alongside `bundled` —
-  `bundled` alone leaves the Parquet reader to autoinstall a 12 MB extension at runtime. Dropping the
-  feature restores a product defect on air-gapped HPC login nodes, not just a slow first run.
+  directory stays empty. That now holds by refusal: every connection opens through
+  `engine::open_connection`, which turns extension autoload and autoinstall off, so a query that
+  needs an unlinked extension fails instead of downloading one. `Cargo.toml` still asks `duckdb` for
+  `parquet` alongside `bundled`, because `bundled` alone leaves the Parquet reader unlinked, and with
+  autoload refused that is a reader that cannot read its own index. Any other extension ships as a
+  file in `lib/xdu/extensions/` and loads by path (`XDU_EXTENSION_DIR` overrides the directory);
+  nothing is ever fetched at runtime.
 - **Verify by driving the CLI, not just tests.** Use `.agents/factory/bin/temp_index.sh` so a drive
   hits a throwaway index, never a real one. Exit 0 is necessary but not sufficient — assert a concrete
   post-condition (row count, a stdout token, files actually gone/kept).
@@ -527,9 +554,17 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   touch them — they change only when the CLI changes.
 - Release profile (`Cargo.toml`): `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - Release tarball layout is a contract: `bin/{xdu,xdu-find,xdu-view,xdu-rm}` +
-  `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}`; `install.sh`'s
-  extraction mirrors it exactly. `/xdu-release` cuts versions (bump `Cargo.toml` + `Cargo.lock`,
-  gate, tag, publish); see its skill.
+  `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}` +
+  `lib/xdu/extensions/{name}.duckdb_extension` (the pinned DuckDB extensions, one per entry, built
+  for that tarball's engine version and platform; flat, no version or platform directories).
+  `install.sh`'s extraction mirrors it exactly, placing `lib/xdu/extensions/` beside the physical
+  directory the binaries went to, since the tools look in `<canonical exe>/../../lib/xdu/extensions`
+  unless `XDU_EXTENSION_DIR` names another directory. The container image and the HPCCM recipe keep
+  the same layout under their prefix. Every release leg runs `packaging/extensions/check.sh` on the
+  exact tarball it uploads, under a cold `HOME`, before the upload; it executes every shipped binary
+  and loads the pinned set from the extracted layout. `cargo install` builds carry no
+  extensions. `/xdu-release` cuts versions (bump `Cargo.toml` + `Cargo.lock`, gate, tag, publish);
+  see its skill.
 - **Pre-release gate (mirrored by CI and `/xdu-release`):** `cargo fmt --all -- --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` must all pass clean.
 

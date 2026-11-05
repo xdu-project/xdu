@@ -48,9 +48,22 @@ spec and its companions, and a tooling-mandated top-level `debian/` when the DEB
   feature is a shaping decision, not an afterthought.
 - **R6** — CI SHALL validate both package builds (`mock`/`rpmbuild -ba` and the Debian build)
   so the tooling cannot rot between releases.
+- **R7** — The `.rpm` and `.deb` packages SHALL ship the pinned DuckDB extensions at
+  `<prefix>/lib/xdu/extensions/` beside `<prefix>/bin/` (for `/usr/bin`, that is
+  `/usr/lib/xdu/extensions/`), built for the engine version and platform of the binaries they
+  package, and SHALL prove they load under a cold `HOME` with `packaging/extensions/check.sh`
+  semantics. The release tarball has carried that directory since the extension-distribution
+  cycle, and the tools look nowhere else unless `XDU_EXTENSION_DIR` is set.
 
 ## Notes
 
-- Related: GitHub issue #5; PR #12 (COPR-style first pass); `packaging/rpm/xdu.spec`.
+- **The RPM spec builds from source and must fetch.** `packaging/rpm/xdu.spec` builds from the tag
+  archive, so it ships no extensions today, and nothing in a source build produces them: they are
+  upstream DuckDB binaries. The spec has to fetch them for the engine it just built (the
+  `extension-probe` example and `packaging/extensions/fetch.sh` do exactly that), which collides
+  with R1's no-network builders. Building distro packages from the release tarball (R3) would
+  carry `lib/xdu/extensions/` for free; whichever route is chosen, R7 is the requirement.
+- Related: GitHub issue #5; PR #12 (COPR-style first pass); `packaging/rpm/xdu.spec`;
+  [`duckdb-extension-distribution.md`](duckdb-extension-distribution.md), which set the layout.
 - License posture helps: MIT with no bundled-exception baggage beyond DuckDB.
 - Found by: original roadmap; re-aimed at official repos 2026-09-07.

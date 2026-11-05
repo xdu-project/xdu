@@ -1,0 +1,10 @@
+# A DuckDB connection opened anywhere but `xdu::engine::open_connection` keeps the bundled
+# engine's autoinstall and autoload on, and the first query touching an unlinked capability
+# downloads into $HOME. The readers would still answer correctly, so no test sees the
+# regression; this rule is what does. `src/engine.rs` alone carries the `#[allow]`.
+disallowed-methods = [
+    { path = "duckdb::Connection::open", reason = "open connections with xdu::engine::open_connection, which refuses autoinstall and autoload" },
+    { path = "duckdb::Connection::open_in_memory", reason = "open connections with xdu::engine::open_connection, which refuses autoinstall and autoload" },
+    { path = "duckdb::Connection::open_with_flags", reason = "open connections with xdu::engine::open_connection, which refuses autoinstall and autoload" },
+    { path = "duckdb::Connection::open_in_memory_with_flags", reason = "open connections with xdu::engine::open_connection, which refuses autoinstall and autoload" },
+]

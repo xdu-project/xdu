@@ -6,6 +6,9 @@
 #   XDU_VERSION  - Version to install (default: latest)
 #   XDU_INSTALL  - Installation directory for binaries (default: ~/.local/bin)
 #   XDU_PREFIX   - Prefix for share/ files: man pages, completions (default: ~/.local)
+#
+# The DuckDB extensions a release ships go to lib/xdu/extensions beside the directory the
+# binaries are installed into (XDU_INSTALL/../lib/xdu/extensions), where the tools look for them.
 
 set -eu
 
@@ -186,6 +189,27 @@ main() {
         fi
     done
     success "Installed binaries to ${INSTALL_DIR}"
+
+    # Install the DuckDB extensions where the installed binaries look for them: lib/xdu/extensions
+    # beside the directory that holds the real executables. That is relative to INSTALL_DIR, not
+    # PREFIX, since XDU_INSTALL may point elsewhere, and it is the physical path, so a symlinked
+    # install directory lands where the resolved executable looks. Tarballs from releases that
+    # predate shipped extensions have no lib/ and install as before.
+    if [ -d "${TMPDIR}/lib/xdu/extensions" ]; then
+        BIN_REAL=$(cd "$INSTALL_DIR" && pwd -P)
+        EXT_DIR="${BIN_REAL%/*}/lib/xdu/extensions"
+        mkdir -p "$EXT_DIR"
+        for ext in "${TMPDIR}/lib/xdu/extensions/"*; do
+            [ -f "$ext" ] || continue
+            name=${ext##*/}
+            # Copy under a temporary name in the destination, then rename over the old file.
+            # Overwriting in place would invalidate a cached macOS code signature, so the next
+            # load is killed, and can crash a running process that has the file mapped.
+            cp "$ext" "${EXT_DIR}/.${name}.$$"
+            mv -f "${EXT_DIR}/.${name}.$$" "${EXT_DIR}/${name}"
+        done
+        success "Installed DuckDB extensions to ${EXT_DIR}"
+    fi
 
     # Install man pages
     MAN_DIR="${PREFIX}/share/man/man1"

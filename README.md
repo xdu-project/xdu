@@ -86,13 +86,19 @@ This downloads the latest release binary for your platform and installs it to `~
 - `XDU_VERSION=v0.1.0` — Install a specific version
 - `XDU_INSTALL=/usr/local/bin` — Change install directory
 
+The DuckDB extensions a release ships go to `../lib/xdu/extensions/` relative to the install
+directory (`~/.local/lib/xdu/extensions` by default), where the tools look for them; nothing is
+downloaded at run time. To keep them somewhere else, set `XDU_EXTENSION_DIR` to that directory.
+
 ### From Source
 
 ```bash
 cargo install --git https://github.com/xdu-project/xdu.git
 ```
 
-Requires [Rust](https://rustup.rs) nightly toolchain.
+Requires [Rust](https://rustup.rs) nightly toolchain. A `cargo install` build carries no DuckDB
+extensions, so a feature that needs one fails naming the path it looked in; copy the files from a
+release tarball's `lib/xdu/extensions/` there, or point `XDU_EXTENSION_DIR` at them.
 
 ### Containers
 

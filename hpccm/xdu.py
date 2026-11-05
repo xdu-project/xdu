@@ -7,10 +7,12 @@
           --singularity-version=3.2 > xdu.def
 
 Installs the four xdu binaries, plus man pages and shell completions, from
-the upstream release tarball. The download runs in a throwaway first stage,
-checked against the published SHA256SUMS, so curl stays out of the finished
-image. Both stages use the same Debian or
-Ubuntu base image, which must have apt.
+the upstream release tarball. The tarball is extracted whole into the prefix,
+so a release that ships DuckDB extensions puts its lib/xdu/extensions/ beside
+bin/, where the binaries look for them. The download runs in a throwaway
+first stage, checked against the published SHA256SUMS, so curl stays out of
+the finished image. Both stages use the same Debian or Ubuntu base image,
+which must have apt.
 
 Being two-stage, the Singularity output needs --singularity-version=3.2.
 Without it hpccm drops the second stage and emits a definition file that

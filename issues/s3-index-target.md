@@ -64,6 +64,18 @@ not for the index.
   cannot be statically linked — the vendored amalgamation carries sources for `core_functions`,
   `parquet` and `json` only — so it has to arrive as a shipped binary rather than a runtime
   download. That seed is prerequisite and has a second consumer.
+- **What the extension-distribution cycle left for this one.** It shipped `httpfs` in every release
+  tarball at `lib/xdu/extensions/` and a library loader (`xdu::engine::load_extension`), but no CLI
+  path loads an extension yet, so two operator-facing pieces wait for the first one that does, which
+  is this cycle's reader:
+  - **The `XDU_EXTENSION_DIR` man-page entry.** The variable overrides where the tools look for
+    extensions (default `<canonical exe>/../../lib/xdu/extensions`). It is read by the library, not
+    declared through clap, so it reaches the `ENVIRONMENT` section of each `doc/*.scd` page whose
+    tool loads an extension, with the usual literal-count obligation in the man-page gate.
+  - **The `cargo install` caveat.** A `cargo install` build carries no extensions, so an S3 query
+    from one fails naming the path it looked in. The README says so today; the man page and the
+    error the operator sees should say how to fix it (copy `lib/xdu/extensions/` from a release
+    tarball, or set `XDU_EXTENSION_DIR`).
 - **R5 is a net reduction in risk, not a new surface.** Invariant §5 records that partition names
   and index paths reach `read_parquet` through raw `format!` today. Measured 2026-09-15:
   `read_parquet(?)` accepts a bound parameter, and S3 credentials can be set through the `duckdb`
