@@ -22,24 +22,12 @@ mtime, ctime), and the three tools that read it — `xdu-find` for scripted Duck
 for guarded bulk deletion, and `xdu-view` for interactive exploration with both a list view and a
 Miller-columns tree view (file-type detection and a scrollable text preview pane). Packaging is
 established too: the release tarball, `install.sh`, the scdoc man pages, and generated shell
-completions (so GitHub issue #4 is effectively resolved). Everything below builds on that baseline.
+completions (so GitHub issue #4 is effectively resolved). The tarball also carries the DuckDB
+extensions xdu cannot link statically, pinned to its engine version under `lib/xdu/extensions/`, so
+nothing downloads at runtime (record in `spec/duckdb-extension-distribution/`). Everything below
+builds on that baseline.
 
 ---
-
-## Ship DuckDB extensions instead of downloading them
-
-Any DuckDB capability xdu does not link statically arrives as a runtime download into
-`$HOME/.duckdb/extensions/`, which is a defect on the air-gapped login nodes xdu targets — the
-reason `Cargo.toml` asks for the `parquet` feature and `tests/offline_tests.rs` guards a cold
-`HOME`. Linkage does not generalize: the vendored amalgamation carries sources for `core_functions`,
-`parquet` and `json` only, so a third extension cannot be linked at all and must ship as a binary.
-Two queued entries are blocked on this same wall — S3 reads need `httpfs`, and the full-text search
-evaluation records the identical constraint in its own words. Pinning the extensions to the engine
-version, shipping them in the tarball, and failing with the path looked for rather than reaching for
-the network solves it once for both and for everything after them.
-
-*Horizon: near-term · Depends on: — · Refs: measured during the DuckDB-native S3 read spike, 2026-09-15*
-**Seed:** [`issues/duckdb-extension-distribution.md`](issues/duckdb-extension-distribution.md)
 
 ## S3 as an index target
 
@@ -54,7 +42,7 @@ range requests: measured against an 80.1 MiB index, `--count` moved 0.13 MiB and
 3.94 MiB, where a staging design pays the full 80.1 MiB every time. The intention is that a query
 costs what the query asks for, not what the index weighs.
 
-*Horizon: mid-term · Depends on: shipped DuckDB extensions (above), for `httpfs` · Refs: —*
+*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: —*
 **Seed:** [`issues/s3-index-target.md`](issues/s3-index-target.md)
 
 ## S3 as a crawl source

@@ -40,10 +40,11 @@ scale. A "no" with reasons is a complete outcome.
 
 ## Notes
 
-- The extension-download constraint above is no longer this seed's to solve alone:
-  [`duckdb-extension-distribution.md`](duckdb-extension-distribution.md) owns it, having measured
-  that no extension beyond `core_functions`/`parquet`/`json` can be statically linked at all. If
-  full-text search ships as an extension, it ships through that mechanism.
+- The extension-download constraint above is no longer this seed's to solve: the shipped-extensions
+  cycle (on `main` since #31, record in `spec/duckdb-extension-distribution/`) pins DuckDB
+  extensions to the engine version and ships them in the release tarball, having measured that no
+  extension beyond `core_functions`/`parquet`/`json` can be statically linked at all. If full-text
+  search ships as an extension, it ships through that mechanism as one more pinned-set entry.
 - Related: the retired parent seed `issues/richer-search-glob-fuzzy-fulltext.md` (glob pilot
   delivered; record in `spec/richer-search-glob-fuzzy-fulltext/`).
 - Found by: `richer-search-glob-fuzzy-fulltext` P4 deferral ledger.
