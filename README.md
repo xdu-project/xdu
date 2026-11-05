@@ -379,7 +379,21 @@ xdu-rm -i /var/lib/xdu/home --older-than 60 --min-size 1G --dry-run | tail -1
 
 ### Indexes in S3
 
-An index in an S3 bucket, on AWS or on an S3-compatible store, is queried in place: give
+`xdu` builds an index straight into an S3 bucket, on AWS or on an S3-compatible store: give `-o`
+an `s3://bucket/prefix` locator instead of a directory. Each chunk is uploaded to its final key as
+the crawl encodes it, and nothing of the index is staged on local disk. The completion marker
+works as it does locally: the run lists the prefix first, so an unreachable endpoint, refused
+credentials or a missing bucket fail it with any existing index untouched, then removes the marker,
+and writes it again only when every partition has finished. A re-run leaves no stale chunk behind.
+A top-level directory whose name would change on its way into a key or a glob (non-ASCII, or a
+character such as `~`, `%`, `#` or `*`) is refused before anything is written.
+
+```bash
+export AWS_PROFILE=research
+xdu /data/scratch -o s3://indexes/scratch -j 8
+```
+
+The index in the bucket is then queried in place: give
 `xdu-find` an `s3://bucket/prefix` locator wherever it takes an index directory, through `-i` or
 `XDU_INDEX`. Each query reads the Parquet footers and only the parts of each chunk it needs, with
 HTTP range requests, so a `--count` costs the footers, a small fraction of the index. Nothing is copied
@@ -403,8 +417,9 @@ export XDU_INDEX=s3://indexes/scratch
 xdu-find --top 10
 ```
 
-The proxy variables (`HTTP_PROXY` and friends) are not used: requests go straight to the
-endpoint. `xdu-rm` refuses an `s3://` index. Unreachable endpoints, refused credentials, a missing
+The proxy variables (`HTTP_PROXY` and friends) are not used by `xdu` or the readers: requests go
+straight to the endpoint. Building needs no DuckDB extension; querying does. `xdu-rm` refuses an
+`s3://` index. Unreachable endpoints, refused credentials, a missing
 bucket or prefix, and an index without a readable completion marker each fail with the cause on
 stderr and print no rows.
 

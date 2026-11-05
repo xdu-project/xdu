@@ -53,7 +53,7 @@ phases:
     P2-GATE-GREEN
 - id: P3
   name: xdu -o s3:// builds the index into the bucket
-  status: pending
+  status: in_progress
   satisfies:
   - R1
   - R4
@@ -63,7 +63,8 @@ phases:
   - P2
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: crest
+  attempts: 1
   verify: set -eu; sh spec/s3-index-target/verify/wire.sh write_ 10; cargo test --locked;
     .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\" --count";
     grep -qF "AWS_PROFILE" doc/xdu.1.scd; grep -A20 "check share/man/man1/xdu.1" .github/workflows/test.yaml
@@ -372,23 +373,50 @@ and binds everything S3 sends to SQL. The demo works after this phase.
 **Goal:** `xdu <src> -o s3://bucket/prefix` writes the index a local run writes, chunk by chunk,
 with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer from it.
 
-- [ ] `Cargo.toml`: `object_store = { version = "0.14.2", default-features = false, features =
+- [x] `Cargo.toml`: `object_store = { version = "0.14.2", default-features = false, features =
   ["aws-base", "reqwest", "ring"] }`, `reqwest = { version = "0.13", default-features = false,
   features = ["rustls-no-provider"] }`, `rustls = { version = "0.23", default-features = false,
   features = ["ring", "std"] }`, `tokio` (`rt`, `rt-multi-thread`), `futures`, `bytes` (digest D3).
   Install the ring provider once before any client.
-- [ ] `src/crawl.rs`: `IndexSink`, `LocalSink` (byte-for-byte today's files, rename and first-gap
+  *Run A:* 30 crates new to `Cargo.lock` (the digest counted 26 against an older lock); the
+  provider is installed in `S3Sink::connect`, before the client is built.
+- [x] `src/crawl.rs`: `IndexSink`, `LocalSink` (byte-for-byte today's files, rename and first-gap
   prune), `PartitionBuffer` encodes into a `Vec<u8>` passed by value (PLAN §2.8, port from
   `32ba641` with digest D9's changes). Existing `crawl_tests` stay green unchanged.
-- [ ] `src/s3.rs`: `S3Sink` (owned runtime; `AmazonS3Builder::new()` from resolver output only;
+  *Run A:* the trait is `preflight` (default no-op), `check_top_level` (default accepts),
+  `clear_marker`, `put_chunk`, `finalize_partition`, `write_marker` and `marker_location`, so
+  `xdu.rs` drives both sinks through one sequence. `tests/crawl_tests.rs` is untouched and green;
+  the three `PartitionBuffer` unit tests in `crawl.rs` build a `LocalSink` instead of passing a
+  path.
+- [x] `src/s3.rs`: `S3Sink` (owned runtime; `AmazonS3Builder::new()` from resolver output only;
   `no_proxy()` reqwest connector; bounded retry and timeouts; PUT at the final key; LIST + DELETE
   of every higher id; marker DELETE/PUT; key round-trip check for partition names).
-- [ ] `src/bin/xdu.rs`: `-o` stays `PathBuf`; classify on `OsStr`; the S3 sequence of PLAN §2.8 with
+  *Amended in run A:*
+  - **Single DELETEs.** object_store's `delete` on S3 is a bulk `POST ?delete` by default; the
+    sink sets `with_disable_bulk_delete(true)`, so every removal is one DELETE the proxy (and an
+    S3 access log) names by key.
+  - **A listing's status is in its text.** A failed LIST reaches the caller as a generic store
+    error whose status sits only in the wrapped error's text (`status code: 403`), so the cause
+    is read from there, as the readers read httpfs's; 401/403, 404 and connect/timeout errors
+    get the readers' distinct wording ("refused the credentials", "does not exist", "cannot reach
+    the S3 endpoint").
+  - **Non-ASCII names are refused.** The round-trip check is the one PLAN names (what the client
+    would percent-encode), and object_store encodes every non-ASCII byte, so a directory such as
+    `café` is refused for an S3 output, as are `.`/`..`, controls, glob metacharacters and the
+    characters AWS advises against. Building keys raw instead would admit non-ASCII names, at the
+    price of an unprobed reader path; left to the foreman.
+  - **The prefix is checked too.** A prefix with an empty, `.` or `..` segment or a character the
+    client encodes is refused before any request, since the writer's keys would differ from the
+    readers' glob.
+- [x] `src/bin/xdu.rs`: `-o` stays `PathBuf`; classify on `OsStr`; the S3 sequence of PLAN §2.8 with
   the marker DELETE after every rejecting check; local sequence untouched. Per amended R1, refuse
   a top-level name that is not UTF-8 or not safe as an S3 key segment and a DuckDB glob before the
   clear, exiting non-zero and naming the directory; per amended R4, an absent or empty prefix is a
   new index, while a missing bucket, an unreachable endpoint or rejected credentials fail.
-- [ ] Wire tests (`write_` prefix):
+  *Run A:* order is source checks, settings, `preflight` (the LIST), then in `crawl` the name
+  check over **every** top-level directory (a `--partition` filter does not exempt one, as with
+  reserved names), `build_work_queue`, and the marker DELETE. `-o` help names the `s3://` form.
+- [x] Wire tests (`write_` prefix):
   - round trip: `xdu -o s3://` vs a local run of the same tree — key set equals file set;
     `__root__` present; per partition, an in-test DuckDB `SELECT * … ORDER BY path` over each tree
     returns equal rows in **all eight columns**; the Parquet schema, key-value metadata and
@@ -409,15 +437,30 @@ with §2b's ordering, and a re-run leaves no stale chunk. Readers from P2 answer
   - a failure injected after the clear (e.g. a source subtree made unreadable without
     `--allow-errors`): non-zero, no marker, and at least one chunk PUT seen before the failure
     (chunks go up as they finalize, not at the end).
-- [ ] Release-build check: the runtime dependency tree holds no `openssl-sys`, `native-tls` or
+
+  *Run A:* 14 `write_` tests, 36 in the file; the CI step's minimum rises from 22 to 36. The
+  read-only identity is a second key pair the test endpoint accepts and refuses every write for;
+  a second injected failure refuses every PUT under one partition, so a run fails mid-crawl with
+  earlier partitions' chunks already sent and later ones never started. The ordering test also
+  counts the per-partition prune LISTs between chunk PUTs. Tests that read a written index back
+  use one chunk a partition, so no ranged read covers a whole small chunk. The non-UTF-8 name
+  case runs only where the filesystem allows such a name (the Linux leg; APFS refuses it) and
+  prints a `write-unsafe-names:` line saying whether it ran.
+- [x] Release-build check: the runtime dependency tree holds no `openssl-sys`, `native-tls` or
   `aws-lc-sys` (`cargo tree -e normal -i …`, in `verify:`), and does hold `ring`. Record in the
   commit body that the manylinux_2_28 leg's glibc/NEEDED check must pass on the first push (ring is
   proven there only as a build dependency).
-- [ ] `doc/xdu.1.scd`: `-o` accepts `s3://BUCKET/PREFIX`; S3 paragraph (chunks sent as they
+- [x] `doc/xdu.1.scd`: `-o` accepts `s3://BUCKET/PREFIX`; S3 paragraph (chunks sent as they
   finalize, nothing assembled locally, proxy variables not used); `ENVIRONMENT` gains the ten
   `AWS_*` names; CI literal counts. `README.md`: the build half of `### Indexes in S3`.
-- [ ] `invariants.md` §2/§7 and the matching `AGENTS.md` text: S3 finalize = one PUT at the final
+  *Run A:* the paragraph is a section, `S3 OUTPUT`. scdoc is not installed here, so the page was
+  not rendered; counts were derived from the source with markup and whitespace stripped
+  (`2x:s3://BUCKET/PREFIX`, `2x:AWS_PROFILE` with the example, `2x:AWS_ENDPOINT_URL`, the other
+  seven names `1x`). The Packaging job is the proof.
+- [x] `invariants.md` §2/§7 and the matching `AGENTS.md` text: S3 finalize = one PUT at the final
   key plus LIST prune; the runtime's threads in the budget.
+  *Run A:* §2b gains the S3 pre-flight (LIST and name refusal) before the marker DELETE; the
+  `AGENTS.md` source map gains `s3.rs`.
 - **Run B evidence:** test legs as above with N ≥ 29. Release workflow, both `Build (…-linux-gnu)`
   jobs: step "Assert glibc floor" prints `… needs max GLIBC_2.x` lines with x ≤ 28 and no
   `floor breach`, `runtime breach` or `unexpected dynamic needs` line; then

@@ -12,7 +12,7 @@
 //! refused, whatever else is set: a wire test that cannot run must fail, never report `ok`.
 //! The `#[ignore]` on each wire test is what keeps a machine without the extension quiet.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -34,7 +34,7 @@ use s3s::dto::{
     ListObjectsV2Input, ListObjectsV2Output, PutObjectInput, PutObjectOutput,
 };
 use s3s::service::S3ServiceBuilder;
-use s3s::{S3, S3Request, S3Response, S3Result};
+use s3s::{S3, S3Request, S3Response, S3Result, s3_error};
 use tempfile::TempDir;
 
 use xdu::s3::{EnvSource, S3Settings};
@@ -53,6 +53,12 @@ pub const SECRET_KEY: &str = "xdu-test-secret-Qm7Vr2Kx9Pw4";
 /// A second secret for the rejected-credential cases; it must not leak either.
 pub const WRONG_SECRET_KEY: &str = "xdu-wrong-secret-Hd3Lz8Tn5Ry1";
 pub const SESSION_TOKEN: &str = "xdu-test-session-token-Jf6Wb1Sc4Ne8";
+/// A second identity the endpoint accepts, allowed to read but refused every write.
+pub const READ_ONLY_ACCESS_KEY: &str = "xdu-test-read-only-key";
+pub const READ_ONLY_SECRET_KEY: &str = "xdu-read-only-secret-Wc5Gt7Mb2Xq9";
+/// A partition the endpoint refuses every chunk PUT under, whoever signs it: a write failure
+/// injected in the middle of a run.
+pub const REFUSED_PARTITION: &str = "refuse-writes";
 
 /// The directory holding the pinned `httpfs`. Panics when it is unset or lacks the file.
 pub fn test_extension_dir() -> PathBuf {
@@ -105,14 +111,38 @@ pub fn resolve_settings(endpoint_url: &str, secret: &str, token: Option<&str>) -
     S3Settings::resolve(&MapEnv::new(&vars)).expect("fixture settings resolve")
 }
 
-/// s3s-fs with ListObjectsV2's `encoding-type=url` honoured, and every other operation the
-/// tests use passed through unchanged.
+/// s3s-fs with ListObjectsV2's `encoding-type=url` honoured, writes refused for the read-only
+/// identity and under `REFUSED_PARTITION`, and every other operation the tests use passed
+/// through unchanged.
 ///
 /// Asked for `encoding-type=url`, s3s-fs echoes `EncodingType` but sends each key raw, so the
 /// XML escapes a `'` as `&apos;`. S3 percent-encodes the keys it lists when asked, and httpfs,
 /// which always asks, decodes percent escapes and not XML entities: without this a key holding
 /// `'` would list as a key that does not exist, on this endpoint only.
 struct UrlEncodedListing(s3s_fs::FileSystem);
+
+/// Refuse a write signed by the read-only identity, as S3 refuses one its policy denies.
+fn refuse_read_only<T>(req: &S3Request<T>) -> S3Result<()> {
+    match &req.credentials {
+        Some(c) if c.access_key == READ_ONLY_ACCESS_KEY => Err(s3_error!(AccessDenied)),
+        _ => Ok(()),
+    }
+}
+
+/// Refuse a PUT, after reading its body to the end. A server that answers with the body still
+/// unread closes on unread data, and the reset that follows can reach the proxy before the
+/// refusal does.
+async fn refuse_put(mut req: S3Request<PutObjectInput>) -> S3Result<S3Response<PutObjectOutput>> {
+    use futures::StreamExt;
+    if let Some(body) = req.input.body.as_mut() {
+        while let Some(chunk) = body.next().await {
+            if chunk.is_err() {
+                break;
+            }
+        }
+    }
+    Err(s3_error!(AccessDenied))
+}
 
 /// Percent-encode everything but unreserved characters and `/`, as S3 encodes a listed key.
 fn url_encode_key(key: &str) -> String {
@@ -203,6 +233,14 @@ impl S3 for UrlEncodedListing {
         &self,
         req: S3Request<PutObjectInput>,
     ) -> S3Result<S3Response<PutObjectOutput>> {
+        let refused_partition = req
+            .input
+            .key
+            .split('/')
+            .any(|segment| segment == REFUSED_PARTITION);
+        if refused_partition || refuse_read_only(&req).is_err() {
+            return refuse_put(req).await;
+        }
         self.0.put_object(req).await
     }
 
@@ -210,6 +248,7 @@ impl S3 for UrlEncodedListing {
         &self,
         req: S3Request<DeleteObjectInput>,
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
+        refuse_read_only(&req)?;
         self.0.delete_object(req).await
     }
 
@@ -217,6 +256,7 @@ impl S3 for UrlEncodedListing {
         &self,
         req: S3Request<DeleteObjectsInput>,
     ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        refuse_read_only(&req)?;
         self.0.delete_objects(req).await
     }
 }
@@ -250,7 +290,12 @@ impl TestS3 {
             .expect("endpoint runtime");
         let filesystem = s3s_fs::FileSystem::new(root.path()).expect("s3s-fs root");
         let mut builder = S3ServiceBuilder::new(UrlEncodedListing(filesystem));
-        builder.set_auth(SimpleAuth::from_single(ACCESS_KEY, SECRET_KEY));
+        let mut auth = SimpleAuth::from_single(ACCESS_KEY, SECRET_KEY);
+        auth.register(
+            READ_ONLY_ACCESS_KEY.to_string(),
+            READ_ONLY_SECRET_KEY.into(),
+        );
+        builder.set_auth(auth);
         let service = builder.build();
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).expect("endpoint listener");
@@ -304,8 +349,47 @@ impl TestS3 {
         cmd
     }
 
+    /// `xdu` in `hermetic`, writing through this endpoint's proxy with the accepted key pair
+    /// from the environment. The writer needs no extension, so none is offered. The caller adds
+    /// the source and `-o`.
+    pub fn write_command(&self, hermetic: &Hermetic) -> Command {
+        let mut cmd = hermetic.command("xdu");
+        cmd.env("AWS_ACCESS_KEY_ID", ACCESS_KEY)
+            .env("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
+            .env("AWS_ENDPOINT_URL", self.proxy_url());
+        cmd
+    }
+
     fn bucket_dir(&self) -> PathBuf {
         self.root.path().join(BUCKET)
+    }
+
+    /// The directory the endpoint stores the objects under `prefix` in.
+    pub fn object_dir(&self, prefix: &str) -> PathBuf {
+        self.bucket_dir().join(prefix)
+    }
+
+    /// Every key under `prefix/`, relative to it, read from the endpoint's root.
+    pub fn keys(&self, prefix: &str) -> BTreeSet<String> {
+        let base = self.object_dir(prefix);
+        if !base.exists() {
+            return BTreeSet::new();
+        }
+        super::list_files_recursive(&base)
+            .into_iter()
+            .map(|f| f.strip_prefix(&base).unwrap().to_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Every stored object under `prefix/` with its bytes, keyed relative to the prefix.
+    pub fn snapshot(&self, prefix: &str) -> BTreeMap<String, Vec<u8>> {
+        self.keys(prefix)
+            .into_iter()
+            .map(|k| {
+                let bytes = fs::read(self.object_dir(prefix).join(&k)).unwrap();
+                (k, bytes)
+            })
+            .collect()
     }
 
     /// The stored bytes of an object, read from the endpoint's root.
@@ -762,7 +846,12 @@ pub fn output_of(cmd: &mut Command) -> (String, String, bool) {
 
 /// Neither secret nor the session token appears in `text`.
 pub fn assert_no_secret(what: &str, text: &str) {
-    for secret in [SECRET_KEY, WRONG_SECRET_KEY, SESSION_TOKEN] {
+    for secret in [
+        SECRET_KEY,
+        WRONG_SECRET_KEY,
+        SESSION_TOKEN,
+        READ_ONLY_SECRET_KEY,
+    ] {
         assert!(!text.contains(secret), "{what} carries a secret: {text}");
     }
 }

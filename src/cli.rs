@@ -18,14 +18,15 @@ Examples:
   xdu /data/scratch -o /index/scratch -j 8
   xdu /data/scratch -o /index/scratch --partition alice,bob
   xdu /data/scratch -o /index/scratch --apparent-size
-  xdu /data/scratch -o /index/scratch --block-size 128K"
+  xdu /data/scratch -o /index/scratch --block-size 128K
+  xdu /data/scratch -o s3://indexes/scratch"
 )]
 pub struct XduArgs {
     /// Top-level directory to index
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
-    /// Output directory for the Parquet index
+    /// Output directory for the Parquet index, or s3://BUCKET/PREFIX to build it into S3
     #[arg(short, long, value_name = "DIR")]
     pub outdir: PathBuf,
 

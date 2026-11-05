@@ -11,6 +11,10 @@
 //! here reads instance metadata, SSO caches or a credential process, and no error message carries
 //! a credential, an endpoint value or any other value read from those sources: each names the
 //! variable or the file and profile it came from.
+//!
+//! `S3Sink` is the crawler's S3 destination. Each chunk is one PUT at its final key, a
+//! partition's stale tail goes by LIST and DELETE, and the completion marker is a DELETE before
+//! the first chunk and a PUT after the last partition. Nothing it sends is staged on local disk.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -20,8 +24,19 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context, Result, anyhow, bail};
 use duckdb::types::Value;
+use futures::StreamExt;
+use object_store::aws::AmazonS3Builder;
+use object_store::client::{HttpClient, HttpConnector, HttpError, HttpErrorKind};
+use object_store::path::{Path as ObjectPath, PathPart};
+use object_store::{BackoffConfig, ClientOptions, ObjectStore, ObjectStoreExt, RetryConfig};
+
+use crate::COMPLETION_MARKER;
+use crate::crawl::{IndexSink, TopEntry, chunk_final_name};
 
 /// The scheme that marks an index argument as an S3 locator. Lowercase only: `S3://x` is a
 /// relative local path, as it always was.
@@ -617,6 +632,355 @@ impl Ini {
     }
 }
 
+/// Why a top-level source directory cannot be a partition of an S3 index, or `None` when it
+/// can.
+///
+/// A partition's name becomes a key segment the writer PUTs under and a glob segment the
+/// readers match, so it must reach both byte for byte. Refused: a name that is not UTF-8 (it
+/// would be stored lossily); a DuckDB glob metacharacter, which would make the readers' glob
+/// match other partitions; and anything the S3 client percent-encodes in a key segment, since
+/// the stored key would then differ from the directory's name: a non-ASCII character, a control
+/// character, one of the characters AWS advises against in keys (`\ { } ^ % ` ] " > [ ~ < # |`),
+/// or a name that is exactly `.` or `..`.
+pub fn s3_partition_name_problem(name: &OsStr) -> Option<&'static str> {
+    let Some(name) = name.to_str() else {
+        return Some("is not valid UTF-8");
+    };
+    if name.contains(GLOB_METACHARACTERS) {
+        return Some("holds a glob metacharacter, which the readers' index glob would expand");
+    }
+    if !survives_as_key_segment(name) {
+        return Some(
+            "holds a character the S3 client percent-encodes in a key (non-ASCII, a control \
+             character, or one of \\ { } ^ % ` ] \" > [ ~ < # |), or is . or .., so the stored \
+             key would differ from it",
+        );
+    }
+    None
+}
+
+/// Whether `segment` is stored under exactly this text by the S3 client.
+fn survives_as_key_segment(segment: &str) -> bool {
+    !segment.is_empty() && PathPart::from(segment).as_ref() == segment
+}
+
+/// Refuse the run when any top-level source directory cannot be a partition of an S3 index.
+///
+/// Every directory is checked, whether or not a `--partition` filter selects it, as the
+/// reserved-name check does: the refusal must come before the completion marker is cleared,
+/// and it names the first offending directory.
+pub fn check_s3_partition_names(entries: &[TopEntry], top_dir: &Path) -> Result<()> {
+    for entry in entries.iter().filter(|e| e.is_dir) {
+        let name = entry.path.file_name().unwrap_or(entry.path.as_os_str());
+        if let Some(problem) = s3_partition_name_problem(name) {
+            bail!(
+                "top-level directory '{}' in {} cannot be a partition of an S3 index: its name {}; \
+                 rename it before indexing into S3",
+                name.to_string_lossy(),
+                top_dir.display(),
+                problem
+            );
+        }
+    }
+    Ok(())
+}
+
+/// How long the writer waits to open a connection to the endpoint.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long one request may take, a chunk PUT included.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Retries of a failed request: few and short, so an unreachable endpoint fails the run in
+/// seconds rather than the minutes the client would otherwise spend.
+fn retry_config() -> RetryConfig {
+    RetryConfig {
+        backoff: BackoffConfig {
+            init_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(2),
+            base: 2.0,
+        },
+        max_retries: 3,
+        retry_timeout: Duration::from_secs(30),
+    }
+}
+
+/// The writer's HTTP client: direct to the endpoint, whatever the proxy variables say, as the
+/// readers' engine is; with its own timeouts, since a custom connector bypasses the store's.
+#[derive(Debug)]
+struct DirectConnector;
+
+impl HttpConnector for DirectConnector {
+    fn connect(&self, _options: &ClientOptions) -> object_store::Result<HttpClient> {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| object_store::Error::Generic {
+                store: "S3",
+                source: Box::new(e),
+            })?;
+        Ok(HttpClient::new(client))
+    }
+}
+
+/// Use ring for every TLS connection this process makes. Installing it twice is harmless;
+/// building the client without it would abort the process.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// An index under an S3 prefix, as the crawler's destination.
+///
+/// The sink owns a two-worker tokio runtime. Driver threads, which are not runtime threads,
+/// block on it for each request; the rayon pool never touches it.
+pub struct S3Sink {
+    store: Arc<dyn ObjectStore>,
+    runtime: tokio::runtime::Runtime,
+    locator: S3Locator,
+}
+
+impl S3Sink {
+    /// A sink for `locator`, with the client built from `settings` alone: the static key pair,
+    /// region and endpoint the resolver found, never the client's own environment or metadata
+    /// lookups. Nothing is sent until `preflight`.
+    pub fn connect(locator: &S3Locator, settings: &S3Settings) -> Result<S3Sink> {
+        install_crypto_provider();
+        let mut builder = AmazonS3Builder::new()
+            .with_bucket_name(locator.bucket())
+            .with_region(&settings.region)
+            .with_access_key_id(&settings.access_key_id)
+            .with_secret_access_key(&settings.secret_access_key)
+            .with_virtual_hosted_style_request(!settings.path_style)
+            .with_retry(retry_config())
+            .with_disable_bulk_delete(true)
+            .with_http_connector(DirectConnector);
+        if let Some(token) = &settings.session_token {
+            builder = builder.with_token(token);
+        }
+        if let Some(endpoint) = &settings.endpoint {
+            builder = builder
+                .with_endpoint(endpoint.url())
+                .with_allow_http(!endpoint.use_ssl());
+        }
+        let store = builder
+            .build()
+            .with_context(|| format!("cannot configure an S3 client for {locator}"))?;
+        S3Sink::with_store(Arc::new(store), locator)
+    }
+
+    /// The same sink over any object store; unit tests use an in-memory one.
+    pub fn with_store(store: Arc<dyn ObjectStore>, locator: &S3Locator) -> Result<S3Sink> {
+        if !locator.prefix().is_empty() && !locator.prefix().split('/').all(survives_as_key_segment)
+        {
+            bail!(
+                "S3 prefix '{}' of {locator} cannot be written as given: an empty segment, \
+                 '.', '..' or a character the S3 client percent-encodes would change the keys \
+                 it is stored under",
+                locator.prefix()
+            );
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("xdu-s3")
+            .enable_all()
+            .build()
+            .context("cannot start the S3 client's runtime")?;
+        Ok(S3Sink {
+            store,
+            runtime,
+            locator: locator.clone(),
+        })
+    }
+
+    /// The key of `name` directly under the index prefix, or of `partition/name`.
+    fn key(&self, partition: Option<&str>, name: &str) -> ObjectPath {
+        let prefix = self.locator.prefix();
+        let segments = prefix
+            .split('/')
+            .filter(|_| !prefix.is_empty())
+            .chain(partition)
+            .chain([name]);
+        ObjectPath::from_iter(segments)
+    }
+
+    fn chunk_key(&self, partition: &str, id: usize) -> ObjectPath {
+        self.key(Some(partition), &chunk_final_name(id))
+    }
+
+    fn marker_key(&self) -> ObjectPath {
+        self.key(None, COMPLETION_MARKER)
+    }
+
+    fn prefix_path(&self) -> Option<ObjectPath> {
+        let prefix = self.locator.prefix();
+        (!prefix.is_empty()).then(|| ObjectPath::from_iter(prefix.split('/')))
+    }
+
+    /// The ids of `partition`'s chunks, ascending. Only keys directly under the partition that
+    /// are exactly a chunk name count: a sibling partition sharing the name as a prefix, a
+    /// deeper key and any foreign object are left alone.
+    fn chunk_ids(&self, partition: &str) -> Result<Vec<usize>> {
+        let dir = ObjectPath::from_iter(
+            self.prefix_path()
+                .iter()
+                .flat_map(|p| p.parts())
+                .chain([PathPart::from(partition)]),
+        );
+        let dir_prefix = format!("{}/", dir.as_ref());
+        let mut listing = self.store.list(Some(&dir));
+        let mut ids = Vec::new();
+        while let Some(meta) = self.runtime.block_on(listing.next()) {
+            let meta =
+                meta.map_err(|e| self.request_error(&format!("listing partition {partition}"), e))?;
+            let Some(name) = meta.location.as_ref().strip_prefix(&dir_prefix) else {
+                continue;
+            };
+            if let Some(id) = chunk_id(name) {
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Name the cause of a failed request: the endpoint unreachable, the credentials refused,
+    /// the bucket missing, or the store's own words. No credential is ever part of the text.
+    fn request_error(&self, what: &str, err: object_store::Error) -> anyhow::Error {
+        let index = &self.locator;
+        let status = match &err {
+            object_store::Error::PermissionDenied { .. } => Some(403),
+            object_store::Error::Unauthenticated { .. } => Some(401),
+            object_store::Error::NotFound { .. } => Some(404),
+            // A listing's failure reaches here as a generic error; its status is only in the
+            // text of the error it wraps.
+            _ => error_chain(&err).find_map(|e| status_in_text(&e.to_string())),
+        };
+        match status {
+            Some(401 | 403) => anyhow!(
+                "the S3 endpoint refused the credentials while {what} for {index}; check \
+                 AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, \
+                 and that they may write there ({err})"
+            ),
+            Some(404) => anyhow!(
+                "bucket '{}' does not exist at the S3 endpoint (HTTP 404 while {what} for {index})",
+                index.bucket()
+            ),
+            _ if is_unreachable(&err) => anyhow!(
+                "cannot reach the S3 endpoint while {what} for {index}: no connection could be \
+                 established; check AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL or the profile's \
+                 endpoint_url ({err})"
+            ),
+            _ => anyhow!("S3 request failed while {what} for {index}: {err}"),
+        }
+    }
+}
+
+/// `err` and every error beneath it.
+fn error_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(err), |e| e.source())
+}
+
+/// The HTTP status a store error's text reports, as the S3 client words it.
+fn status_in_text(text: &str) -> Option<u16> {
+    const LEAD: &str = "status code: ";
+    let at = text.find(LEAD)? + LEAD.len();
+    let digits = text.get(at..at + 3)?;
+    digits
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// Whether the error chain ends in a failure to connect, or a timeout.
+fn is_unreachable(err: &object_store::Error) -> bool {
+    error_chain(err).any(|e| {
+        e.downcast_ref::<HttpError>()
+            .is_some_and(|h| matches!(h.kind(), HttpErrorKind::Connect | HttpErrorKind::Timeout))
+    })
+}
+
+/// The id a chunk key's final segment names, if it is exactly a chunk name: `1.parquet` or
+/// `000001.parquet.partial` is not chunk 1.
+fn chunk_id(name: &str) -> Option<usize> {
+    let stem = name.strip_suffix(".parquet")?;
+    if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let id: usize = stem.parse().ok()?;
+    (chunk_final_name(id) == name).then_some(id)
+}
+
+impl IndexSink for S3Sink {
+    /// Reach the bucket with the credentials: one LIST of the index prefix's first page. An
+    /// empty or absent prefix is a new index and passes; an unreachable endpoint, rejected
+    /// credentials or a missing bucket fail, before anything is written.
+    fn preflight(&self) -> Result<()> {
+        let prefix = self.prefix_path();
+        let mut listing = self.store.list(prefix.as_ref());
+        match self.runtime.block_on(listing.next()) {
+            None | Some(Ok(_)) => Ok(()),
+            Some(Err(err)) => Err(self.request_error("listing the index prefix", err)),
+        }
+    }
+
+    fn check_top_level(&self, entries: &[TopEntry], top_dir: &Path) -> Result<()> {
+        check_s3_partition_names(entries, top_dir)
+    }
+
+    /// The first write of a run, so credentials that may read but not write fail here, with
+    /// the marker still in place. A missing marker is not an error.
+    fn clear_marker(&self) -> Result<()> {
+        match self.runtime.block_on(self.store.delete(&self.marker_key())) {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(err) => Err(self.request_error("removing the completion marker", err)),
+        }
+    }
+
+    /// One PUT at the chunk's final key. A single PUT is all or nothing, so no reader can see
+    /// part of a chunk; until the marker is written, no reader accepts the index at all.
+    fn put_chunk(&self, partition: &str, id: usize, bytes: Vec<u8>) -> Result<()> {
+        let key = self.chunk_key(partition, id);
+        self.runtime
+            .block_on(self.store.put(&key, bytes::Bytes::from(bytes).into()))
+            .map(|_| ())
+            .map_err(|e| self.request_error(&format!("writing chunk {key}"), e))
+    }
+
+    /// Every chunk is already at its final key; delete each listed chunk numbered `count` or
+    /// higher, past any gap, so no stale chunk survives in the partition.
+    fn finalize_partition(&self, partition: &str, count: usize) -> Result<usize> {
+        let mut pruned = 0;
+        for id in self.chunk_ids(partition)? {
+            if id < count {
+                continue;
+            }
+            let key = self.chunk_key(partition, id);
+            self.runtime
+                .block_on(self.store.delete(&key))
+                .map_err(|e| self.request_error(&format!("removing stale chunk {key}"), e))?;
+            pruned += 1;
+        }
+        Ok(pruned)
+    }
+
+    fn write_marker(&self, contents: &str) -> Result<()> {
+        let body = bytes::Bytes::copy_from_slice(contents.as_bytes());
+        self.runtime
+            .block_on(self.store.put(&self.marker_key(), body.into()))
+            .map(|_| ())
+            .map_err(|e| self.request_error("writing the completion marker", e))
+    }
+
+    fn marker_location(&self) -> String {
+        self.locator.object_url(COMPLETION_MARKER)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,5 +1475,205 @@ s3 =
             local.last(),
             Some(&Value::Text("127.0.0.1:9000".to_string()))
         );
+    }
+
+    // ---- the writer ---------------------------------------------------------
+
+    #[test]
+    fn partition_names_that_survive_as_keys_and_globs_are_accepted() {
+        for name in [
+            "alice",
+            "__root__",
+            ".xdu-complete",
+            ".hidden",
+            "it's",
+            "with space",
+            "a+b=c,d;e",
+            "...",
+        ] {
+            assert_eq!(s3_partition_name_problem(OsStr::new(name)), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn partition_names_the_client_would_encode_are_refused() {
+        for name in [
+            "a~b",
+            "a%b",
+            "a#b",
+            "a^b",
+            "a|b",
+            "a\\b",
+            "a`b",
+            "a\"b",
+            "a<b",
+            "a>b",
+            "tab\there",
+            ".",
+            "..",
+            "caf\u{e9}",
+        ] {
+            let problem = s3_partition_name_problem(OsStr::new(name));
+            assert!(
+                problem.is_some_and(|p| p.contains("percent-encodes")),
+                "{name:?}: {problem:?}"
+            );
+        }
+        for name in ["a*b", "a?b", "[ab]", "{a,b}", "a]"] {
+            let problem = s3_partition_name_problem(OsStr::new(name));
+            assert!(
+                problem.is_some_and(|p| p.contains("glob metacharacter")),
+                "{name:?}: {problem:?}"
+            );
+        }
+        let raw = OsString::from_vec(b"bad\xffname".to_vec());
+        assert_eq!(s3_partition_name_problem(&raw), Some("is not valid UTF-8"));
+    }
+
+    fn entry(name: &OsStr, is_dir: bool) -> TopEntry {
+        TopEntry {
+            path: Path::new("/data").join(name),
+            name: name.to_string_lossy().to_string(),
+            is_dir,
+            is_file: !is_dir,
+            is_symlink: false,
+        }
+    }
+
+    #[test]
+    fn the_name_check_names_the_directory_and_ignores_loose_files() {
+        let ok = [
+            entry(OsStr::new("alice"), true),
+            entry(OsStr::new("a~b.txt"), false),
+        ];
+        check_s3_partition_names(&ok, Path::new("/data")).unwrap();
+        let bad = [
+            entry(OsStr::new("alice"), true),
+            entry(OsStr::new("a~b"), true),
+        ];
+        let err = check_s3_partition_names(&bad, Path::new("/data"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'a~b'") && err.contains("/data"), "{err}");
+        assert!(err.contains("S3 index"), "{err}");
+    }
+
+    #[test]
+    fn statuses_are_read_from_the_clients_error_text() {
+        assert_eq!(
+            status_in_text(
+                "Error performing GET http://h/b?list-type=2 in 2ms - Server returned non-2xx \
+                 status code: 403 Forbidden: <Error/>"
+            ),
+            Some(403)
+        );
+        assert_eq!(
+            status_in_text("Server returned non-2xx status code: 404 Not Found: "),
+            Some(404)
+        );
+        assert_eq!(status_in_text("error trying to connect: refused"), None);
+        assert_eq!(status_in_text("status code: 4"), None);
+    }
+
+    #[test]
+    fn chunk_ids_parse_only_exact_chunk_names() {
+        assert_eq!(chunk_id("000042.parquet"), Some(42));
+        assert_eq!(chunk_id("1000000.parquet"), Some(1_000_000));
+        assert_eq!(chunk_id("1.parquet"), None);
+        assert_eq!(chunk_id("000001.parquet.partial"), None);
+        assert_eq!(chunk_id("sub/000001.parquet"), None);
+        assert_eq!(chunk_id(".xdu-complete"), None);
+        assert_eq!(chunk_id(".parquet"), None);
+    }
+
+    fn memory_sink(raw: &str) -> (S3Sink, Arc<object_store::memory::InMemory>) {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let sink = S3Sink::with_store(store.clone(), &s3(raw)).unwrap();
+        (sink, store)
+    }
+
+    fn stored_keys(sink: &S3Sink, store: &object_store::memory::InMemory) -> Vec<String> {
+        let mut keys: Vec<String> = sink
+            .runtime
+            .block_on(store.list(None).collect::<Vec<_>>())
+            .into_iter()
+            .map(|m| m.unwrap().location.to_string())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn keys_follow_the_index_layout() {
+        let (sink, _) = memory_sink("s3://bucket/some/prefix");
+        assert_eq!(
+            sink.chunk_key("alice", 3).as_ref(),
+            "some/prefix/alice/000003.parquet"
+        );
+        assert_eq!(sink.marker_key().as_ref(), "some/prefix/.xdu-complete");
+        assert_eq!(
+            sink.marker_location(),
+            "s3://bucket/some/prefix/.xdu-complete"
+        );
+        let (root, _) = memory_sink("s3://bucket");
+        assert_eq!(
+            root.chunk_key("__root__", 0).as_ref(),
+            "__root__/000000.parquet"
+        );
+        assert_eq!(root.marker_key().as_ref(), ".xdu-complete");
+    }
+
+    #[test]
+    fn a_prefix_the_client_would_rewrite_is_refused() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        for raw in [
+            "s3://bucket/a~b",
+            "s3://bucket/a//b",
+            "s3://bucket//p",
+            "s3://bucket/a/../b",
+        ] {
+            let err = S3Sink::with_store(store.clone(), &s3(raw))
+                .err()
+                .unwrap_or_else(|| panic!("{raw} was accepted"))
+                .to_string();
+            assert!(err.contains("cannot be written as given"), "{raw}: {err}");
+        }
+        S3Sink::with_store(store, &s3("s3://bucket/it's/idx")).unwrap();
+    }
+
+    #[test]
+    fn the_sink_writes_prunes_past_gaps_and_clears() {
+        let (sink, store) = memory_sink("s3://bucket/idx");
+        sink.preflight().unwrap();
+        // Clearing a marker that is not there is not an error.
+        sink.clear_marker().unwrap();
+
+        for id in [0, 1, 2, 5, 9] {
+            sink.put_chunk("alice", id, b"old".to_vec()).unwrap();
+        }
+        sink.put_chunk("alice2", 7, b"sibling".to_vec()).unwrap();
+        sink.put_chunk("alice", 1, b"new".to_vec()).unwrap();
+        // Foreign objects under the partition are not chunks and stay.
+        let foreign = ObjectPath::from("idx/alice/1.parquet");
+        sink.runtime
+            .block_on(store.put(&foreign, bytes::Bytes::from_static(b"x").into()))
+            .unwrap();
+
+        // A run that wrote two chunks removes every higher id, past the gaps at 3-4 and 6-8.
+        assert_eq!(sink.finalize_partition("alice", 2).unwrap(), 3);
+        sink.write_marker("format=2\n").unwrap();
+        assert_eq!(
+            stored_keys(&sink, &store),
+            vec![
+                "idx/.xdu-complete",
+                "idx/alice/000000.parquet",
+                "idx/alice/000001.parquet",
+                "idx/alice/1.parquet",
+                "idx/alice2/000007.parquet",
+            ]
+        );
+
+        sink.clear_marker().unwrap();
+        assert!(!stored_keys(&sink, &store).contains(&"idx/.xdu-complete".to_string()));
     }
 }

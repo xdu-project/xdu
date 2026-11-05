@@ -13,10 +13,11 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use duckdb::Connection;
@@ -25,8 +26,9 @@ use tempfile::TempDir;
 use common::build_index;
 use common::create_test_file;
 use common::s3::{
-    ACCESS_KEY, BUCKET, EXTENSION_DIR_VAR, Hermetic, SECRET_KEY, SESSION_TOKEN, TestS3,
-    WRONG_SECRET_KEY, assert_no_secret, encoded_index, output_of, padded_marker, resolve_settings,
+    ACCESS_KEY, BUCKET, EXTENSION_DIR_VAR, Hermetic, ProxyRecord, READ_ONLY_ACCESS_KEY,
+    READ_ONLY_SECRET_KEY, REFUSED_PARTITION, SECRET_KEY, SESSION_TOKEN, TestS3, WRONG_SECRET_KEY,
+    assert_no_secret, encoded_index, output_of, padded_marker, resolve_settings,
     test_extension_dir, varied_source_tree, wide_source_tree,
 };
 use xdu::engine::open_s3_connection_from;
@@ -987,4 +989,870 @@ fn find_tolerated_errors_marker_warns_as_local() {
         "the S3 warning differs from the local one"
     );
     assert_clean(&s3, &hermetic);
+}
+
+// =============================================================================
+// xdu -o s3:// builds the index into the bucket
+// =============================================================================
+
+/// Where the writer tests build their index in the bucket.
+const WRITE_PREFIX: &str = "built/idx";
+/// Records per chunk in the writer tests: small, so a partition spans several chunks.
+const WRITE_BUFFSIZE: &str = "40";
+
+/// One row of an index in schema order.
+type IndexRow = (String, i64, i64, i64, i64, i64, i64, i64);
+
+/// `xdu`'s arguments for a build of `source` into `out`, `WRITE_BUFFSIZE` records a chunk.
+fn xdu_args(source: &Path, out: &str, jobs: &str) -> Vec<OsString> {
+    xdu_args_chunked(source, out, jobs, WRITE_BUFFSIZE)
+}
+
+/// `xdu`'s arguments for a build of `source` into `out`, `buffsize` records a chunk.
+fn xdu_args_chunked(source: &Path, out: &str, jobs: &str, buffsize: &str) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["--apparent-size", "-j", jobs, "-B", buffsize]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    args.push(source.as_os_str().to_owned());
+    args.push("-o".into());
+    args.push(out.into());
+    args
+}
+
+/// Files of distinct sizes under each `(directory, count)`; `""` is the source root itself.
+fn small_tree(root: &Path, groups: &[(&str, usize)]) {
+    let mut size = 1;
+    for (dir, count) in groups {
+        for i in 0..*count {
+            create_test_file(&root.join(dir).join(format!("f{i:04}.dat")), size).unwrap();
+            size += 1;
+        }
+    }
+}
+
+/// Every file under `dir`, relative to it.
+fn relative_files(dir: &Path) -> BTreeSet<String> {
+    common::list_files_recursive(dir)
+        .into_iter()
+        .map(|f| f.strip_prefix(dir).unwrap().to_str().unwrap().to_string())
+        .collect()
+}
+
+/// Every row of the chunks in `dir`, all eight columns, sorted by path.
+fn partition_rows(dir: &Path) -> Vec<IndexRow> {
+    let conn = xdu::engine::open_connection().unwrap();
+    let glob = format!("{}/*.parquet", dir.display());
+    let mut stmt = conn
+        .prepare("SELECT * FROM read_parquet(?) ORDER BY path")
+        .unwrap();
+    stmt.query_map([glob], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+        ))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+/// A chunk's Parquet schema, key-value metadata and writer, as comparable text.
+fn chunk_metadata(file: &Path) -> String {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    let reader = SerializedFileReader::new(fs::File::open(file).unwrap()).unwrap();
+    let meta = reader.metadata().file_metadata();
+    format!(
+        "{:?}\n{:?}\n{:?}",
+        meta.schema_descr().root_schema(),
+        meta.key_value_metadata(),
+        meta.created_by()
+    )
+}
+
+/// A marker body without its `completed_at` line, which differs between any two runs.
+fn marker_without_time(body: &[u8]) -> String {
+    String::from_utf8(body.to_vec())
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with("completed_at="))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+fn is_list(record: &ProxyRecord) -> bool {
+    record.method == "GET" && record.target.contains("list-type=2")
+}
+
+fn is_chunk_put(record: &ProxyRecord) -> bool {
+    record.method == "PUT" && record.key().ends_with(".parquet")
+}
+
+fn marker_key(prefix: &str) -> String {
+    format!("{prefix}/{COMPLETION_MARKER}")
+}
+
+/// The proxy saw no DELETE and no PUT: nothing in the bucket was written or removed.
+fn assert_no_write(s3: &TestS3, case: &str) {
+    let writes: Vec<ProxyRecord> = s3
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "DELETE" || r.method == "PUT" || r.method == "POST")
+        .collect();
+    assert!(
+        writes.is_empty(),
+        "{case}: the bucket was written: {writes:#?}"
+    );
+}
+
+/// A bucket holding an index `xdu` built locally under `WRITE_PREFIX`, and its stored bytes.
+fn seeded_write_target(work: &Path) -> (TestS3, BTreeMap<String, Vec<u8>>) {
+    let s3 = TestS3::start();
+    let source = work.join("old-source");
+    let index = work.join("old-index");
+    small_tree(&source, &[("", 3), ("alice", 90), ("bob", 50)]);
+    build_index(&source, &index);
+    s3.seed_index(&index, WRITE_PREFIX);
+    let before = s3.snapshot(WRITE_PREFIX);
+    assert!(before.contains_key(COMPLETION_MARKER), "{before:?}");
+    (s3, before)
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_round_trip_matches_a_local_run() {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    varied_source_tree(&source);
+    let source_before = relative_files(&source);
+    let local = work.path().join("local");
+    let hermetic = Hermetic::new();
+
+    let (_, err, ok) =
+        run(hermetic
+            .command("xdu")
+            .args(xdu_args(&source, local.to_str().unwrap(), "4")));
+    assert!(ok, "the local build failed: {err}");
+    let (out, err, ok) =
+        run(s3
+            .write_command(&hermetic)
+            .args(xdu_args(&source, &s3.url(WRITE_PREFIX), "4")));
+    assert!(ok, "the S3 build failed: {err}");
+    assert!(out.is_empty(), "xdu printed to stdout: {out}");
+    assert!(
+        err.contains(&format!(
+            "Marker {} written",
+            s3.url(&marker_key(WRITE_PREFIX))
+        )),
+        "the log does not name the S3 marker: {err}"
+    );
+
+    // The same objects at the same relative keys, the loose-file partition included.
+    let files = relative_files(&local);
+    assert_eq!(s3.keys(WRITE_PREFIX), files);
+    assert!(
+        files.iter().any(|k| k.starts_with("__root__/")),
+        "{files:?}"
+    );
+    assert!(files.contains("alice/000001.parquet"), "{files:?}");
+
+    // The same rows in every column, and chunks encoded the same way.
+    let partitions: BTreeSet<&str> = files
+        .iter()
+        .filter_map(|k| k.split_once('/').map(|(p, _)| p))
+        .collect();
+    assert_eq!(partitions.len(), 3, "{partitions:?}");
+    for partition in &partitions {
+        let local_rows = partition_rows(&local.join(partition));
+        assert!(!local_rows.is_empty(), "{partition} holds no rows");
+        assert_eq!(
+            partition_rows(&s3.object_dir(WRITE_PREFIX).join(partition)),
+            local_rows,
+            "partition {partition} differs"
+        );
+    }
+    for key in files.iter().filter(|k| k.ends_with(".parquet")) {
+        assert_eq!(
+            chunk_metadata(&s3.object_dir(WRITE_PREFIX).join(key)),
+            chunk_metadata(&local.join(key)),
+            "{key} was encoded differently"
+        );
+    }
+    assert_eq!(
+        marker_without_time(&s3.object(&marker_key(WRITE_PREFIX))),
+        marker_without_time(&fs::read(local.join(COMPLETION_MARKER)).unwrap())
+    );
+
+    // Nothing written locally: not under HOME, TMPDIR or the working directory, where a
+    // misread `s3://` would have created `s3:/…`, and not in the source tree.
+    hermetic.assert_left_empty();
+    assert_eq!(relative_files(&source), source_before);
+    assert!(
+        !s3.requests()
+            .iter()
+            .any(|r| r.method == "GET" && !is_list(r)),
+        "the writer read an object back"
+    );
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_index_answers_xdu_find_as_a_local_one_does() {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    varied_source_tree(&source);
+    let local = work.path().join("local");
+    let hermetic = Hermetic::new();
+    // One chunk a partition, each larger than the footer read a query opens it with, so a
+    // ranged read never has to cover a whole chunk.
+    let (_, err, ok) = run(hermetic.command("xdu").args(xdu_args_chunked(
+        &source,
+        local.to_str().unwrap(),
+        "2",
+        "100000",
+    )));
+    assert!(ok, "the local build failed: {err}");
+    let (_, err, ok) = run(s3.write_command(&hermetic).args(xdu_args_chunked(
+        &source,
+        &s3.url(WRITE_PREFIX),
+        "2",
+        "100000",
+    )));
+    assert!(ok, "the S3 build failed: {err}");
+
+    for args in [
+        &["--count"][..],
+        &["-u", "alice", "--count"],
+        &["-u", "__root__", "--count"],
+        &["--top", "3"],
+        &["-f", "size"],
+        &["-f", "size", "-u", "bob", "-l", "20"],
+    ] {
+        let (want, err, ok) = run(hermetic
+            .command("xdu-find")
+            .arg("-i")
+            .arg(&local)
+            .args(args));
+        assert!(ok, "local xdu-find {args:?} failed: {err}");
+        assert!(
+            !want.trim().is_empty(),
+            "local xdu-find {args:?} printed nothing"
+        );
+        let (got, err, ok) = run(s3
+            .find_command(&hermetic)
+            .args(["-i", &s3.url(WRITE_PREFIX)])
+            .args(args));
+        assert!(ok, "xdu-find {args:?} over the written index failed: {err}");
+        assert_eq!(got, want, "xdu-find {args:?}");
+    }
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_requests_list_then_clear_then_chunks_and_the_marker_last() {
+    let (s3, _) = seeded_write_target(TempDir::new().unwrap().path());
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    small_tree(
+        &source,
+        &[("", 5), ("alice", 130), ("bob", 70), ("carol", 45)],
+    );
+    let hermetic = Hermetic::new();
+    let (_, err, ok) =
+        run(s3
+            .write_command(&hermetic)
+            .args(xdu_args(&source, &s3.url(WRITE_PREFIX), "1")));
+    assert!(ok, "the S3 build failed: {err}");
+
+    let requests = s3.requests();
+    let marker = marker_key(WRITE_PREFIX);
+    assert!(
+        is_list(&requests[0]) && requests[0].target.contains("prefix=built%2Fidx%2F"),
+        "the run did not open with a listing of the prefix: {requests:#?}"
+    );
+    assert!(
+        requests[1].method == "DELETE" && requests[1].key() == marker,
+        "the marker was not cleared right after the listing: {requests:#?}"
+    );
+    let puts: Vec<usize> = (0..requests.len())
+        .filter(|&i| is_chunk_put(&requests[i]))
+        .collect();
+    assert!(puts.len() >= 8, "{} chunk PUTs: {requests:#?}", puts.len());
+    let last = requests.last().unwrap();
+    assert!(
+        last.method == "PUT" && last.key() == marker && last.status == 200,
+        "the marker was not the last write: {requests:#?}"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.method == "PUT" && r.key() == marker)
+            .count(),
+        1,
+        "the marker was written more than once"
+    );
+    // Chunks go up as partitions finalize: each partition's prune listing comes between its
+    // chunk PUTs and the next partition's, not after every chunk of the run.
+    let prune_lists = (puts[0]..*puts.last().unwrap())
+        .filter(|&i| is_list(&requests[i]))
+        .count();
+    assert_eq!(prune_lists, 3, "{requests:#?}");
+    assert!(requests.iter().all(|r| r.status < 300), "{requests:#?}");
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_rerun_with_fewer_files_leaves_no_stale_chunk() {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let big = work.path().join("big");
+    let small = work.path().join("small");
+    small_tree(&big, &[("", 50), ("alice", 130), ("bob", 90)]);
+    small_tree(&small, &[("", 2), ("alice", 30), ("bob", 50)]);
+    let local = work.path().join("local");
+    let hermetic = Hermetic::new();
+
+    for source in [&big, &small] {
+        let (_, err, ok) =
+            run(s3
+                .write_command(&hermetic)
+                .args(xdu_args(source, &s3.url(WRITE_PREFIX), "2")));
+        assert!(ok, "the S3 build of {} failed: {err}", source.display());
+        let (_, err, ok) =
+            run(hermetic
+                .command("xdu")
+                .args(xdu_args(source, local.to_str().unwrap(), "2")));
+        assert!(ok, "the local build of {} failed: {err}", source.display());
+        if source == &big {
+            // The first run wrote several chunks in every partition the second one shrinks.
+            for partition in ["__root__", "alice", "bob"] {
+                let chunks = s3
+                    .keys(WRITE_PREFIX)
+                    .iter()
+                    .filter(|k| k.starts_with(&format!("{partition}/")))
+                    .count();
+                assert!(chunks > 1, "{partition} holds {chunks} chunk(s)");
+            }
+        }
+    }
+
+    let keys = s3.keys(WRITE_PREFIX);
+    assert_eq!(keys, relative_files(&local));
+    let expected: BTreeSet<String> = [
+        COMPLETION_MARKER,
+        "__root__/000000.parquet",
+        "alice/000000.parquet",
+        "bob/000000.parquet",
+        "bob/000001.parquet",
+    ]
+    .iter()
+    .map(|k| k.to_string())
+    .collect();
+    assert_eq!(keys, expected);
+    for partition in ["__root__", "alice", "bob"] {
+        assert_eq!(
+            partition_rows(&s3.object_dir(WRITE_PREFIX).join(partition)),
+            partition_rows(&local.join(partition)),
+            "{partition}"
+        );
+    }
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_prune_removes_stale_chunks_past_a_gap() {
+    let work = TempDir::new().unwrap();
+    let (s3, _) = seeded_write_target(work.path());
+    // A foreign edit left chunks beyond a gap; a local prune stops at the gap, this one may
+    // not, since every key it lists is a stale chunk of the partition.
+    for key in [
+        "alice/000005.parquet",
+        "alice/000009.parquet",
+        "bob/000004.parquet",
+    ] {
+        s3.seed_object(&format!("{WRITE_PREFIX}/{key}"), b"stale");
+    }
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 30), ("bob", 20)]);
+    let hermetic = Hermetic::new();
+    let (_, err, ok) =
+        run(s3
+            .write_command(&hermetic)
+            .args(xdu_args(&source, &s3.url(WRITE_PREFIX), "1")));
+    assert!(ok, "the S3 build failed: {err}");
+
+    let chunks: Vec<String> = s3
+        .keys(WRITE_PREFIX)
+        .into_iter()
+        .filter(|k| k.ends_with(".parquet"))
+        .collect();
+    // __root__ is not in this source, so its old chunk stays, as it would locally.
+    assert_eq!(
+        chunks,
+        [
+            "__root__/000000.parquet",
+            "alice/000000.parquet",
+            "bob/000000.parquet"
+        ]
+    );
+    assert!(err.contains("pruned 3 stale"), "{err}");
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_missing_source_or_reserved_name_is_refused_before_the_clear() {
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let hermetic = Hermetic::new();
+    let reserved = work.path().join("reserved");
+    small_tree(&reserved, &[("alice", 3), ("__root__", 2)]);
+    let marker_dir = work.path().join("marker-dir");
+    small_tree(&marker_dir, &[("alice", 3), (COMPLETION_MARKER, 2)]);
+
+    for (case, source, needle) in [
+        (
+            "missing source",
+            work.path().join("no-such-source"),
+            "Failed to resolve directory",
+        ),
+        ("reserved partition", reserved, "'__root__'"),
+        ("reserved marker name", marker_dir, "'.xdu-complete'"),
+    ] {
+        let (out, err, ok) =
+            run(s3
+                .write_command(&hermetic)
+                .args(xdu_args(&source, &s3.url(WRITE_PREFIX), "2")));
+        assert!(!ok, "{case}: xdu succeeded");
+        assert!(out.is_empty(), "{case}: {out}");
+        assert!(
+            err.contains(needle),
+            "{case}: stderr does not say {needle}: {err}"
+        );
+        assert_no_write(&s3, case);
+        assert_eq!(
+            s3.snapshot(WRITE_PREFIX),
+            before,
+            "{case}: the index changed"
+        );
+    }
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_unsafe_partition_name_is_refused_before_the_clear() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let hermetic = Hermetic::new();
+    let mut names: Vec<OsString> = ["a~b", "50%", "x#y", "caf\u{e9}"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    // APFS refuses a name that is not UTF-8, so that case runs where the filesystem has one
+    // (the Linux CI leg).
+    let probe = work.path().join("probe");
+    fs::create_dir(&probe).unwrap();
+    let raw = std::ffi::OsStr::from_bytes(b"bad\xffname");
+    let non_utf8_possible = fs::create_dir(probe.join(raw)).is_ok();
+    if non_utf8_possible {
+        names.push(raw.to_owned());
+    }
+    record(&format!(
+        "write-unsafe-names: {} case(s), non-UTF-8 case {}",
+        names.len(),
+        if non_utf8_possible {
+            "ran"
+        } else {
+            "skipped: the filesystem refuses the name"
+        }
+    ));
+
+    for (i, name) in names.iter().enumerate() {
+        let source = work.path().join(format!("source-{i}"));
+        small_tree(&source, &[("alice", 3), ("bob", 2)]);
+        fs::create_dir(source.join(name)).unwrap();
+        create_test_file(&source.join(name).join("f.dat"), 10).unwrap();
+        let case = name.to_string_lossy().to_string();
+        // A partition filter that leaves the directory out does not save the run: the check
+        // covers every top-level directory, as the reserved-name check does.
+        for filter in [None, Some("alice")] {
+            let mut cmd = s3.write_command(&hermetic);
+            cmd.args(xdu_args(&source, &s3.url(WRITE_PREFIX), "2"));
+            if let Some(filter) = filter {
+                cmd.args(["-p", filter]);
+            }
+            let (out, err, ok) = run(&mut cmd);
+            assert!(!ok, "{case} ({filter:?}): xdu succeeded");
+            assert!(out.is_empty(), "{case}: {out}");
+            assert!(
+                err.contains(&format!("'{case}'"))
+                    && err.contains("cannot be a partition of an S3 index"),
+                "{case}: stderr does not name the directory: {err}"
+            );
+            assert_no_write(&s3, &case);
+            assert_eq!(
+                s3.snapshot(WRITE_PREFIX),
+                before,
+                "{case}: the index changed"
+            );
+        }
+    }
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_endpoint_and_credential_failures_leave_the_index_untouched() {
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 5)]);
+    let hermetic = Hermetic::new();
+    let write = |locator: &str| {
+        let mut cmd = s3.write_command(&hermetic);
+        cmd.args(xdu_args(&source, locator, "2"));
+        cmd
+    };
+
+    let mut cases: Vec<(&str, &str, Command)> = Vec::new();
+    let mut wrong = write(&s3.url(WRITE_PREFIX));
+    wrong.env("AWS_SECRET_ACCESS_KEY", WRONG_SECRET_KEY);
+    cases.push(("wrong secret", "refused the credentials", wrong));
+    let mut dead = write(&s3.url(WRITE_PREFIX));
+    dead.env("AWS_ENDPOINT_URL", "http://127.0.0.1:1");
+    cases.push(("unreachable endpoint", "cannot reach the S3 endpoint", dead));
+    cases.push((
+        "missing bucket",
+        "does not exist",
+        write(&format!("s3://no-such-bucket/{WRITE_PREFIX}")),
+    ));
+    let mut none = write(&s3.url(WRITE_PREFIX));
+    none.env_remove("AWS_ACCESS_KEY_ID")
+        .env_remove("AWS_SECRET_ACCESS_KEY");
+    cases.push(("no credentials", "no S3 credentials", none));
+
+    let needles: Vec<&str> = cases.iter().map(|(_, needle, _)| *needle).collect();
+    for (case, needle, mut cmd) in cases {
+        let started = std::time::Instant::now();
+        let (out, err, ok) = run(&mut cmd);
+        assert!(!ok, "{case}: xdu succeeded");
+        assert!(out.is_empty(), "{case}: {out}");
+        assert!(
+            err.contains(needle),
+            "{case}: stderr does not say '{needle}': {err}"
+        );
+        for other in needles.iter().filter(|n| **n != needle) {
+            assert!(
+                !err.contains(other),
+                "{case}: stderr also says '{other}': {err}"
+            );
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "{case}: took {:?} to fail",
+            started.elapsed()
+        );
+        assert_no_write(&s3, case);
+        assert_eq!(
+            s3.snapshot(WRITE_PREFIX),
+            before,
+            "{case}: the index changed"
+        );
+    }
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_read_only_credentials_leave_the_marker_in_place() {
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 5)]);
+    let hermetic = Hermetic::new();
+    let (out, err, ok) = run(s3
+        .write_command(&hermetic)
+        .env("AWS_ACCESS_KEY_ID", READ_ONLY_ACCESS_KEY)
+        .env("AWS_SECRET_ACCESS_KEY", READ_ONLY_SECRET_KEY)
+        .args(xdu_args(&source, &s3.url(WRITE_PREFIX), "2")));
+    assert!(!ok, "xdu succeeded with read-only credentials");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("refused the credentials while removing the completion marker"),
+        "{err}"
+    );
+
+    // The listing passed, so the identity reached the bucket; the marker DELETE was the first
+    // write, and it was refused with the marker still there.
+    let requests = s3.requests();
+    assert!(
+        is_list(&requests[0]) && requests[0].status == 200,
+        "{requests:#?}"
+    );
+    let writes: Vec<&ProxyRecord> = requests.iter().filter(|r| r.method != "GET").collect();
+    assert_eq!(writes.len(), 1, "{requests:#?}");
+    assert_eq!(writes[0].method, "DELETE");
+    assert_eq!(writes[0].key(), marker_key(WRITE_PREFIX));
+    assert_eq!(writes[0].status, 403);
+    assert_eq!(s3.snapshot(WRITE_PREFIX), before, "the index changed");
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_unreadable_subtree_fails_without_a_marker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let work = TempDir::new().unwrap();
+    let (s3, _) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 90), ("alice/locked", 3), ("bob", 10)]);
+    let locked = source.join("alice/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let hermetic = Hermetic::new();
+    let (out, err, ok) =
+        run(s3
+            .write_command(&hermetic)
+            .args(xdu_args(&source, &s3.url(WRITE_PREFIX), "1")));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!ok, "xdu succeeded over an unreadable subtree");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains(locked.to_str().unwrap()),
+        "the error names no path: {err}"
+    );
+    assert!(err.contains("unreadable path"), "{err}");
+    assert!(
+        !s3.keys(WRITE_PREFIX).contains(COMPLETION_MARKER),
+        "a failed run left a marker"
+    );
+    let requests = s3.requests();
+    let cleared = requests
+        .iter()
+        .position(|r| r.method == "DELETE" && r.key() == marker_key(WRITE_PREFIX))
+        .expect("the marker was never cleared");
+    assert!(
+        requests[cleared..]
+            .iter()
+            .any(|r| is_chunk_put(r) && r.status == 200),
+        "no chunk was sent before the run failed: {requests:#?}"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.method == "PUT" && r.key() == marker_key(WRITE_PREFIX)),
+        "the marker was written on a failing run"
+    );
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_refused_chunk_mid_run_writes_no_marker() {
+    let work = TempDir::new().unwrap();
+    let (s3, _) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    // With one driver the partitions go in order: __root__, alpha, the refused one, zulu.
+    small_tree(
+        &source,
+        &[
+            ("", 3),
+            ("alpha", 100),
+            (REFUSED_PARTITION, 10),
+            ("zulu", 10),
+        ],
+    );
+    let hermetic = Hermetic::new();
+    let (out, err, ok) =
+        run(s3
+            .write_command(&hermetic)
+            .args(xdu_args(&source, &s3.url(WRITE_PREFIX), "1")));
+    assert!(!ok, "xdu succeeded with a chunk refused");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("while writing chunk"), "{err}");
+    assert!(err.contains(REFUSED_PARTITION), "{err}");
+
+    let requests = s3.requests();
+    let refused = requests
+        .iter()
+        .position(|r| r.status == 403)
+        .expect("no request was refused");
+    assert!(is_chunk_put(&requests[refused]), "{requests:#?}");
+    let sent_before: Vec<String> = requests[..refused]
+        .iter()
+        .filter(|r| is_chunk_put(r) && r.status == 200)
+        .map(|r| r.key())
+        .collect();
+    assert!(
+        sent_before.iter().filter(|k| k.contains("/alpha/")).count() >= 3,
+        "alpha's chunks were not sent before the failure: {sent_before:?}"
+    );
+    assert!(
+        !requests.iter().any(|r| r.key().contains("/zulu/")),
+        "a partition queued behind the failure was written"
+    );
+    assert!(
+        !s3.keys(WRITE_PREFIX).contains(COMPLETION_MARKER),
+        "a failed run left a marker"
+    );
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_secret_reaches_no_argument_output_request_or_object() {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    small_tree(&source, &[("", 4), ("alice", 60)]);
+    let hermetic = Hermetic::new();
+
+    let mut good = s3.write_command(&hermetic);
+    good.args(xdu_args(&source, &s3.url(WRITE_PREFIX), "2"));
+    let mut refused = s3.write_command(&hermetic);
+    refused
+        .env("AWS_SECRET_ACCESS_KEY", WRONG_SECRET_KEY)
+        .args(xdu_args(&source, &s3.url("other"), "2"));
+    for (case, cmd, succeeds) in [
+        ("success", &mut good, true),
+        ("refusal", &mut refused, false),
+    ] {
+        let argv: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_no_secret(&format!("{case} argv"), &argv.join(" "));
+        // `run` asserts that stdout and stderr hold no secret.
+        let (_, err, ok) = run(cmd);
+        assert_eq!(ok, succeeds, "{case}: {err}");
+    }
+    for record in s3.requests() {
+        assert_no_secret("a request target", &record.target);
+    }
+    let objects = s3.snapshot(WRITE_PREFIX);
+    assert!(
+        objects.contains_key(COMPLETION_MARKER),
+        "{:?}",
+        objects.keys()
+    );
+    for (key, bytes) in &objects {
+        for secret in [SECRET_KEY, WRONG_SECRET_KEY] {
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "{key} holds a secret"
+            );
+        }
+    }
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_and_read_through_one_profile_in_the_shared_files() {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    // Wide names, one chunk: the read back must not cover a whole chunk.
+    wide_source_tree(&source, "alice", ROWS);
+    let hermetic = Hermetic::new();
+    write_aws_files(
+        &hermetic,
+        &format!(
+            "[default]\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {WRONG_SECRET_KEY}\n\n\
+             [xdu-builder]\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {SECRET_KEY}\n"
+        ),
+        &format!(
+            "[profile xdu-builder]\nservices = xdu-local\n\n[services xdu-local]\ns3 =\n  endpoint_url = {}\n",
+            s3.proxy_url()
+        ),
+    );
+    // No AWS_* variable but the profile: the writer and the reader resolve the same identity
+    // and endpoint from the same files.
+    let (_, err, ok) = run(hermetic
+        .command("xdu")
+        .env("AWS_PROFILE", "xdu-builder")
+        .args(xdu_args_chunked(
+            &source,
+            &s3.url(WRITE_PREFIX),
+            "2",
+            "100000",
+        )));
+    assert!(ok, "the S3 build from the profile failed: {err}");
+    assert!(s3.keys(WRITE_PREFIX).contains(COMPLETION_MARKER));
+    let (out, err, ok) = run(hermetic
+        .command("xdu-find")
+        .env("AWS_PROFILE", "xdu-builder")
+        .env("XDU_EXTENSION_DIR", s3.extension_dir())
+        .args(["-i", &s3.url(WRITE_PREFIX), "--count"]));
+    assert!(ok, "xdu-find from the profile failed: {err}");
+    assert_eq!(out.trim(), ROWS.to_string());
+    assert!(!s3.requests().is_empty(), "nothing went through the proxy");
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn write_absent_prefix_or_bucket_root_starts_a_new_index() {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    small_tree(&source, &[("", 2), ("alice", 3)]);
+    let hermetic = Hermetic::new();
+    let expected: BTreeSet<String> = [
+        COMPLETION_MARKER,
+        "__root__/000000.parquet",
+        "alice/000000.parquet",
+    ]
+    .iter()
+    .map(|k| k.to_string())
+    .collect();
+
+    // A prefix holding nothing yet, several levels deep.
+    let (_, err, ok) =
+        run(s3
+            .write_command(&hermetic)
+            .args(xdu_args(&source, &s3.url("fresh/deep/idx"), "2")));
+    assert!(ok, "a build into an absent prefix failed: {err}");
+    assert_eq!(s3.keys("fresh/deep/idx"), expected);
+
+    // The bucket's root, with and without the trailing slash.
+    for locator in [format!("s3://{BUCKET}"), format!("s3://{BUCKET}/")] {
+        let (_, err, ok) = run(s3
+            .write_command(&hermetic)
+            .args(xdu_args(&source, &locator, "2")));
+        assert!(ok, "a build into {locator} failed: {err}");
+    }
+    let root: BTreeSet<String> = s3
+        .keys("")
+        .into_iter()
+        .filter(|k| !k.starts_with("fresh/"))
+        .collect();
+    assert_eq!(root, expected);
+    hermetic.assert_left_empty();
+    s3.assert_proxy_clean();
 }

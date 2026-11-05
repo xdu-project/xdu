@@ -42,12 +42,19 @@ subsystems.
   cycle added `uid`/`gid`/`mode` (plus `mtime`/`ctime`) and bumped the version alongside,
   as required.
 
-## 2. Atomic finalization (`src/crawl.rs::PartitionBuffer::finalize`)
+## 2. Atomic finalization (`src/crawl.rs::PartitionBuffer::finalize`, through `IndexSink`)
 
-- Write each chunk to `NNNNNN.parquet.partial`, then `fs::rename` to `.parquet` **within the same
-  directory** (POSIX-atomic); prune stale higher-numbered `.parquet` chunks left by a prior larger run.
+- Locally (`crawl::LocalSink`): write each chunk to `NNNNNN.parquet.partial`, then `fs::rename` to
+  `.parquet` **within the same directory** (POSIX-atomic); prune stale higher-numbered `.parquet`
+  chunks left by a prior larger run, stopping at the first gap.
 - Never `File::create` a final `.parquet`, never cross-directory rename (breaks atomicity), never let
   a reader glob `.partial`.
+- Into S3 (`s3::S3Sink`): an object store has no rename, so each chunk is **one PUT at its final
+  key** `<prefix>/<partition>/NNNNNN.parquet`, sent as it is encoded. A single PUT is
+  all-or-nothing, so no reader sees part of a chunk. Finalize is a LIST of the partition and a
+  DELETE of **every** higher-numbered chunk, past gaps (only a foreign edit makes a gap, and a
+  re-run must leave no stale chunk). Nothing of the index is written to local disk on this path:
+  no `.partial`, no staging, no cache.
 - **Known limitation:** finalize is per-file, **not** per-partition atomic — a reader during finalize
   can see a mix of new and old chunks, and a crash mid-finalize leaves the partition inconsistent. Do
   **not** index a partition concurrently with purging it; document this rather than pretending
@@ -65,6 +72,11 @@ ordering is load-bearing:
   never written over the marker either. Both directions, or the outdir can be bricked.
 - **Cleared after pre-flight passes**, before any driver writes — so a run rejected without touching the
   index leaves an existing marker intact, while a crash mid-crawl leaves the index visibly unattested.
+  For an `s3://` output the pre-flight also holds one LIST of the prefix (reachable endpoint,
+  accepted credentials, existing bucket; an absent or empty prefix is a new index) and the refusal
+  of every top-level name that would not survive as a key and a glob
+  (`IndexSink::check_top_level`).
+  The marker DELETE is then the first write, so read-only credentials fail with the marker intact.
   **Written only on the success path**, after every partition finalized. Never write it on a failure
   path, and never move the clear earlier than the last check that can still reject the run.
 - Body is `key=value` lines (`xdu`, `completed_at`, `files`, `bytes`, `vanished`, `errors`,
@@ -174,7 +186,9 @@ ordering is load-bearing:
   `std::thread`s pull partitions from a `Mutex<VecDeque>` work queue; rayon work-stealing balances
   directory reads across active walkers so one huge partition can't starve the rest.
 - `std::thread::scope` joins the drivers; the first `Err`/panic surfaces as the process result
-  (non-zero exit). Thread budget: N pool + C drivers + 1 main. Preserve this shape.
+  (non-zero exit). Thread budget: N pool + C drivers + 1 main, plus 2 tokio workers when the output
+  is `s3://`: `S3Sink` owns that runtime, driver threads `block_on` it for each request, and rayon
+  workers never touch it. Preserve this shape.
 
 ## 8. Symlinks excluded
 

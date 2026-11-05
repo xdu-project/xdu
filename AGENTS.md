@@ -278,7 +278,8 @@ same is true of every `*XDU_INDEX*` / `*XDU_JOBS*` / `*XDU_EXTENSION_DIR*`: each
 its page, once as a cross-reference (in the flag description, or for `*XDU_EXTENSION_DIR*` in
 `xdu-find.1`'s `S3 INDICES` section) and once as the `ENVIRONMENT` entry, so corrupting only the
 `ENVIRONMENT` entry publishes a variable name that does not exist while a presence check stays green.
-All of them are counted for that reason, and so are the `AWS_*` names on the pages that list them. **Whether a literal is duplicated is a fact about the page,
+All of them are counted for that reason, and so are the `AWS_*` names on the pages that list them
+and `xdu.1`'s two `s3://BUCKET/PREFIX` (under `-o` and in `S3 OUTPUT`). **Whether a literal is duplicated is a fact about the page,
 not about the literal** — adding one cross-reference to a `.scd` can duplicate a previously-unique
 literal — so re-count when you edit a `.scd` that carries an asserted literal; nothing re-derives it
 for you. A new page is not covered at all: the `check` list names four pages while the render step
@@ -300,12 +301,16 @@ src/
                  # gen-completions + man pages describe exactly this
   crawl.rs       # index-build hot path lifted out of the bin so it is unit-testable: work-queue
                  # construction (incl. the __root__ collision rejection), per-file record building,
-                 # PartitionBuffer + atomic finalize, completion-marker read/write. Only the crawler
+                 # PartitionBuffer + IndexSink/LocalSink (atomic finalize), completion-marker
+                 # read/write. Only the crawler
                  # uses it; the reader tools never do. The concurrency scaffold stays in bin/xdu.rs.
   engine.rs      # the ONLY place a DuckDB connection is opened: open_connection() turns extension
                  # autoinstall + autoload off; PINNED_EXTENSIONS (the shipped set), extension_dir()
                  # (XDU_EXTENSION_DIR, else <canonical exe>/../../lib/xdu/extensions) and
                  # load_extension() (load by absolute path, or fail naming it; never download)
+  s3.rs          # IndexLocator (classified on the OsStr), the ONE credential resolver (S3Settings)
+                 # both directions use, and S3Sink: the crawler's S3 destination (object_store on
+                 # ring, PUT/LIST/DELETE, partition-name refusal)
   bin/xdu.rs     # indexer: shared-rayon-pool concurrent walk, driver threads, thread::scope error
                  # propagation, progress — the scaffold around lib::crawl
   bin/xdu-find.rs   # DuckDB query CLI
@@ -400,10 +405,15 @@ xdu-find / xdu-view / xdu-rm ◀── warn if absent/errors ┘  ◀── Duck
   jwalk walkers; up to `--jobs` driver `std::thread`s pull partitions from a `Mutex<VecDeque>` work
   queue; rayon work-stealing balances directory reads across all active walkers so one huge partition
   can't starve the rest. `std::thread::scope` joins the drivers; the first `Err`/panic fails the run.
-  Thread budget: N pool + C drivers + 1 main.
-- **Atomic writes:** each chunk is written to `NNNNNN.parquet.partial`, then `fs::rename`d to
-  `.parquet` in `finalize()` (atomic within a dir on POSIX); stale higher-numbered chunks from a prior
-  larger run are pruned. This is **per-file** atomic, **not** per-partition atomic — see invariants.
+  Thread budget: N pool + C drivers + 1 main, plus, for an `s3://` output, the 2 worker threads of
+  `S3Sink`'s private tokio runtime, which driver threads `block_on` and rayon workers never touch.
+- **Atomic writes:** every write goes through `crawl::IndexSink`. Locally (`LocalSink`) each chunk
+  is written to `NNNNNN.parquet.partial`, then `fs::rename`d to `.parquet` in `finalize()` (atomic
+  within a dir on POSIX); stale higher-numbered chunks from a prior larger run are pruned up to the
+  first gap. Into S3 (`s3::S3Sink`) each chunk is **one PUT at its final key** as it is encoded (a
+  single PUT is all-or-nothing, and nothing is staged on local disk), and finalize is a LIST of the
+  partition and a DELETE of **every** higher-numbered chunk, past gaps. Either way this is
+  **per-file** atomic, **not** per-partition atomic — see invariants.
 - **Query:** `xdu-find`/`xdu-view`/`xdu-rm` open an in-memory DuckDB, glob the index, and apply a
   `QueryFilters` WHERE clause. `xdu-view` is a read-only TUI; `xdu-rm` unlinks the matched files.
 
@@ -442,11 +452,15 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    change that must bump the version in the same commit (issues #2/#3 — owner/group/perms — are
    exactly this).
 2. **Atomic finalization.** Write `NNNNNN.parquet.partial` → `fs::rename` (same dir) → prune stale
-   higher chunks (`crawl.rs::PartitionBuffer::finalize()`). Never `File::create` a final `.parquet`,
-   never cross-dir rename, never let a reader glob `.partial`. **Known limitation:** finalize is
+   higher chunks (`crawl.rs::LocalSink`, driven by `PartitionBuffer::finalize()`). Never
+   `File::create` a final `.parquet`, never cross-dir rename, never let a reader glob `.partial`. An
+   `s3://` output (`s3.rs::S3Sink`) has no rename: each chunk is one PUT at its final key, and
+   finalize is a LIST plus a DELETE of every higher id, past gaps. **Known limitation:** finalize is
    per-file, not per-partition atomic — do not index a partition while purging it. Run-level
    completeness is a *separate* mechanism: the `.xdu-complete` marker (see Architecture), cleared after
-   pre-flight and written only on success. Never write it on a failure path.
+   pre-flight and written only on success. Never write it on a failure path. Over S3 the pre-flight
+   ends with one LIST of the prefix and every partition-name refusal, so the marker DELETE is the
+   run's first write.
 3. **Partition scheme.** `<index>/<partition>/NNNNNN.parquet`; `__root__` reserved for loose
    top-level files (depth-1 walk); zero-padded sequential chunk ids; readers glob `*/*.parquet`. The
    index root's namespace is a **class, not two facts**: it holds partition directories plus the
@@ -504,8 +518,9 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list that guards both.
 - **`src/engine.rs`** — the one place a DuckDB connection opens (autoload and autoinstall off), and
   `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5).
-- **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning; the
-  reserved-index-name collision rejection in `build_work_queue`; completion-marker write/clear ordering.
+- **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning (through
+  `IndexSink`; `LocalSink` is the local protocol); the reserved-index-name collision rejection in
+  `build_work_queue`; completion-marker write/clear ordering.
 - **`src/bin/xdu.rs`** — the shared-pool concurrency model (driver threads, `thread::scope` error
   propagation); marker clear-after-pre-flight / write-on-success sequencing.
 - **`src/bin/xdu-view.rs`** — terminal restore on panic; multibyte-safe truncation; empty-list

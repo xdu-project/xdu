@@ -92,3 +92,20 @@ is skipped by the parser):
   one-line single-quoted `verify:`), or have `xdu-plan` generate the frontmatter through the script
   so both steps share one serializer.
 - **Confidence:** high · **Effort:** small
+
+## F5 — An "is it absent" gate reads cargo's exit status, so any cargo failure passes it
+`origin=xdu-build:P3 severity=high category=template status=open target=.agents/skills/xdu-plan/SKILL.md`
+- **What happened:** P3's dependency-floor gate is `if cargo tree --locked -e normal -i $c
+  >/dev/null 2>&1; then …exit 1; fi`, so any non-zero exit counts as "absent". Run with the
+  registry unreachable (a sandbox denial of `static.crates.io` here), the same probe exited
+  non-zero for a reason other than absence and printed "absent" for all three crates. It also
+  checks the host target only: on macOS a dependency gated to Linux (native-tls pulls
+  `openssl-sys` only off Apple targets) is invisible to it.
+- **Skill cause:** The planning and build guidance says "see the gate fail once" but gives no rule
+  for absence probes, where the failing direction is the green one; the plan wrote the probe in the
+  shape that cannot fail closed. Weakness in a gate that guards a binding floor is high severity.
+- **Recommended fix:** Absence probes must match the tool's own "not found" text (`did not match
+  any packages`) and fail on any other non-zero exit, and a dependency probe names `--target all`
+  (or each release target). Add that rule to the gate-writing guidance and retune P3's `verify:`
+  through `set_phase.py --verify-file` at the foreman's word.
+- **Confidence:** high · **Effort:** small
