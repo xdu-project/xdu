@@ -27,7 +27,14 @@ use std::time::Duration;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use s3s::auth::SimpleAuth;
+use s3s::dto::{
+    DeleteObjectInput, DeleteObjectOutput, DeleteObjectsInput, DeleteObjectsOutput, EncodingType,
+    GetObjectInput, GetObjectOutput, HeadBucketInput, HeadBucketOutput, HeadObjectInput,
+    HeadObjectOutput, ListBucketsInput, ListBucketsOutput, ListObjectsInput, ListObjectsOutput,
+    ListObjectsV2Input, ListObjectsV2Output, PutObjectInput, PutObjectOutput,
+};
 use s3s::service::S3ServiceBuilder;
+use s3s::{S3, S3Request, S3Response, S3Result};
 use tempfile::TempDir;
 
 use xdu::s3::{EnvSource, S3Settings};
@@ -98,6 +105,122 @@ pub fn resolve_settings(endpoint_url: &str, secret: &str, token: Option<&str>) -
     S3Settings::resolve(&MapEnv::new(&vars)).expect("fixture settings resolve")
 }
 
+/// s3s-fs with ListObjectsV2's `encoding-type=url` honoured, and every other operation the
+/// tests use passed through unchanged.
+///
+/// Asked for `encoding-type=url`, s3s-fs echoes `EncodingType` but sends each key raw, so the
+/// XML escapes a `'` as `&apos;`. S3 percent-encodes the keys it lists when asked, and httpfs,
+/// which always asks, decodes percent escapes and not XML entities: without this a key holding
+/// `'` would list as a key that does not exist, on this endpoint only.
+struct UrlEncodedListing(s3s_fs::FileSystem);
+
+/// Percent-encode everything but unreserved characters and `/`, as S3 encodes a listed key.
+fn url_encode_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for byte in key.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~/".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+#[async_trait::async_trait]
+impl S3 for UrlEncodedListing {
+    async fn list_objects_v2(
+        &self,
+        req: S3Request<ListObjectsV2Input>,
+    ) -> S3Result<S3Response<ListObjectsV2Output>> {
+        let encode = req
+            .input
+            .encoding_type
+            .as_ref()
+            .is_some_and(|e| e.as_str() == EncodingType::URL);
+        let mut response = self.0.list_objects_v2(req).await?;
+        if encode {
+            let output = &mut response.output;
+            for field in [
+                &mut output.prefix,
+                &mut output.start_after,
+                &mut output.delimiter,
+            ] {
+                if let Some(value) = field.as_mut() {
+                    *value = url_encode_key(value);
+                }
+            }
+            for object in output.contents.iter_mut().flatten() {
+                if let Some(key) = object.key.as_mut() {
+                    *key = url_encode_key(key);
+                }
+            }
+            for common in output.common_prefixes.iter_mut().flatten() {
+                if let Some(prefix) = common.prefix.as_mut() {
+                    *prefix = url_encode_key(prefix);
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    async fn list_objects(
+        &self,
+        req: S3Request<ListObjectsInput>,
+    ) -> S3Result<S3Response<ListObjectsOutput>> {
+        self.0.list_objects(req).await
+    }
+
+    async fn list_buckets(
+        &self,
+        req: S3Request<ListBucketsInput>,
+    ) -> S3Result<S3Response<ListBucketsOutput>> {
+        self.0.list_buckets(req).await
+    }
+
+    async fn head_bucket(
+        &self,
+        req: S3Request<HeadBucketInput>,
+    ) -> S3Result<S3Response<HeadBucketOutput>> {
+        self.0.head_bucket(req).await
+    }
+
+    async fn head_object(
+        &self,
+        req: S3Request<HeadObjectInput>,
+    ) -> S3Result<S3Response<HeadObjectOutput>> {
+        self.0.head_object(req).await
+    }
+
+    async fn get_object(
+        &self,
+        req: S3Request<GetObjectInput>,
+    ) -> S3Result<S3Response<GetObjectOutput>> {
+        self.0.get_object(req).await
+    }
+
+    async fn put_object(
+        &self,
+        req: S3Request<PutObjectInput>,
+    ) -> S3Result<S3Response<PutObjectOutput>> {
+        self.0.put_object(req).await
+    }
+
+    async fn delete_object(
+        &self,
+        req: S3Request<DeleteObjectInput>,
+    ) -> S3Result<S3Response<DeleteObjectOutput>> {
+        self.0.delete_object(req).await
+    }
+
+    async fn delete_objects(
+        &self,
+        req: S3Request<DeleteObjectsInput>,
+    ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        self.0.delete_objects(req).await
+    }
+}
+
 /// A loopback S3 endpoint behind a counting proxy.
 pub struct TestS3 {
     proxy: CountingProxy,
@@ -126,7 +249,7 @@ impl TestS3 {
             .build()
             .expect("endpoint runtime");
         let filesystem = s3s_fs::FileSystem::new(root.path()).expect("s3s-fs root");
-        let mut builder = S3ServiceBuilder::new(filesystem);
+        let mut builder = S3ServiceBuilder::new(UrlEncodedListing(filesystem));
         builder.set_auth(SimpleAuth::from_single(ACCESS_KEY, SECRET_KEY));
         let service = builder.build();
         runtime.spawn(async move {
@@ -170,8 +293,24 @@ impl TestS3 {
         format!("s3://{BUCKET}/{key}")
     }
 
+    /// `xdu-find` in `hermetic`, reading through this endpoint's proxy with the accepted key
+    /// pair from the environment and the pinned `httpfs`. The caller adds `-i` and the query.
+    pub fn find_command(&self, hermetic: &Hermetic) -> Command {
+        let mut cmd = hermetic.command("xdu-find");
+        cmd.env("XDU_EXTENSION_DIR", self.extension_dir())
+            .env("AWS_ACCESS_KEY_ID", ACCESS_KEY)
+            .env("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
+            .env("AWS_ENDPOINT_URL", self.proxy_url());
+        cmd
+    }
+
     fn bucket_dir(&self) -> PathBuf {
         self.root.path().join(BUCKET)
+    }
+
+    /// The stored bytes of an object, read from the endpoint's root.
+    pub fn object(&self, key: &str) -> Vec<u8> {
+        fs::read(self.bucket_dir().join(key)).unwrap()
     }
 
     pub fn seed_object(&self, key: &str, bytes: &[u8]) {
@@ -636,17 +775,154 @@ pub fn wide_source_tree(root: &Path, partition: &str, files: usize) {
     fs::create_dir_all(&dir).unwrap();
     let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
     for _ in 0..files {
-        let mut name = String::with_capacity(200);
-        while name.len() < 200 {
-            // splitmix64: cheap, deterministic, and far from compressible.
-            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            z ^= z >> 31;
-            name.push_str(&format!("{z:016x}"));
-        }
-        name.truncate(200);
-        fs::write(dir.join(&name), b"x").unwrap();
+        fs::write(dir.join(hex_noise(&mut state, 200)), b"x").unwrap();
     }
+}
+
+/// `count` lowercase hex characters from a splitmix64 stream: cheap, deterministic, and far
+/// from compressible, so a column of them keeps its size on disk.
+pub fn hex_noise(state: &mut u64, count: usize) -> String {
+    let mut text = String::with_capacity(count + 16);
+    while text.len() < count {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        text.push_str(&format!("{z:016x}"));
+    }
+    text.truncate(count);
+    text
+}
+
+/// Set a file's access and modification times, in seconds since the epoch.
+pub fn set_times(file: &Path, atime: i64, mtime: i64) {
+    let c_path = std::ffi::CString::new(file.to_str().unwrap()).unwrap();
+    let times = [
+        libc::timespec {
+            tv_sec: atime as libc::time_t,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: mtime as libc::time_t,
+            tv_nsec: 0,
+        },
+    ];
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    assert_eq!(
+        rc,
+        0,
+        "utimensat {}: {}",
+        file.display(),
+        io::Error::last_os_error()
+    );
+}
+
+/// A source tree for comparing a local and an S3 query row for row.
+///
+/// Three partitions of different sizes (`alice` with nested directories, `bob`, and loose
+/// top-level files for `__root__`), so `--top` has no ties. Every file has its own size, atime
+/// and mtime, so each sort has one answer; the times sit half a step between whole days, so a
+/// day threshold computed seconds later by a second query cannot move a file across it. Names
+/// are long hex strings, so every chunk is far larger than the footer read DuckDB opens it
+/// with, and a third of them end in `.log`, the rest in `.txt`.
+pub fn varied_source_tree(root: &Path) {
+    const STEP: i64 = 8640;
+    let groups: [(&str, usize); 4] = [
+        ("alice/a", 400),
+        ("alice/b/c", 300),
+        ("bob", 450),
+        ("", 250),
+    ];
+    let total: usize = groups.iter().map(|(_, n)| n).sum();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mut state: u64 = 0x5eed_0000_0000_0001;
+    let mut i = 0usize;
+    for (dir, files) in groups {
+        let dir = root.join(dir);
+        fs::create_dir_all(&dir).unwrap();
+        for _ in 0..files {
+            let ext = if i.is_multiple_of(3) { "log" } else { "txt" };
+            let file = dir.join(format!("{}.{ext}", hex_noise(&mut state, 180)));
+            fs::write(&file, vec![b'x'; i + 1]).unwrap();
+            let j = (i * 7) % total;
+            set_times(
+                &file,
+                now - (i as i64 * STEP + STEP / 2),
+                now - (j as i64 * STEP + STEP / 2),
+            );
+            i += 1;
+        }
+    }
+}
+
+/// Write an index of `partitions` x `chunks` chunk files of `rows` rows each under `index`,
+/// encoded by xdu's own chunk encoder, plus a completion marker of the current format.
+///
+/// Paths are 200 hex characters of noise, so the path column dominates every chunk and does
+/// not compress away. Returns the total row count.
+pub fn encoded_index(index: &Path, partitions: &[&str], chunks: usize, rows: usize) -> u64 {
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    let mut state: u64 = 0x0b5e_55ed_0000_0002;
+    let mut total = 0u64;
+    for partition in partitions {
+        let dir = index.join(partition);
+        fs::create_dir_all(&dir).unwrap();
+        for chunk in 0..chunks {
+            let paths: Vec<String> = (0..rows)
+                .map(|_| format!("/src/{partition}/{}", hex_noise(&mut state, 200)))
+                .collect();
+            let ints = |base: i64| -> Arc<Int64Array> {
+                Arc::new(Int64Array::from_iter_values(
+                    (0..rows as i64).map(|r| base + r),
+                ))
+            };
+            let batch = RecordBatch::try_new(
+                xdu::get_schema(),
+                vec![
+                    Arc::new(StringArray::from(paths)),
+                    ints(1),
+                    Arc::new(Int64Array::from_value(1000, rows)),
+                    Arc::new(Int64Array::from_value(1000, rows)),
+                    Arc::new(Int64Array::from_value(0o644, rows)),
+                    ints(1_700_000_000),
+                    ints(1_690_000_000),
+                    ints(1_680_000_000),
+                ],
+            )
+            .unwrap();
+            let file = fs::File::create(dir.join(xdu::crawl::chunk_final_name(chunk))).unwrap();
+            xdu::crawl::encode_chunk(file, &batch).unwrap();
+            total += rows as u64;
+        }
+    }
+    let stats = xdu::crawl::CrawlStats {
+        files: total,
+        ..Default::default()
+    };
+    fs::write(
+        index.join(xdu::COMPLETION_MARKER),
+        xdu::crawl::completion_marker_contents(&stats, 1_700_000_000),
+    )
+    .unwrap();
+    total
+}
+
+/// A completion marker body of the current format, padded with an unread key to exactly
+/// `len` bytes.
+pub fn padded_marker(len: usize) -> Vec<u8> {
+    let mut body =
+        xdu::crawl::completion_marker_contents(&xdu::crawl::CrawlStats::default(), 1_700_000_000);
+    let pad = len
+        .checked_sub(body.len() + "pad=\n".len())
+        .expect("the marker is longer than the requested length");
+    body.push_str(&format!("pad={}\n", "x".repeat(pad)));
+    assert_eq!(body.len(), len);
+    body.into_bytes()
 }

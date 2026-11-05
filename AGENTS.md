@@ -274,10 +274,11 @@ been green in CI. The normalization now lives in three places that must change t
 **Presence is the wrong question for a literal that appears twice.** `grep -q` is satisfied by
 whichever copy survived, so corrupting exactly one of `doc/xdu.1.scd`'s two `.partial suffix`
 occurrences is invisible to it — which is why CI counts that one (`2x:.partial suffix`) instead. The
-same is true of every `*XDU_INDEX*` / `*XDU_JOBS*`: each appears twice on its page, once as a
-cross-reference in the flag description and once as the `ENVIRONMENT` entry, so corrupting only the
+same is true of every `*XDU_INDEX*` / `*XDU_JOBS*` / `*XDU_EXTENSION_DIR*`: each appears twice on
+its page, once as a cross-reference (in the flag description, or for `*XDU_EXTENSION_DIR*` in
+`xdu-find.1`'s `S3 INDICES` section) and once as the `ENVIRONMENT` entry, so corrupting only the
 `ENVIRONMENT` entry publishes a variable name that does not exist while a presence check stays green.
-All of them are counted for that reason. **Whether a literal is duplicated is a fact about the page,
+All of them are counted for that reason, and so are the `AWS_*` names on the pages that list them. **Whether a literal is duplicated is a fact about the page,
 not about the literal** — adding one cross-reference to a `.scd` can duplicate a previously-unique
 literal — so re-count when you edit a `.scd` that carries an asserted literal; nothing re-derives it
 for you. A new page is not covered at all: the `check` list names four pages while the render step
@@ -460,7 +461,12 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    `ORDER BY`** so `--dry-run` and the real run select identical rows.
 5. **DuckDB injection surface.** Every user value reaching `read_parquet(...)`/`WHERE` is an
    injection surface. Route it through one validated escaping/quoting helper (or bound parameters);
-   never raw `format!` a partition name or index path into SQL. The extension path is one too:
+   never raw `format!` a partition name or index path into SQL. For an `s3://` index the readers
+   go through `lib::parquet_source`, which binds the whole glob (bucket, prefix and any `-u`
+   partition) as the statement's one parameter, and the marker read binds its URLs too; a local
+   index keeps the raw-`format!` glob, a known exception filed as a follow-up. Credentials reach
+   DuckDB only as the bound values of `engine::open_s3_connection`'s one prepared `CREATE SECRET`,
+   never as SQL text. The extension path is one too:
    `engine::load_extension_from` puts the extension file's absolute path, from `XDU_EXTENSION_DIR`
    or the canonical exe's `../../lib/xdu/extensions`, into `LOAD '<path>'`, and refuses a path
    containing `'` or not valid UTF-8 before any SQL runs. The unit tests

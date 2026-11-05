@@ -15,6 +15,9 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::Command;
 
 use duckdb::Connection;
 use tempfile::TempDir;
@@ -22,10 +25,12 @@ use tempfile::TempDir;
 use common::build_index;
 use common::create_test_file;
 use common::s3::{
-    ACCESS_KEY, EXTENSION_DIR_VAR, Hermetic, SECRET_KEY, SESSION_TOKEN, TestS3, WRONG_SECRET_KEY,
-    assert_no_secret, output_of, resolve_settings, test_extension_dir, wide_source_tree,
+    ACCESS_KEY, BUCKET, EXTENSION_DIR_VAR, Hermetic, SECRET_KEY, SESSION_TOKEN, TestS3,
+    WRONG_SECRET_KEY, assert_no_secret, encoded_index, output_of, padded_marker, resolve_settings,
+    test_extension_dir, varied_source_tree, wide_source_tree,
 };
 use xdu::engine::open_s3_connection_from;
+use xdu::{COMPLETION_MARKER, MARKER_READ_LIMIT};
 
 /// Where the seeded index lives in the bucket.
 const PREFIX: &str = "idx";
@@ -359,4 +364,627 @@ fn local_tools_ignore_a_garbage_httpfs() {
         "a dry run deleted a file"
     );
     hermetic.assert_left_empty();
+}
+
+// =============================================================================
+// xdu-find over an s3:// index
+// =============================================================================
+
+/// Run a child, asserting that neither secret nor the session token reached its output.
+fn run(cmd: &mut Command) -> (String, String, bool) {
+    let (out, err, ok) = output_of(cmd);
+    assert_no_secret("stdout", &out);
+    assert_no_secret("stderr", &err);
+    (out, err, ok)
+}
+
+/// The proxy and the child's private directories after a test: every request in this bucket,
+/// one per connection, no chunk fetched whole, and nothing written under `HOME`, `TMPDIR` or
+/// the working directory.
+fn assert_clean(s3: &TestS3, hermetic: &Hermetic) {
+    s3.assert_no_whole_parquet_get();
+    s3.assert_proxy_clean();
+    hermetic.assert_left_empty();
+}
+
+/// A local index built by `xdu` from `varied_source_tree`, and the same files in a bucket.
+struct Parity {
+    s3: TestS3,
+    hermetic: Hermetic,
+    index: PathBuf,
+    locator: String,
+    _work: TempDir,
+}
+
+impl Parity {
+    fn new(prefix: &str) -> Parity {
+        let s3 = TestS3::start();
+        let work = TempDir::new().unwrap();
+        let source = work.path().join("source");
+        let index = work.path().join("index");
+        varied_source_tree(&source);
+        build_index(&source, &index);
+        s3.seed_index(&index, prefix);
+        Parity {
+            locator: s3.url(prefix),
+            s3,
+            hermetic: Hermetic::new(),
+            index,
+            _work: work,
+        }
+    }
+
+    fn local(&self, args: &[&str]) -> (String, String, bool) {
+        run(self
+            .hermetic
+            .command("xdu-find")
+            .arg("-i")
+            .arg(&self.index)
+            .args(args))
+    }
+
+    fn remote(&self, args: &[&str]) -> (String, String, bool) {
+        run(self
+            .s3
+            .find_command(&self.hermetic)
+            .args(["-i", &self.locator])
+            .args(args))
+    }
+
+    /// The S3 run prints exactly what the local run prints, and that is not nothing.
+    fn assert_same(&self, args: &[&str]) {
+        let (local, local_err, ok) = self.local(args);
+        assert!(ok, "local xdu-find {args:?} failed: {local_err}");
+        assert!(
+            !local.trim().is_empty(),
+            "local xdu-find {args:?} printed nothing"
+        );
+        let (remote, remote_err, ok) = self.remote(args);
+        assert!(ok, "S3 xdu-find {args:?} failed: {remote_err}");
+        assert!(
+            local == remote,
+            "S3 output differs from local for {args:?}:\n--- local\n{local}\n--- S3\n{remote}"
+        );
+    }
+
+    fn finish(&self) {
+        let chunks: BTreeSet<String> = self
+            .s3
+            .parquet_sizes(self.locator.trim_start_matches(&format!("s3://{BUCKET}/")))
+            .into_keys()
+            .collect();
+        assert!(!chunks.is_empty(), "the bucket holds no chunk");
+        let fetched = range_fetched_keys(&self.s3);
+        assert!(
+            fetched.is_subset(&chunks) && !fetched.is_empty(),
+            "range-fetched {fetched:?}, stored {chunks:?}"
+        );
+        assert_clean(&self.s3, &self.hermetic);
+    }
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_default_listing_count_and_top_match_local() {
+    let parity = Parity::new(PREFIX);
+    for args in [
+        &[][..],
+        &["--count"],
+        &["--top", "2"],
+        &["--top", "10"],
+        &["-l", "7"],
+    ] {
+        parity.assert_same(args);
+    }
+    let (count, _, _) = parity.remote(&["--count"]);
+    assert_eq!(count.trim(), "1400");
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_sorted_formats_match_local() {
+    let parity = Parity::new(PREFIX);
+    for args in [
+        &["-f", "size"][..],
+        &["-f", "atime"],
+        &["-f", "size", "-l", "25"],
+        &["-f", "atime", "-l", "25"],
+    ] {
+        parity.assert_same(args);
+    }
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_partition_scoping_matches_local() {
+    let parity = Parity::new(PREFIX);
+    // Scoping reaches the bound glob: a count over one partition reads that partition's
+    // chunk and no other.
+    let (out, err, ok) = parity.remote(&["-u", "bob", "--count"]);
+    assert!(ok, "xdu-find -u bob failed: {err}");
+    assert_eq!(out.trim(), "450");
+    assert_eq!(
+        range_fetched_keys(&parity.s3),
+        BTreeSet::from([format!("{PREFIX}/bob/000000.parquet")])
+    );
+    for args in [
+        &["-u", "alice"][..],
+        &["-u", "__root__"],
+        &["-u", "bob", "--count"],
+        &["-u", "__root__", "-f", "size"],
+        &["-u", "alice", "--top", "5"],
+    ] {
+        parity.assert_same(args);
+    }
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_filters_match_local() {
+    let parity = Parity::new(PREFIX);
+    for args in [
+        &["--min-size", "1K"][..],
+        &["--max-size", "100"],
+        &["--older-than", "30"],
+        &["--newer-than", "10"],
+        &["--mtime-older-than", "50"],
+        &["--mtime-newer-than", "20"],
+        &["-p", "*.log"],
+        &["--regex", "-p", "\\.txt$"],
+        &[
+            "-u",
+            "alice",
+            "--max-size",
+            "600",
+            "-p",
+            "*.log",
+            "-f",
+            "size",
+        ],
+        &["--min-size", "500", "-p", "*.log", "-f", "size"],
+        &["--older-than", "30", "--max-size", "1200", "--count"],
+    ] {
+        parity.assert_same(args);
+    }
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_csv_and_json_match_local() {
+    let parity = Parity::new(PREFIX);
+    for args in [
+        &["-f", "csv"][..],
+        &["-f", "json"],
+        &["-f", "csv", "-u", "bob"],
+        &["-f", "json", "-p", "*.log", "-l", "10"],
+    ] {
+        parity.assert_same(args);
+    }
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_index_from_xdu_index_matches_local() {
+    let parity = Parity::new(PREFIX);
+    for args in [&["--count"][..], &["-f", "size", "-l", "5"]] {
+        let (local, err, ok) = parity.local(args);
+        assert!(ok, "local xdu-find failed: {err}");
+        let (remote, err, ok) = run(parity
+            .s3
+            .find_command(&parity.hermetic)
+            .env("XDU_INDEX", &parity.locator)
+            .args(args));
+        assert!(
+            ok,
+            "xdu-find with XDU_INDEX={} failed: {err}",
+            parity.locator
+        );
+        assert!(!local.trim().is_empty());
+        assert_eq!(local, remote, "{args:?}");
+    }
+    parity.finish();
+}
+
+/// Where the cost fixture lives, and its shape: about 16 MiB in 8 chunks over 4 partitions.
+const COST_PREFIX: &str = "cost";
+const COST_PARTITIONS: &[&str] = &["__root__", "alice", "bob", "carol"];
+const COST_CHUNKS: usize = 2;
+const COST_ROWS: usize = 9500;
+
+/// A bucket holding the cost fixture, checked against the floor the cost bound is stated on.
+fn cost_fixture() -> (TestS3, TempDir, u64, u64) {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let index = work.path().join("index");
+    let rows = encoded_index(&index, COST_PARTITIONS, COST_CHUNKS, COST_ROWS);
+    s3.seed_index(&index, COST_PREFIX);
+
+    let sizes = s3.parquet_sizes(COST_PREFIX);
+    let stored: u64 = sizes.values().sum();
+    let partitions: BTreeSet<&str> = sizes.keys().map(|k| k.split('/').nth(1).unwrap()).collect();
+    assert!(stored >= 10 << 20, "the fixture holds only {stored} bytes");
+    assert!(partitions.len() >= 4, "the fixture spans {partitions:?}");
+    assert!(
+        sizes.len() <= 12,
+        "the fixture holds {} chunks",
+        sizes.len()
+    );
+    (s3, work, rows, stored)
+}
+
+/// Every byte the proxy sent back, and a one-line account of the requests.
+fn traffic(s3: &TestS3) -> (u64, String) {
+    let records = s3.requests();
+    let received: u64 = records.iter().map(|r| r.bytes_to_client).sum();
+    let lists = records
+        .iter()
+        .filter(|r| r.target.contains("list-type="))
+        .count();
+    let heads = records.iter().filter(|r| r.method == "HEAD").count();
+    let gets = records
+        .iter()
+        .filter(|r| r.method == "GET" && !r.target.contains("list-type="))
+        .count();
+    (
+        received,
+        format!(
+            "{} requests: LIST {lists}, HEAD {heads}, GET {gets}",
+            records.len()
+        ),
+    )
+}
+
+/// Print a measurement past libtest's capture, so CI's log of a passing run keeps it.
+fn record(line: &str) {
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "{line}").unwrap();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_count_receives_under_five_percent_of_stored_bytes() {
+    let (s3, work, rows, stored) = cost_fixture();
+    let hermetic = Hermetic::new();
+
+    let (local, err, ok) = run(hermetic
+        .command("xdu-find")
+        .arg("-i")
+        .arg(work.path().join("index"))
+        .arg("--count"));
+    assert!(ok, "local xdu-find failed: {err}");
+    let (out, err, ok) =
+        run(s3
+            .find_command(&hermetic)
+            .args(["-i", &s3.url(COST_PREFIX), "--count"]));
+    assert!(ok, "xdu-find --count failed: {err}");
+    assert_eq!(out.trim(), rows.to_string());
+    assert_eq!(out, local);
+
+    // Every chunk was read, and only by bounded ranges.
+    let chunks: BTreeSet<String> = s3.parquet_sizes(COST_PREFIX).into_keys().collect();
+    assert_eq!(range_fetched_keys(&s3), chunks);
+    let (received, account) = traffic(&s3);
+    let percent = received as f64 * 100.0 / stored as f64;
+    record(&format!(
+        "s3-count-bytes: received {received} of {stored} stored bytes ({percent:.3}%), {account}"
+    ));
+    assert!(
+        received * 20 < stored,
+        "--count received {received} bytes of {stored} stored ({percent:.3}%), not under 5%"
+    );
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_unmatched_pattern_scan_receives_over_a_quarter_of_stored_bytes() {
+    // The meter's negative control: a pattern no path matches makes the binary read the whole
+    // path column, so a meter that saw only footers, or nothing, fails here.
+    let (s3, _work, _rows, stored) = cost_fixture();
+    let hermetic = Hermetic::new();
+    let (out, err, ok) = run(s3.find_command(&hermetic).args([
+        "-i",
+        &s3.url(COST_PREFIX),
+        "-p",
+        "*no-such-path-anywhere*",
+        "--count",
+    ]));
+    assert!(ok, "xdu-find failed: {err}");
+    assert_eq!(out.trim(), "0");
+
+    let (received, account) = traffic(&s3);
+    let percent = received as f64 * 100.0 / stored as f64;
+    record(&format!(
+        "s3-scan-bytes: received {received} of {stored} stored bytes ({percent:.3}%), {account}"
+    ));
+    assert!(
+        received * 4 > stored,
+        "a full path scan received only {received} bytes of {stored} ({percent:.3}%)"
+    );
+    assert_clean(&s3, &hermetic);
+}
+
+/// The requests the proxy saw for one key, by method.
+fn requests_for(s3: &TestS3, key: &str, method: &str) -> usize {
+    s3.requests()
+        .iter()
+        .filter(|r| r.method == method && r.key() == key)
+        .count()
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_marker_at_the_size_cap_is_read() {
+    let (s3, _work) = seeded();
+    let marker_key = format!("{PREFIX}/{COMPLETION_MARKER}");
+    s3.seed_object(&marker_key, &padded_marker(MARKER_READ_LIMIT as usize));
+    let hermetic = Hermetic::new();
+
+    let (out, err, ok) = run(s3
+        .find_command(&hermetic)
+        .args(["-i", &s3.url(PREFIX), "--count"]));
+    assert!(ok, "a marker of exactly the cap was refused: {err}");
+    assert_eq!(out.trim(), ROWS.to_string());
+    let gets: Vec<_> = s3
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "GET" && r.key() == marker_key)
+        .collect();
+    assert_eq!(gets.len(), 1, "expected one GET of the marker: {gets:?}");
+    assert_eq!(
+        gets[0].bounded_range(),
+        Some((0, MARKER_READ_LIMIT - 1)),
+        "{gets:?}"
+    );
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_marker_over_the_size_cap_is_refused_unfetched() {
+    let (s3, _work) = seeded();
+    let marker_key = format!("{PREFIX}/{COMPLETION_MARKER}");
+    s3.seed_object(&marker_key, &padded_marker(MARKER_READ_LIMIT as usize + 1));
+    let hermetic = Hermetic::new();
+
+    let (out, err, ok) = run(s3
+        .find_command(&hermetic)
+        .args(["-i", &s3.url(PREFIX), "--count"]));
+    assert!(!ok, "a marker over the cap was accepted: {out}");
+    assert!(out.is_empty(), "rows printed past an unread marker: {out}");
+    assert!(
+        err.contains(&MARKER_READ_LIMIT.to_string()),
+        "the refusal does not name the cap: {err}"
+    );
+    assert!(
+        requests_for(&s3, &marker_key, "HEAD") >= 1,
+        "the marker's size was not asked for: {:#?}",
+        s3.requests()
+    );
+    assert_eq!(
+        requests_for(&s3, &marker_key, "GET"),
+        0,
+        "the oversized marker was fetched: {:#?}",
+        s3.requests()
+    );
+    assert!(
+        range_fetched_keys(&s3).is_empty(),
+        "a chunk was read past the refusal"
+    );
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_failures_name_distinct_causes_and_print_no_rows() {
+    let (s3, work) = seeded();
+    let index = work.path().join("index");
+    // The same chunks without a marker, and with a marker of a format this reader does not know.
+    for file in common::list_files_recursive(&index) {
+        let rel = file.strip_prefix(&index).unwrap().to_str().unwrap();
+        if rel != COMPLETION_MARKER {
+            s3.seed_object(&format!("nomarker/{rel}"), &fs::read(&file).unwrap());
+            s3.seed_object(&format!("future/{rel}"), &fs::read(&file).unwrap());
+        }
+    }
+    let marker = String::from_utf8(s3.object(&format!("{PREFIX}/{COMPLETION_MARKER}"))).unwrap();
+    assert!(marker.contains("format=2\n"), "{marker}");
+    s3.seed_object(
+        &format!("future/{COMPLETION_MARKER}"),
+        marker.replace("format=2\n", "format=99\n").as_bytes(),
+    );
+
+    let hermetic = Hermetic::new();
+    let find = |locator: &str| {
+        let mut cmd = s3.find_command(&hermetic);
+        cmd.args(["-i", locator, "--count"]);
+        cmd
+    };
+    let mut cases: Vec<(&str, &str, Command)> = Vec::new();
+    let mut dead = find(&s3.url(PREFIX));
+    dead.env("AWS_ENDPOINT_URL", "http://127.0.0.1:1");
+    cases.push(("unreachable endpoint", "cannot reach the S3 endpoint", dead));
+    let mut wrong = find(&s3.url(PREFIX));
+    wrong.env("AWS_SECRET_ACCESS_KEY", WRONG_SECRET_KEY);
+    cases.push(("wrong secret", "refused the credentials", wrong));
+    let mut none = find(&s3.url(PREFIX));
+    none.env_remove("AWS_ACCESS_KEY_ID")
+        .env_remove("AWS_SECRET_ACCESS_KEY");
+    cases.push(("no credentials", "no S3 credentials", none));
+    cases.push((
+        "missing bucket",
+        "does not exist",
+        find(&format!("s3://no-such-bucket/{PREFIX}")),
+    ));
+    cases.push((
+        "missing prefix",
+        "holds no objects",
+        find(&s3.url("missing")),
+    ));
+    cases.push((
+        "missing marker",
+        "carries no index format version",
+        find(&s3.url("nomarker")),
+    ));
+    cases.push((
+        "unknown format",
+        "index format version 99",
+        find(&s3.url("future")),
+    ));
+
+    let needles: Vec<&str> = cases.iter().map(|(_, needle, _)| *needle).collect();
+    for (case, needle, mut cmd) in cases {
+        let (out, err, ok) = run(&mut cmd);
+        assert!(!ok, "{case}: xdu-find succeeded");
+        assert!(out.is_empty(), "{case}: rows printed: {out}");
+        assert!(
+            err.contains(needle),
+            "{case}: stderr does not say '{needle}': {err}"
+        );
+        for other in needles.iter().filter(|n| **n != needle) {
+            assert!(
+                !err.contains(other),
+                "{case}: stderr also says '{other}', so the causes are not distinct: {err}"
+            );
+        }
+    }
+    assert!(
+        range_fetched_keys(&s3).is_empty(),
+        "a chunk was read in a failing case"
+    );
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_prefix_with_a_quote_matches_local() {
+    // A quote in the prefix would end a string literal in SQL text; bound, it is just a byte.
+    let parity = Parity::new("it's/idx");
+    for args in [
+        &[][..],
+        &["--count"],
+        &["-u", "alice", "-f", "size"],
+        &["--top", "3"],
+    ] {
+        parity.assert_same(args);
+    }
+    assert!(
+        parity
+            .s3
+            .requests()
+            .iter()
+            .any(|r| r.target.contains("prefix=it%27s%2Fidx%2F")),
+        "no listing of the quoted prefix reached the endpoint: {:#?}",
+        parity.s3.requests()
+    );
+    parity.finish();
+}
+
+/// Write the hermetic child's shared credentials and config files.
+fn write_aws_files(hermetic: &Hermetic, credentials: &str, config: &str) {
+    fs::write(hermetic.credentials_file(), credentials).unwrap();
+    fs::write(hermetic.config_file(), config).unwrap();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_credentials_from_a_profile_in_the_shared_files() {
+    let (s3, _work) = seeded();
+    let hermetic = Hermetic::new();
+    write_aws_files(
+        &hermetic,
+        &format!(
+            "[default]\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {WRONG_SECRET_KEY}\n\n\
+             [xdu-reader]\naws_access_key_id = {ACCESS_KEY}\naws_secret_access_key = {SECRET_KEY}\n"
+        ),
+        "[profile xdu-reader]\nregion = us-east-1\n",
+    );
+    let profile_find = |profile: Option<&str>| {
+        let mut cmd = hermetic.command("xdu-find");
+        cmd.env("XDU_EXTENSION_DIR", s3.extension_dir())
+            .env("AWS_ENDPOINT_URL", s3.proxy_url())
+            .args(["-i", &s3.url(PREFIX), "--count"]);
+        if let Some(profile) = profile {
+            cmd.env("AWS_PROFILE", profile);
+        }
+        run(&mut cmd)
+    };
+
+    let (out, err, ok) = profile_find(Some("xdu-reader"));
+    assert!(ok, "the profile's credentials were not used: {err}");
+    assert_eq!(out.trim(), ROWS.to_string());
+    // Control: without AWS_PROFILE the default profile, which holds the wrong secret, is used.
+    let (out, err, ok) = profile_find(None);
+    assert!(
+        !ok && out.is_empty(),
+        "the default profile's wrong secret was accepted"
+    );
+    assert!(err.contains("refused the credentials"), "{err}");
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_endpoint_from_a_profile_services_section() {
+    let (s3, _work) = seeded();
+    let hermetic = Hermetic::new();
+    write_aws_files(
+        &hermetic,
+        "",
+        &format!(
+            "[default]\nservices = xdu-local\n\n[services xdu-local]\ns3 =\n  endpoint_url = {}\n",
+            s3.proxy_url()
+        ),
+    );
+    let (out, err, ok) = run(hermetic
+        .command("xdu-find")
+        .env("XDU_EXTENSION_DIR", s3.extension_dir())
+        .env("AWS_ACCESS_KEY_ID", ACCESS_KEY)
+        .env("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
+        .args(["-i", &s3.url(PREFIX), "--count"]));
+    assert!(ok, "xdu-find failed: {err}");
+    assert_eq!(out.trim(), ROWS.to_string());
+    // The endpoint came from the services section: the read went through the proxy.
+    let chunks: BTreeSet<String> = s3.parquet_sizes(PREFIX).into_keys().collect();
+    assert_eq!(range_fetched_keys(&s3), chunks);
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_tolerated_errors_marker_warns_as_local() {
+    let (s3, work) = seeded();
+    let index = work.path().join("index");
+    let marker = fs::read_to_string(index.join(COMPLETION_MARKER)).unwrap();
+    assert!(marker.contains("errors=0\n"), "{marker}");
+    let marker = marker.replace("errors=0\n", "errors=3\n");
+    fs::write(index.join(COMPLETION_MARKER), &marker).unwrap();
+    s3.seed_object(&format!("{PREFIX}/{COMPLETION_MARKER}"), marker.as_bytes());
+    let hermetic = Hermetic::new();
+
+    let canonical = index.canonicalize().unwrap();
+    let (local, local_err, ok) = run(hermetic
+        .command("xdu-find")
+        .arg("-i")
+        .arg(&canonical)
+        .arg("--count"));
+    assert!(ok, "local xdu-find failed: {local_err}");
+    assert!(local_err.contains("3 tolerated error(s)"), "{local_err}");
+    let (remote, remote_err, ok) =
+        run(s3
+            .find_command(&hermetic)
+            .args(["-i", &s3.url(PREFIX), "--count"]));
+    assert!(ok, "xdu-find failed: {remote_err}");
+    assert_eq!(remote, local);
+    assert_eq!(
+        remote_err,
+        local_err.replace(canonical.to_str().unwrap(), &s3.url(PREFIX)),
+        "the S3 warning differs from the local one"
+    );
+    assert_clean(&s3, &hermetic);
 }

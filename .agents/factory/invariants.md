@@ -134,7 +134,15 @@ ordering is load-bearing:
 
 - Every user-supplied value that reaches `read_parquet(...)` or a `WHERE`/`LIKE` clause is an
   injection surface: `--pattern`, `--partition` (`-u`), and the index path. Today only `--pattern` is
-  escaped (single-quote doubling); partition names and index paths are interpolated **raw**.
+  escaped (single-quote doubling); for a **local** index, partition names and index paths are
+  interpolated **raw**, a known exception (binding them is a follow-up seed).
+- For an **`s3://` index** nothing the locator or `-u` carries is interpolated. `lib::parquet_source`
+  returns `read_parquet(?)` (or `read_parquet(?, filename=true)`) with the whole glob as the one bound
+  value, built by `lib::index_glob_s3`, and `lib::read_completion_marker_s3` binds the URLs of its
+  `glob(?)` and `read_blob(?)` statements. The unit test
+  `tests::test_parquet_source_keeps_local_sql_byte_for_byte` pins the local text, and the wire test
+  `find_prefix_with_a_quote_matches_local` holds the S3 rule with a `'` in the prefix. Any new
+  reader statement over an S3 index takes its source from `parquet_source` on the same terms.
 - Route all such values through **one** validated escaping/quoting helper (or bound parameters). Numeric
   filters (`i64`) are injection-safe by type. Forbid raw `format!` of a partition name / index path
   into SQL — in the destructive `xdu-rm` a quote or `../`/glob-meta could escape the intended partition.
@@ -148,6 +156,11 @@ ordering is load-bearing:
   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold the rule; the second skips on a
   filesystem that rejects non-UTF-8 names (APFS) and runs on the Linux CI leg. Any new statement in
   `src/engine.rs` built from a path or an environment value joins this surface on the same terms.
+- `engine::open_s3_connection` is on the engine surface too. After the `LOAD` it runs one prepared
+  `CREATE TEMPORARY SECRET` (text from `S3Settings::duckdb_secret_statement`) whose every value,
+  the key pair, session token, region, URL style, SSL flag and endpoint, is a bound parameter; the
+  text varies only by which fixed optional clauses appear. No credential is ever SQL text, and
+  `duckdb_secrets()` lists the secret redacted.
 
 ## 6. Unix-only
 

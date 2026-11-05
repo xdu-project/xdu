@@ -10,6 +10,7 @@
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, Metadata};
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +106,20 @@ pub fn chunk_partial_name(id: usize) -> String {
 /// The finalized chunk filename a reader globs (`*/*.parquet`).
 pub fn chunk_final_name(id: usize) -> String {
     format!("{:06}.parquet", id)
+}
+
+/// Encode one chunk's rows as a complete Parquet file into `sink`, returning the sink.
+///
+/// The one place chunk bytes are produced: every chunk of every index is written with these
+/// properties, whatever it is written to, so two copies of the encoder cannot drift into two
+/// file formats. Rows take the schema of `batch`, which callers build from `get_schema()`.
+pub fn encode_chunk<W: Write + Send>(sink: W, batch: &RecordBatch) -> Result<W> {
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(sink, batch.schema(), Some(props))?;
+    writer.write(batch)?;
+    Ok(writer.into_inner()?)
 }
 
 /// The seven integer index columns derived from a file's metadata, under the chosen
@@ -476,14 +491,7 @@ impl PartitionBuffer {
 
         let file = File::create(&partial_path)
             .with_context(|| format!("Failed to create file: {}", partial_path.display()))?;
-
-        let props = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .build();
-
-        let mut writer = ArrowWriter::try_new(file, self.schema.clone(), Some(props))?;
-        writer.write(&batch)?;
-        writer.close()?;
+        encode_chunk(file, &batch)?;
 
         self.partial_files.push(partial_path);
         Ok(())

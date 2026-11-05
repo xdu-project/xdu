@@ -125,6 +125,12 @@ impl S3Locator {
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
+
+    /// The `s3://` URL of `name` directly under the prefix: an object key, or a glob such as
+    /// `*` or `**` when the result is handed to a glob.
+    pub fn object_url(&self, name: &str) -> String {
+        format!("{self}/{name}")
+    }
 }
 
 impl fmt::Display for S3Locator {

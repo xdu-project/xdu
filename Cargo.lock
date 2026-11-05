@@ -4410,6 +4410,7 @@ version = "0.5.2"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-trait",
  "clap",
  "clap_complete",
  "console",

@@ -30,7 +30,7 @@ phases:
     --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
 - id: P2
   name: xdu-find queries an s3:// index in place (demo path)
-  status: pending
+  status: in_progress
   satisfies:
   - R2
   - R3
@@ -41,7 +41,8 @@ phases:
   - P1
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: crest
+  attempts: 1
   verify: set -eu; sh spec/s3-index-target/verify/wire.sh find_ 14; cargo test --locked
     --lib; cargo test --locked --test find_tests --test offline_tests --test version_tests
     --test s3_tests; .agents/factory/bin/temp_index.sh sh -c "xdu-find -i \"\$XDU_INDEX\"
@@ -272,15 +273,25 @@ read an object through the counting proxy. CI runs it on both legs. `xdu-rm` ref
 for footers and selected row groups only, refuses bad markers and bad endpoints with a named cause,
 and binds everything S3 sends to SQL. The demo works after this phase.
 
-- [ ] `src/lib.rs`: `index_glob_s3` beside `index_glob`; `parquet_source(&IndexLocator, partition,
+- [x] `src/lib.rs`: `index_glob_s3` beside `index_glob`; `parquet_source(&IndexLocator, partition,
   filename) -> (String, Vec<String>)` with a unit test pinning the local strings byte for byte
   (PLAN §2.4).
-- [ ] `src/lib.rs`: `read_completion_marker_s3` (glob, then size, then content; cap before any
+  *Run A:* both globs share one private tail, `index_glob_tail`, so `index_glob`'s output is
+  unchanged.
+- [x] `src/lib.rs`: `read_completion_marker_s3` (glob, then size, then content; cap before any
   GET), `classify_s3_error`, and gates taking a pre-read `MarkerRead` (PLAN §2.5). Local marker
   path keeps its FIFO-safe read.
-- [ ] `src/bin/xdu-find.rs`: full S3 prologue (PLAN §2.6); all 7 statements through
+  *Run A:* the gates are `marker_version_error` / `marker_completion_warning` over a pre-read
+  `MarkerRead`; `index_version_error(&Path)` and `index_completion_warning(&Path)` stay as the
+  local wrappers, so `xdu-view` and `xdu-rm` are untouched. `MarkerRead` gains `Oversized(size)`,
+  which only the S3 read returns; its refusal names the size and the cap. The glob step lists
+  `<prefix>/**` with `LIMIT 1`: `*` matches the marker but not a prefix holding chunks only. A
+  404 on that listing is "bucket does not exist", an empty listing is "the prefix holds no
+  objects", and a 404 on the marker's `HEAD` is `Absent` (the version gate's "carries no index
+  format version", as locally).
+- [x] `src/bin/xdu-find.rs`: full S3 prologue (PLAN §2.6); all 7 statements through
   `parquet_source` with `params_from_iter`. Local behaviour unchanged.
-- [ ] Wire tests (`find_` prefix):
+- [x] Wire tests (`find_` prefix):
   - parity local vs S3 for: default listing, `--count`, `--top N`, each sort, `-u` (incl.
     `__root__`), size/age/pattern filters, csv and json output — stdout compared byte for byte;
   - R3 fixture: about 8 chunks of about 2 MiB (≈16 MiB) over 4 partitions, encoded by xdu's own
@@ -307,17 +318,44 @@ and binds everything S3 sends to SQL. The demo works after this phase.
     `format!` into SQL could not;
   - credentials via env and via `AWS_PROFILE` with `AWS_SHARED_CREDENTIALS_FILE`/`AWS_CONFIG_FILE`
     fixtures, endpoint via `AWS_ENDPOINT_URL` and via a profile `services` section.
-- [ ] Probe while building (record the result in the commit body): `read_parquet(?, filename=true)`
+
+  *Amended in run A:*
+  - **Endpoint fidelity for the quote test.** s3s-fs echoes `EncodingType=url` on ListObjectsV2
+    but sends keys raw, so its XML carries `'` as `&apos;`; httpfs always asks for url encoding
+    and decodes percent escapes, not XML entities, so a quoted prefix listed as no files. S3
+    percent-encodes listed keys when asked. `tests/common/s3.rs` now wraps s3s-fs in
+    `UrlEncodedListing`, which encodes `Key`, `Prefix`, `StartAfter`, `Delimiter` and common
+    prefixes when `encoding-type=url` is asked and passes every other operation the tests use
+    straight through (dev-dependency `async-trait`, already in the lockfile through s3s). P3's
+    writer operations (PUT, DELETE, multi-DELETE) are among those passed through.
+  - **15 `find_` tests, 22 in the file**; the CI step's minimum rises from 7 to 22. Parity runs
+    over `varied_source_tree` (1400 files in `alice` nested, `bob` and `__root__`, every size,
+    atime and mtime distinct and half a step off a day boundary, long hex names so every chunk
+    exceeds the footer read). The cost fixture is `encoded_index`, 8 chunks of 9500 rows over
+    `__root__`, `alice`, `bob`, `carol`, through `crawl::encode_chunk`, about 16 MiB.
+  - **Printed ratios.** The cost test and its negative control write `s3-count-bytes:` and
+    `s3-scan-bytes:` lines to the process's stderr directly, past libtest's capture, so
+    `wire.sh`'s log of a passing run, and CI's, keeps them.
+  - **An engine assertion avoided, not fixed.** The bundled DuckDB's debug build aborts
+    (`Assertion failed: (min_val <= input)`, `compress_integral.cpp`) on the **local** query
+    `-u alice --min-size 500 -f size` over this fixture; the release build answers it correctly.
+    The local SQL is byte-identical to before this phase, so the filter test uses other size and
+    sort combinations. Reported to the foreman.
+- [x] Probe while building (record the result in the commit body): `read_parquet(?, filename=true)`
   and a bound glob inside a CTE both bind (`01` §2 left them unprobed).
-- [ ] `doc/xdu-find.1.scd`: `s3://BUCKET/PREFIX` under `-i`; a paragraph on S3 indices
+  *Run A:* both bind and count all rows against s3s-fs (commit body has the detail).
+- [x] `doc/xdu-find.1.scd`: `s3://BUCKET/PREFIX` under `-i`; a paragraph on S3 indices
   (ranged reads, nothing copied locally, proxy variables not used, `xdu-rm` refuses); `ENVIRONMENT`
   gains the ten `AWS_*` names and `XDU_EXTENSION_DIR` with the `cargo install` remedy. Add the
   page's literals to the CI check with counts derived from the rendered page (`05` §3 hazards:
   `AWS_ENDPOINT_URL` counts include `AWS_ENDPOINT_URL_S3`; an example naming `XDU_INDEX` bumps its
   count). `AGENTS.md:277`'s sentence names `XDU_EXTENSION_DIR`.
-- [ ] `README.md`: `### Indexes in S3` (query half) before `### Querying with DuckDB`; one clause at
+  *Run A:* scdoc is not installed in the build environment, so the page was not rendered here.
+  The counts were derived from the source with markup removed and whitespace stripped, the way
+  CI normalizes the render; the Packaging job is the proof (run B evidence).
+- [x] `README.md`: `### Indexes in S3` (query half) before `### Querying with DuckDB`; one clause at
   `:99-101` that S3 indices need `httpfs`.
-- [ ] `AGENTS.md` and `invariants.md` §5: S3 locators and partition names are bound; local raw
+- [x] `AGENTS.md` and `invariants.md` §5: S3 locators and partition names are bound; local raw
   `format!` note stands; `open_s3_connection`'s `CREATE SECRET` joins the engine surface.
 - **Run B evidence:** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
   `s3-wire: '' N of N passed` with N ≥ 19; job `Packaging (man + completions generate)`, step

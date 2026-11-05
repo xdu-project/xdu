@@ -2,50 +2,70 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use duckdb::params_from_iter;
 
 use xdu::cli::XduFindArgs;
 use xdu::s3::ProcessEnv;
 use xdu::{
-    IndexLocator, QueryFilters, S3Settings, index_completion_warning, index_glob,
-    index_version_error, resolve_group, resolve_user,
+    IndexLocator, QueryFilters, S3Settings, index_completion_warning, index_version_error,
+    marker_completion_warning, marker_version_error, parquet_source, read_completion_marker_s3,
+    resolve_group, resolve_user,
 };
 
 fn main() -> Result<()> {
     let args = XduFindArgs::parse();
 
-    // An s3:// locator resolves its credentials and opens its connection before anything
-    // else, so a missing extension or credential is the first thing an operator hears about.
-    // Every other argument is a local path and takes the path below unchanged, loading no
-    // extension.
-    if let IndexLocator::S3(locator) = IndexLocator::parse(args.index.as_os_str())? {
-        let settings = S3Settings::resolve(&ProcessEnv)?;
-        xdu::engine::open_s3_connection(&settings)?;
-        anyhow::bail!("{locator}: querying an S3 index in place is not yet supported");
-    }
+    // The index argument is classified on its bytes before anything else. An s3:// locator
+    // resolves its credentials and opens its connection first, so a missing extension or
+    // credential is the first thing an operator hears about; every other argument is a local
+    // path and takes the path below unchanged, loading no extension.
+    let (index, conn) = match IndexLocator::parse(args.index.as_os_str())? {
+        IndexLocator::S3(locator) => {
+            let settings = S3Settings::resolve(&ProcessEnv)?;
+            let conn = xdu::engine::open_s3_connection(&settings)?;
 
-    // Resolve index path
-    let index_path = args
-        .index
-        .canonicalize()
-        .with_context(|| format!("Index directory not found: {}", args.index.display()))?;
+            // The marker is read once, a round trip per statement, and both gates judge that
+            // one read. A missing prefix, bucket or endpoint fails here, before any row.
+            let marker = read_completion_marker_s3(&conn, &locator)?;
+            let shown = locator.to_string();
+            if let Some(error) = marker_version_error(&marker, &shown) {
+                return Err(anyhow::anyhow!(error));
+            }
+            if let Some(warning) = marker_completion_warning(&marker, &shown) {
+                eprintln!("{}", warning);
+            }
+            (IndexLocator::S3(locator), conn)
+        }
+        IndexLocator::Local(_) => {
+            // Resolve index path
+            let index_path = args
+                .index
+                .canonicalize()
+                .with_context(|| format!("Index directory not found: {}", args.index.display()))?;
 
-    // Refuse an index whose format version is unknown or unsupported before any
-    // query: rows of an unknown layout must never be read, let alone trusted.
-    if let Some(error) = index_version_error(&index_path) {
-        return Err(anyhow::anyhow!(error));
-    }
+            // Refuse an index whose format version is unknown or unsupported before any
+            // query: rows of an unknown layout must never be read, let alone trusted.
+            if let Some(error) = index_version_error(&index_path) {
+                return Err(anyhow::anyhow!(error));
+            }
 
-    // An index can be incomplete two ways — a run that never finished, or one that finished
-    // under --allow-errors having skipped what it could not read. Either is still queryable,
-    // so this warns rather than refusing; it goes to stderr so piped results stay clean.
-    if let Some(warning) = index_completion_warning(&index_path) {
-        eprintln!("{}", warning);
-    }
+            // An index can be incomplete two ways — a run that never finished, or one that
+            // finished under --allow-errors having skipped what it could not read. Either is
+            // still queryable, so this warns rather than refusing; it goes to stderr so piped
+            // results stay clean.
+            if let Some(warning) = index_completion_warning(&index_path) {
+                eprintln!("{}", warning);
+            }
 
-    let glob_pattern = index_glob(&index_path, args.partition.as_deref());
+            // Connect to DuckDB (in-memory)
+            let conn = xdu::engine::open_connection()?;
+            (IndexLocator::Local(index_path), conn)
+        }
+    };
 
-    // Connect to DuckDB (in-memory)
-    let conn = xdu::engine::open_connection()?;
+    // Every statement reads the index through this one source: the glob written into the
+    // text for a local index, a bound parameter for an S3 one.
+    let source = |filename: bool| parquet_source(&index, args.partition.as_deref(), filename);
 
     // Build filters using shared QueryFilters. A glob is translated here; an invalid
     // one fails before any query is built rather than at the database. Owner and
@@ -95,18 +115,19 @@ fn main() -> Result<()> {
     if let Some(n) = args.top {
         // Extract partition name from the path (parent directory of the parquet file)
         // The glob pattern is index/*/*.parquet, so we extract the partition from the path
+        let (from, params) = source(true);
         let sql = format!(
             "SELECT 
                 regexp_extract(filename, '.*/([^/]+)/[^/]+\\.parquet$', 1) as partition,
                 COUNT(*) as file_count
-            FROM read_parquet('{}', filename=true) {}
+            FROM {} {}
             GROUP BY partition
             ORDER BY file_count DESC
             LIMIT {}",
-            glob_pattern, where_clause, n
+            from, where_clause, n
         );
         let mut stmt = conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(params_from_iter(&params))?;
         while let Some(row) = rows.next()? {
             let partition: String = row.get(0)?;
             writeln!(out, "{}", partition)?;
@@ -116,12 +137,10 @@ fn main() -> Result<()> {
 
     // Handle count mode
     if args.count {
-        let sql = format!(
-            "SELECT COUNT(*) FROM read_parquet('{}') {}",
-            glob_pattern, where_clause
-        );
+        let (from, params) = source(false);
+        let sql = format!("SELECT COUNT(*) FROM {} {}", from, where_clause);
         let mut stmt = conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(params_from_iter(&params))?;
         if let Some(row) = rows.next()? {
             let count: i64 = row.get(0)?;
             writeln!(out, "{}", count)?;
@@ -131,24 +150,26 @@ fn main() -> Result<()> {
 
     match args.format.as_str() {
         "path" => {
+            let (from, params) = source(false);
             let sql = format!(
-                "SELECT path FROM read_parquet('{}') {} {}",
-                glob_pattern, where_clause, limit_clause
+                "SELECT path FROM {} {} {}",
+                from, where_clause, limit_clause
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query([])?;
+            let mut rows = stmt.query(params_from_iter(&params))?;
             while let Some(row) = rows.next()? {
                 let path: String = row.get(0)?;
                 writeln!(out, "{}", path)?;
             }
         }
         "size" => {
+            let (from, params) = source(false);
             let sql = format!(
-                "SELECT path, size FROM read_parquet('{}') {} ORDER BY size DESC {}",
-                glob_pattern, where_clause, limit_clause
+                "SELECT path, size FROM {} {} ORDER BY size DESC {}",
+                from, where_clause, limit_clause
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query([])?;
+            let mut rows = stmt.query(params_from_iter(&params))?;
             while let Some(row) = rows.next()? {
                 let path: String = row.get(0)?;
                 let size: i64 = row.get(1)?;
@@ -156,12 +177,13 @@ fn main() -> Result<()> {
             }
         }
         "atime" => {
+            let (from, params) = source(false);
             let sql = format!(
-                "SELECT path, atime FROM read_parquet('{}') {} ORDER BY atime ASC {}",
-                glob_pattern, where_clause, limit_clause
+                "SELECT path, atime FROM {} {} ORDER BY atime ASC {}",
+                from, where_clause, limit_clause
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query([])?;
+            let mut rows = stmt.query(params_from_iter(&params))?;
             while let Some(row) = rows.next()? {
                 let path: String = row.get(0)?;
                 let atime: i64 = row.get(1)?;
@@ -169,13 +191,14 @@ fn main() -> Result<()> {
             }
         }
         "csv" => {
+            let (from, params) = source(false);
             let sql = format!(
-                "SELECT path, size, uid, gid, mode, atime, mtime, ctime FROM read_parquet('{}') {} {}",
-                glob_pattern, where_clause, limit_clause
+                "SELECT path, size, uid, gid, mode, atime, mtime, ctime FROM {} {} {}",
+                from, where_clause, limit_clause
             );
             writeln!(out, "path,size,uid,gid,mode,atime,mtime,ctime")?;
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query([])?;
+            let mut rows = stmt.query(params_from_iter(&params))?;
             while let Some(row) = rows.next()? {
                 let path: String = row.get(0)?;
                 let size: i64 = row.get(1)?;
@@ -209,12 +232,13 @@ fn main() -> Result<()> {
             }
         }
         "json" => {
+            let (from, params) = source(false);
             let sql = format!(
-                "SELECT path, size, uid, gid, mode, atime, mtime, ctime FROM read_parquet('{}') {} {}",
-                glob_pattern, where_clause, limit_clause
+                "SELECT path, size, uid, gid, mode, atime, mtime, ctime FROM {} {} {}",
+                from, where_clause, limit_clause
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query([])?;
+            let mut rows = stmt.query(params_from_iter(&params))?;
             let mut first = true;
             writeln!(out, "[")?;
             while let Some(row) = rows.next()? {
