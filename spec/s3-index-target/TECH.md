@@ -6,7 +6,7 @@ appetite: big
 status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: P2
+current_phase: P3
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -30,7 +30,7 @@ phases:
     --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
 - id: P2
   name: xdu-find queries an s3:// index in place (demo path)
-  status: in_progress
+  status: done
   satisfies:
   - R2
   - R3
@@ -41,7 +41,7 @@ phases:
   - P1
   parallel: false
   hammerable: false
-  hill: crest
+  hill: downhill
   attempts: 1
   verify: set -eu; sh spec/s3-index-target/verify/wire.sh find_ 14; cargo test --locked
     --lib; cargo test --locked --test find_tests --test offline_tests --test version_tests
@@ -360,7 +360,9 @@ and binds everything S3 sends to SQL. The demo works after this phase.
 - **Run B evidence:** jobs `Test (ubuntu-24.04)` and `Test (macos-15)`, step "S3 tests":
   `s3-wire: '' N of N passed` with N ≥ 19; job `Packaging (man + completions generate)`, step
   "Assert critical literals survive into the published man-page text", green with the new
-  `xdu-find.1` checks; the R3 test's printed ratio line from the ubuntu leg.
+  `xdu-find.1` checks; the R3 test's printed ratio line from the ubuntu leg. *Recorded by run B
+  in [`evidence/p2-ci.md`](evidence/p2-ci.md) (tests run 42012803115, N = 22 on both legs,
+  ubuntu ratio 0.824%; release run 42012803137).*
 - **Verify:** see frontmatter.
 - **Touches:** `src/lib.rs`, `src/s3.rs`, `src/bin/xdu-find.rs`, `tests/`, `doc/xdu-find.1.scd`,
   `README.md`, `AGENTS.md`, `.agents/factory/invariants.md`, `.github/workflows/test.yaml`.
@@ -461,6 +463,11 @@ by count, and every deferral recorded.
   `issues/s3-index-rm.md`, `issues/s3-credential-chain.md`,
   `issues/local-reader-bound-parameters.md` (GOAL Non-goals) and `issues/s3-proxy-support.md`
   (PLAN deviation 6). Update the `S3 as an index target` ROADMAP entry to point at the spec.
+  Also a seed for the bundled DuckDB's debug-build assertion found in P2 (foreman ruling at P2
+  run B): `xdu-find -u alice --min-size 500 -f size` on a local index aborts a debug build with
+  `Assertion failed: (min_val <= input)` in `compress_integral.cpp`, while the release build
+  answers correctly. The P2 filter test avoids that combination (see P2's run A amendments). File
+  it as an `issues/` file with a `ROADMAP.md` entry.
 - [ ] If P4 was cut by amendment, record `issues/s3-index-view.md` and its ROADMAP entry here.
 - **Run B evidence:** test legs as above with N ≥ 34 (the final `<min>` in the workflow equals the
   listed count); the Packaging job's literal step green on all four pages.
