@@ -44,7 +44,7 @@ phases:
 - id: P3
   name: Release legs fetch, check and ship the pinned set; CI off the retired macOS
     label
-  status: pending
+  status: in_progress
   satisfies:
   - R1
   - R6
@@ -52,7 +52,7 @@ phases:
   - P2
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: crest
   verify: sh spec/duckdb-extension-distribution/verify/p3.sh
 - id: P4
   name: Install channels and the recorded layout contract; deferral ledger
@@ -210,19 +210,22 @@ calls `gh`.**
   `done`. If any leg is red, run B does not mark P3 done. It records the failing leg's output in
   the evidence file, sets `--blocked-reason`, and hands back. A fix is a new run A.
 
-- [ ] `release.yaml` both build jobs (PLAN §2.5): one locked build of `--bins --example
+- [x] `release.yaml` both build jobs (PLAN §2.5): one locked build of `--bins --example
       extension-probe`; a fetch step (Linux: after the glibc-floor step); assemble tars
       `bin share lib`; a check step on the exact tarball name being uploaded, before the upload.
-- [ ] `build-macos` matrix: `aarch64-apple-darwin` → `macos-15`, `x86_64-apple-darwin` →
+- [x] `build-macos` matrix: `aarch64-apple-darwin` → `macos-15`, `x86_64-apple-darwin` →
       `macos-15-intel`. Keep the rust-cache key per target.
-- [ ] Add a `pull_request` trigger with `paths:` covering `.github/workflows/release.yaml`,
+- [x] Add a `pull_request` trigger with `paths:` covering `.github/workflows/release.yaml`,
       `packaging/extensions/**`, `examples/**`, `src/engine.rs`, `.cargo/**`, `Cargo.toml`,
       `Cargo.lock` and `rust-toolchain.toml`. Give `TAG` a `pr<number>` fallback and `publish` an
       `if: github.event_name != 'pull_request'`. Make `cancel-in-progress` true for PR runs only,
       so release runs stay uncancellable. The check step passes the probe as
       `target/${{ matrix.target }}/release/examples/extension-probe`. Fetch and check carry no
       `if:` and no `continue-on-error`.
-- [ ] `test.yaml`: `macos-14` → `macos-15`. `docker.yaml`: add `examples/**` and
+      *Amended in run A:* on a pull request, the `prepare`, `build` and `build-macos` checkouts
+      take `github.event.pull_request.head.sha` instead of the merge ref, so the sha the run
+      builds is a commit on this branch and run B's `head:` ancestor check can hold.
+- [x] `test.yaml`: `macos-14` → `macos-15`. `docker.yaml`: add `examples/**` and
       `packaging/extensions/**` to the PR paths.
 - **Verify:** `sh spec/duckdb-extension-distribution/verify/p3.sh`. In run A, only its
   `structural` mode is expected to pass. In run B, the full gate also requires the evidence file:

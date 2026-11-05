@@ -29,6 +29,8 @@ on:
       - .github/workflows/docker.yaml
       - Cargo.toml
       - Cargo.lock
+      - examples/**
+      - packaging/extensions/**
 
 env:
   REGISTRY: ghcr.io

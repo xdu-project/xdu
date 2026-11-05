@@ -9,21 +9,38 @@ on:
       tag:
         description: 'Version tag to (re)build and publish (e.g., v0.4.1)'
         required: true
+  # Build-and-check only: every leg builds, fetches its DuckDB extensions and proves they load
+  # from the assembled tarball, so a change that would break a release fails on the pull
+  # request instead. Nothing is published, and no job on this path holds a write scope or
+  # reads a secret. The paths are every input that decides whether a tarball's extensions load.
+  pull_request:
+    paths:
+      - .github/workflows/release.yaml
+      - packaging/extensions/**
+      - examples/**
+      - src/engine.rs
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
 
-# Least privilege at the top; the publish job elevates to contents: write for the upload.
+# Least privilege at the top; the publish job elevates to contents: write for the upload, and
+# it never runs on a pull request.
 permissions:
   contents: read
 
 # Never cancel an in-flight release: a half-published set of assets is worse than a queued run.
+# A pull-request run publishes nothing, so a newer push supersedes it.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   # The tag being released: the release tag on `release: published`, or the manual input on
-  # `workflow_dispatch`. Every job derives names and checkout refs from this one value.
-  TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  # `workflow_dispatch`. Every job derives names and checkout refs from this one value. A
+  # pull request has no tag, so it names its artifacts pr<number>, which keeps them slash-free.
+  TAG: ${{ github.event_name == 'pull_request' && format('pr{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
 jobs:
   # Build the host-independent artifacts (man pages + completions) exactly once and hand them
@@ -38,7 +55,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.pull_request.head.sha || github.ref }}
 
       - name: Resolve toolchain from rust-toolchain.toml
         id: rust
@@ -112,8 +129,9 @@ jobs:
         with:
           persist-credentials: false
           # CRITICAL: on a manual re-run build from the tag being released, not the default
-          # branch — otherwise the tarball contents drift from what the tag points at.
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          # branch — otherwise the tarball contents drift from what the tag points at. On a
+          # pull request, build the branch head itself rather than the synthetic merge commit.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.pull_request.head.sha || github.ref }}
 
       # dtolnay/rust-toolchain cannot run inside a container job, so rustup installs
       # directly: no default toolchain, letting rust-toolchain.toml (the single source)
@@ -127,8 +145,10 @@ jobs:
       # boundary, and a warm cache is not worth a poisoning vector on the publish path. The
       # timeout covers a cold bundled-DuckDB compile.
 
-      - name: Build release binaries
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      # One invocation, so the extension probe and the tarball binaries share every compiled
+      # artifact, the bundled DuckDB engine above all.
+      - name: Build release binaries and the extension probe
+        run: cargo build --release --locked --target ${{ matrix.target }} --bins --example extension-probe
 
       # Fail the leg when the runtime floor floats: the maximum GLIBC_* version node
       # across the four binaries must not exceed 2.28, GLIBCXX_* must not exceed RHEL8
@@ -165,6 +185,11 @@ jobs:
           done
           [ "$fail" -eq 0 ]
 
+      # The probe reports the engine version, platform and pinned extension set this build
+      # carries, so the leg can only fetch extensions for the engine it is about to ship.
+      - name: Fetch DuckDB extensions
+        run: sh packaging/extensions/fetch.sh target/${{ matrix.target }}/release/examples/extension-probe staging/lib/xdu/extensions
+
       - name: Download share artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -179,7 +204,14 @@ jobs:
           for bin in xdu xdu-find xdu-view xdu-rm; do
             cp "target/${{ matrix.target }}/release/${bin}" "${STAGING}/bin/"
           done
-          tar czvf "xdu-${TAG}-${{ matrix.target }}.tar.gz" -C "${STAGING}" bin share
+          tar czvf "xdu-${TAG}-${{ matrix.target }}.tar.gz" -C "${STAGING}" bin share lib
+
+      # Extract the exact tarball the next step uploads and load every shipped extension from
+      # it under an empty HOME with autoinstall off. A failing leg uploads nothing, and publish
+      # needs every leg. The step's last log line is
+      # `extension-check: ok platform=<platform> engine=<engine>`.
+      - name: Check extensions load (cold HOME)
+        run: sh packaging/extensions/check.sh "xdu-${TAG}-${{ matrix.target }}.tar.gz" target/${{ matrix.target }}/release/examples/extension-probe
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -201,17 +233,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Native runners for each architecture, so the check step runs without Rosetta.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15-intel
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           # CRITICAL: on a manual re-run build from the tag being released, not the default
-          # branch — otherwise the tarball contents drift from what the tag points at.
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          # branch — otherwise the tarball contents drift from what the tag points at. On a
+          # pull request, build the branch head itself rather than the synthetic merge commit.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.pull_request.head.sha || github.ref }}
 
       - name: Resolve toolchain from rust-toolchain.toml
         id: rust
@@ -229,8 +263,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build release binaries
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      # One invocation, so the extension probe and the tarball binaries share every compiled
+      # artifact, the bundled DuckDB engine above all.
+      - name: Build release binaries and the extension probe
+        run: cargo build --release --locked --target ${{ matrix.target }} --bins --example extension-probe
+
+      - name: Fetch DuckDB extensions
+        run: sh packaging/extensions/fetch.sh target/${{ matrix.target }}/release/examples/extension-probe staging/lib/xdu/extensions
 
       - name: Download share artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -246,7 +285,14 @@ jobs:
           for bin in xdu xdu-find xdu-view xdu-rm; do
             cp "target/${{ matrix.target }}/release/${bin}" "${STAGING}/bin/"
           done
-          tar czvf "xdu-${TAG}-${{ matrix.target }}.tar.gz" -C "${STAGING}" bin share
+          tar czvf "xdu-${TAG}-${{ matrix.target }}.tar.gz" -C "${STAGING}" bin share lib
+
+      # Extract the exact tarball the next step uploads and load every shipped extension from
+      # it under an empty HOME with autoinstall off. A failing leg uploads nothing, and publish
+      # needs every leg. The step's last log line is
+      # `extension-check: ok platform=<platform> engine=<engine>`.
+      - name: Check extensions load (cold HOME)
+        run: sh packaging/extensions/check.sh "xdu-${TAG}-${{ matrix.target }}.tar.gz" target/${{ matrix.target }}/release/examples/extension-probe
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -261,6 +307,8 @@ jobs:
   publish:
     name: Publish release assets
     needs: [build, build-macos]
+    # A pull request proves the legs build and check; it never publishes.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
