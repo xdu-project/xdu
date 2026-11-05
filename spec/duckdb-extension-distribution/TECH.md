@@ -3,10 +3,10 @@ slug: duckdb-extension-distribution
 title: Ship DuckDB extensions instead of downloading them
 kind: feature
 appetite: small
-status: in_progress
+status: in_review
 branch: feature/duckdb-extension-distribution
 base: main
-current_phase: P3
+current_phase: done
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -44,7 +44,7 @@ phases:
 - id: P3
   name: Release legs fetch, check and ship the pinned set; CI off the retired macOS
     label
-  status: in_progress
+  status: done
   satisfies:
   - R1
   - R6
@@ -286,6 +286,10 @@ calls `gh`.**
 > of `HEAD`, which stale evidence still satisfies. It now also requires that no release-path input
 > (`release.yaml`'s `pull_request` paths) differs between the evidence head and `HEAD`. Until run B
 > lands, the full gate is red on that check, as it should be.
+>
+> - [x] Run A: the remediation commit (78daf41), `p3.sh structural` green.
+> - [x] Run B: `evidence/p3-pr-run.md` refreshed from the release run at 78daf41; all four legs
+>   print `extension-check: ok … engine=v1.4.4` and `boundary=ok`, and the full gate is green.
 
 ## Phase P4 — Install channels, the contract, the deferral ledger
 **Satisfies:** R2 · **Depends on:** P2
