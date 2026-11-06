@@ -694,6 +694,80 @@ below are in [`research/07`](research/07-tls-server-auth.md); the decision is di
   - each release leg's `aws-tls-probe` lines before `extension-check: ok`;
   - the Packaging literal step's `OK:` line.
 
+### 7.6 Review cycle 4 remediation (P6 and P5 reopened)
+
+Review cycle 4 found two more splits between the two directions' TLS checks. The human ruled
+option 1 (GOAL Clarification of 2026-11-06): finding 1 becomes R11's one recorded exception,
+with its root fix seeded as a follow-up **fix** cycle, and finding 2 is fixed here.
+
+- **Finding 2: a trust source must hold a root (`src/s3.rs`, `bundle_certificates`).**
+  - **Why the stacks differ.** webpki takes every certificate in the file as an anchor, so an
+    intermediate alone anchors the writer. OpenSSL, without `X509_V_FLAG_PARTIAL_CHAIN`, which
+    httpfs does not set, accepts a chain only when it ends at a self-signed certificate in its
+    store. So a file with no self-signed root can only ever split the two directions.
+  - **The rule.** After the existing PEM rules, the kept certificates must include at least one
+    root. Otherwise the file is refused before any request, in the resolver's own words:
+    `AWS_CA_BUNDLE names <path>, which holds no root CA certificate (one issued and signed by
+    itself); …`, or for a platform bundle the same reason with `set AWS_CA_BUNDLE to a CA file`.
+    The words never say "not trusted".
+  - **What counts as a root.** Both of these must hold:
+    1. The certificate's issuer `Name` is byte-identical to its subject `Name`.
+    2. Its signature verifies under its own `subjectPublicKeyInfo`, with one of the algorithms
+       the writer's TLS stack verifies: `rustls::crypto::ring::default_provider()`'s
+       `signature_verification_algorithms.all`, matched on both algorithm identifiers as
+       webpki matches them.
+  - **Parsing.** The fields come from the same DER walk `is_certificate_der` does
+    (`der_element`): the signed `tbsCertificate` bytes, the outer signature algorithm and value,
+    and the TBS's issuer, subject and key. No crate is added.
+  - **Why this is sound.**
+    - Both conditions are what a self-signed root *is*. An intermediate fails (1).
+    - A forged "self-issued" certificate, its issuer set to its subject but signed by another
+      key, fails (2).
+    - OpenSSL marks a certificate self-signed by a canonical name match, an authority key
+      identifier that, if present, names its own key, and a signature algorithm of its key's
+      family. It does not check the self-signature. A certificate that passes both conditions
+      passes that test too, unless its authority key identifier names another key, which no CA
+      issues for a root. So a file this accepts holds an anchor OpenSSL can end a chain at.
+  - **What it costs.**
+    - A file whose only roots are self-signed with an algorithm ring does not verify, such as
+      SHA-1 RSA, is refused, though OpenSSL would anchor there (it does not check a root's
+      self-signature).
+    - Byte equality is stricter than OpenSSL's canonical name compare.
+    - Both fail closed, naming the file. Platform bundles carry many SHA-256 and ECDSA roots, and
+      the build checks `/etc/ssl/cert.pem` and a Mozilla-derived bundle locally. The CI probe
+      shows the Debian, RHEL and macOS bundles on CI hosts.
+  - **What it does not close.** A file holding a root plus an unrelated intermediate whose own
+    root is absent still lets the writer anchor at that intermediate. That is the same class at
+    a narrower edge. It is recorded in the root-fix seed, which owns making the two directions
+    agree on the chain, not only the name.
+- **Finding 1: the recorded exception.** No code change. httplib's CN fallback is inside the
+  pinned extension, and the non-goals bar changing the pinned set.
+  - **`invariants.md` §5** names the exception in the style of its local-path exception and
+    cites the seed. `AGENTS.md` invariant 5 mirrors it.
+  - **A wire test documents it.** A test-CA leaf whose CN is `127.0.0.1` and whose SAN is
+    `DNS:wrong.example` (and a second one with no SAN) is refused by `xdu` under the refusal
+    rule, and answered by `xdu-find` and `xdu-view` today. The test asserts today's reader
+    behaviour, and a comment names the seed, so the root fix must flip it. That makes it the
+    seed's red-first.
+- **Seeds.** `issues/s3-reader-tls-hostname.md` (kind `fix`) carries the review's reproduction,
+  the exception test as its red-first, and two candidate routes: an in-process loopback relay
+  that terminates TLS with the writer's rustls client and trust source and serves httpfs plain
+  HTTP through its `http_proxy` setting, and an upstream httpfs or httplib change. Removing the
+  R11 and §5 exception is its acceptance. `issues/s3-dotted-bucket-names.md` carries finding 3,
+  with path style as a candidate. Both join P5's enforced seed list and get `ROADMAP.md` entries.
+- **Tests.** Red first:
+  - **Unit:** a bundle with no root is refused naming `AWS_CA_BUNDLE`, for both origins; the
+    root predicate itself; and every platform bundle present on the host holds a root.
+  - **Wire:** an intermediate-only bundle is refused by all three tools before any connection,
+    and a root-plus-intermediate bundle accepts a leaf the intermediate signed; and the
+    exception test.
+  - **The listed count** goes from 51 to 53 in the workflow, `AGENTS.md` and the P5 and P6 gates.
+- **Docs.**
+  - **Man pages and README.** `xdu.1`, `xdu-find.1`, `xdu-view.1` and the README say that a
+    private CA's certificate for the endpoint must name the host in its SAN, that the file must
+    include the root, and that the readers' CN fallback is a known limitation.
+  - **No counted literal changes.** `AWS_CA_BUNDLE` stays at two per page.
+
 ---
 
 *Backing research: [`research/00-digest.md`](research/00-digest.md) and briefs `01`–`07`.*

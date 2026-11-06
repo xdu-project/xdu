@@ -133,17 +133,25 @@ downloaded at run time, and a missing extension or a missing credential says wha
   beyond loopback. CI SHALL provide that endpoint so the tests run there; where a developer machine
   lacks it, the tests SHALL report themselves skipped, never pass silently.
 - **R11** — Every connection to an `https` S3 endpoint (every AWS endpoint, and any `https://`
-  endpoint override), whether the writer's under `xdu -o s3://` or the readers' under `xdu-find`
-  and `xdu-view` through DuckDB's `httpfs`, SHALL authenticate the server's TLS certificate against
-  one trust source, chosen once by R5's resolver and used by both directions: the CA file named
-  by `AWS_CA_BUNDLE` when set, else the platform's trust roots. IF no trust roots can be found,
-  or `AWS_CA_BUNDLE` names a file that is unreadable or holds no certificate, THEN the tool SHALL
-  exit non-zero before any request, with an error naming `AWS_CA_BUNDLE`. WHEN the endpoint
-  presents a self-signed certificate, or one issued by a CA outside the trust source, all three
-  tools SHALL refuse it as R4 refuses an unreachable endpoint, with a cause on stderr that names
-  the certificate. No option or variable SHALL turn verification off. A plain `http://` endpoint
-  override stays as it is: TLS does not apply to it. Tests on R10's loopback endpoint, with TLS
-  in front of it, SHALL exercise each of these cases.
+  endpoint override), whether the writer's under `xdu -o s3://` or the readers' under `xdu-find` and
+  `xdu-view` through DuckDB's `httpfs`, SHALL authenticate the server's TLS certificate against one
+  trust source, chosen once by R5's resolver and used by both directions: the CA file named by
+  `AWS_CA_BUNDLE` when set, else the platform's trust roots. IF no trust roots can be found, or
+  `AWS_CA_BUNDLE` names a file that is unreadable or holds no certificate, THEN the tool SHALL exit
+  non-zero before any request, with an error naming `AWS_CA_BUNDLE`. IF the trust source, whether
+  the file `AWS_CA_BUNDLE` names or a platform bundle, holds no self-signed root certificate, THEN
+  the tool SHALL likewise exit non-zero before any request, with an error naming `AWS_CA_BUNDLE`.
+  WHEN the endpoint presents a self-signed certificate, or one issued by a CA outside the trust
+  source, all three tools SHALL refuse it as R4 refuses an unreachable endpoint, with a cause on
+  stderr that names the certificate. **One exception is recorded**, until the follow-up fix cycle
+  seeded as `issues/s3-reader-tls-hostname.md` lands: the readers' check that the certificate names
+  the endpoint's host is that of `httpfs`'s httplib client, which accepts a certificate whose
+  subject common name (CN) names the host when its subject alternative names (SAN) do not, or when
+  it has none. The writer checks the SAN alone and refuses such a certificate. A test on R10's
+  loopback endpoint SHALL show the exception as it stands, so that removing the fallback fails that
+  test. Nothing else in R11 is relaxed. No option or variable SHALL turn verification off. A plain
+  `http://` endpoint override stays as it is: TLS does not apply to it. Tests on R10's loopback
+  endpoint, with TLS in front of it, SHALL exercise each of these cases.
 
 ## Non-goals (no-gos)
 
@@ -244,6 +252,26 @@ downloaded at run time, and a missing extension or a missing credential says wha
   roots and verifies a real AWS chain. It is a platform smoke check, not acceptance of any R-ID:
   the loopback endpoint (R10, R11's tests) remains the whole acceptance. Ruled by the foreman as
   gate judge at the P6 plan gate (resolved 2026-11-05).
+- **Q:** Review cycle 4 found two more splits between the two directions' TLS checks. Does this
+  cycle fix both? — **A:** It records the first as R11's one exception and fixes the second.
+  Source: review cycle 4 (`REVIEW.md`, "Review cycle 4").
+  - **Finding 1 (CRITICAL, confirmed).** `xdu-find` and `xdu-view` accept a certificate whose
+    subject CN names the endpoint when its SAN names another host or is absent. `httpfs`'s
+    httplib falls back on the CN; the writer's rustls checks the SAN alone, so it refuses the
+    same endpoint. The fallback sits inside the pinned extension's client, and the non-goals bar
+    changing the pinned set.
+  - **Finding 2 (MEDIUM, confirmed).** With an `AWS_CA_BUNDLE` holding only an intermediate
+    CA, `xdu` builds an index that both readers refuse. The writer's webpki takes any
+    certificate in the file as an anchor; the readers' OpenSSL needs a chain that ends at a
+    self-signed root.
+  - **Human ruling, via the foreman: option 1 of the hostname blocker.** Finding 1 lands as R11's
+    one named exception. Its root fix is a firm commitment: a follow-up **fix** cycle, seeded as
+    `issues/s3-reader-tls-hostname.md`, whose acceptance is removing the exception from R11 and
+    `invariants.md` §5. Finding 2 is fixed in this cycle: a trust source that holds no
+    self-signed root is refused before any request, naming `AWS_CA_BUNDLE` (R11). Finding 3
+    (LOW, plausible: a dotted bucket cannot reach AWS over virtual-hosted TLS) is seeded as
+    `issues/s3-dotted-bucket-names.md`. The human signed off on this high-blast remediation
+    through the foreman. Amended 2026-11-06.
 
 ## Notes
 

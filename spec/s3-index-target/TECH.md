@@ -3,11 +3,11 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: blocked
+status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: done
-last_updated: '2026-11-05'
+current_phase: P5
+last_updated: '2026-11-06'
 phases:
 - id: P1
   name: Loopback endpoint, resolver, S3 connection; xdu-rm refuses s3://
@@ -113,7 +113,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: done
+  status: in_progress
   satisfies:
   - R9
   - R10
@@ -123,39 +123,40 @@ phases:
   hammerable: false
   hill: uphill
   verify: 'set -eu; for f in s3-index-rm s3-credential-chain local-reader-bound-parameters
-    s3-proxy-support s3-legacy-bucket-names; do test -s issues/$f.md; grep -qF "##
-    Problem" issues/$f.md; grep -qF "issues/$f.md" ROADMAP.md; done; listed=$(cargo
-    test --locked --test s3_tests -- --list --include-ignored 2>/dev/null | grep -c
-    '': test$''); grep -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml;
-    grep -qF "XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh \"\" $listed"
-    AGENTS.md; XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" "$listed";
-    cargo test --locked; grep -qF "include-ignored" .github/workflows/test.yaml; for
-    f in .agents/factory/invariants.md .agents/factory/review-rubric.md .agents/skills/xdu-review/SKILL.md
-    .agents/factory/templates/REVIEW.md; do for p in src/s3.rs src/view_query.rs src/engine.rs;
-    do grep -qF "$p" "$f" || { echo "$f does not name $p" >&2; exit 1; }; done; done;
-    risk=$(sed -n ''/^## High-risk files/,/^## Testing/p'' AGENTS.md); for p in src/s3.rs
-    src/view_query.rs src/engine.rs; do case "$risk" in *"$p"*) ;; *) echo "AGENTS.md
-    High-risk does not name $p" >&2; exit 1;; esac; done; testing=$(sed -n ''/^##
-    Testing/,/^## Packaging/p'' AGENTS.md); for w in tests/s3-wire.sh include-ignored
-    XDU_TEST_EXTENSION_DIR fetch.sh; do case "$testing" in *"$w"*) ;; *) echo "AGENTS.md
-    Testing does not name $w" >&2; exit 1;; esac; done; grep -qF ''read_completion_marker_s3''
-    .agents/factory/invariants.md; grep -qF ''marker_version_error'' .agents/factory/invariants.md;
-    grep -qF ''`xdu DIR -o/--outdir DIR|s3://'' AGENTS.md; grep -qF ''`xdu-find -i/--index
-    DIR|s3://'' AGENTS.md; grep -qF ''`xdu-view -i/--index DIR|s3://'' AGENTS.md;
-    if grep -nE "^[[:space:]]*[''.]" doc/*.scd; then exit 1; fi; arch=$(sed -n ''/^##
-    Architecture/,/^## CLI surface/p'' AGENTS.md); for s in lib::read_completion_marker_s3
-    lib::marker_version_error lib::marker_completion_warning MarkerRead::Oversized
-    lib::index_version_error lib::parquet_source; do case "$arch" in *"$s"*) ;; *)
-    echo "AGENTS.md Architecture does not name $s" >&2; exit 1;; esac; done; if grep
-    -nE ''readers call .lib::index_version_error. first|warn if absent|# read/write\.
-    Only the crawler|is the \*\*one\*\* place this layout'' AGENTS.md .agents/factory/invariants.md;
-    then echo "a local-only marker or glob claim is back" >&2; exit 1; fi; for f in
-    doc/xdu.1.scd doc/xdu-find.1.scd doc/xdu-view.1.scd; do grep -qF "3 to 63 lowercase
-    letters" $f; done; cargo clippy --locked --all-targets --all-features -- -D warnings;
-    cargo fmt --all -- --check; echo P5-GATE-GREEN'
+    s3-proxy-support s3-legacy-bucket-names s3-reader-tls-hostname s3-dotted-bucket-names;
+    do test -s issues/$f.md; grep -qF "## Problem" issues/$f.md; grep -qF "issues/$f.md"
+    ROADMAP.md; done; listed=$(cargo test --locked --test s3_tests -- --list --include-ignored
+    2>/dev/null | grep -c '': test$''); grep -qF "sh tests/s3-wire.sh \"\" $listed"
+    .github/workflows/test.yaml; grep -qF "XDU_TEST_EXTENSION_DIR=target/test-ext
+    sh tests/s3-wire.sh \"\" $listed" AGENTS.md; XDU_TEST_EXTENSION_DIR=target/test-ext
+    sh tests/s3-wire.sh "" "$listed"; cargo test --locked; grep -qF "include-ignored"
+    .github/workflows/test.yaml; for f in .agents/factory/invariants.md .agents/factory/review-rubric.md
+    .agents/skills/xdu-review/SKILL.md .agents/factory/templates/REVIEW.md; do for
+    p in src/s3.rs src/view_query.rs src/engine.rs; do grep -qF "$p" "$f" || { echo
+    "$f does not name $p" >&2; exit 1; }; done; done; risk=$(sed -n ''/^## High-risk
+    files/,/^## Testing/p'' AGENTS.md); for p in src/s3.rs src/view_query.rs src/engine.rs;
+    do case "$risk" in *"$p"*) ;; *) echo "AGENTS.md High-risk does not name $p" >&2;
+    exit 1;; esac; done; testing=$(sed -n ''/^## Testing/,/^## Packaging/p'' AGENTS.md);
+    for w in tests/s3-wire.sh include-ignored XDU_TEST_EXTENSION_DIR fetch.sh; do
+    case "$testing" in *"$w"*) ;; *) echo "AGENTS.md Testing does not name $w" >&2;
+    exit 1;; esac; done; grep -qF ''read_completion_marker_s3'' .agents/factory/invariants.md;
+    grep -qF ''marker_version_error'' .agents/factory/invariants.md; grep -qF ''`xdu
+    DIR -o/--outdir DIR|s3://'' AGENTS.md; grep -qF ''`xdu-find -i/--index DIR|s3://''
+    AGENTS.md; grep -qF ''`xdu-view -i/--index DIR|s3://'' AGENTS.md; if grep -nE
+    "^[[:space:]]*[''.]" doc/*.scd; then exit 1; fi; arch=$(sed -n ''/^## Architecture/,/^##
+    CLI surface/p'' AGENTS.md); for s in lib::read_completion_marker_s3 lib::marker_version_error
+    lib::marker_completion_warning MarkerRead::Oversized lib::index_version_error
+    lib::parquet_source; do case "$arch" in *"$s"*) ;; *) echo "AGENTS.md Architecture
+    does not name $s" >&2; exit 1;; esac; done; if grep -nE ''readers call .lib::index_version_error.
+    first|warn if absent|# read/write\. Only the crawler|is the \*\*one\*\* place
+    this layout'' AGENTS.md .agents/factory/invariants.md; then echo "a local-only
+    marker or glob claim is back" >&2; exit 1; fi; for f in doc/xdu.1.scd doc/xdu-find.1.scd
+    doc/xdu-view.1.scd; do grep -qF "3 to 63 lowercase letters" $f; done; cargo clippy
+    --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+    echo P5-GATE-GREEN'
 - id: P6
   name: TLS server authentication for both directions
-  status: done
+  status: in_progress
   satisfies:
   - R11
   depends_on:
@@ -163,12 +164,13 @@ phases:
   parallel: false
   hammerable: false
   hill: uphill
-  verify: 'set -eu; sh tests/s3-wire.sh tls_ 5; for t in tls_a_self_signed_endpoint_is_refused_by_all_three_tools
+  verify: 'set -eu; sh tests/s3-wire.sh tls_ 7; for t in tls_a_self_signed_endpoint_is_refused_by_all_three_tools
     tls_an_endpoint_the_named_ca_signed_answers_as_plain_http_does tls_an_unusable_ca_bundle_is_refused_before_any_connection
-    tls_only_the_resolved_file_is_trusted tls_the_reader_connection_pins_verification_and_the_ca_file;
+    tls_only_the_resolved_file_is_trusted tls_the_reader_connection_pins_verification_and_the_ca_file
+    tls_a_ca_bundle_without_a_root_is_refused_and_one_with_it_answers tls_a_leaf_naming_the_host_only_in_its_cn_is_refused_by_xdu_alone;
     do grep -qxF "$t: test" target/wire-tls_.list; done; listed=$(cargo test --locked
     --test s3_tests -- --list --include-ignored 2>/dev/null | grep -c '': test$'');
-    test "$listed" -ge 51; XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh
+    test "$listed" -ge 53; XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh
     "" "$listed"; grep -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml;
     grep -qF "XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh \"\" $listed"
     AGENTS.md; cargo test --locked --lib s3:: >target/p6-lib.log 2>&1; grep -qE "test
@@ -176,9 +178,10 @@ phases:
     an_empty_aws_ca_bundle_is_unset without_aws_ca_bundle_the_first_platform_bundle_present_is_the_source
     no_platform_bundle_is_refused_naming_aws_ca_bundle an_unusable_bundle_is_refused_naming_aws_ca_bundle
     no_resolver_error_says_the_certificate_is_not_trusted a_certificate_webpki_rejects_is_dropped_and_the_rest_kept
-    a_plain_http_endpoint_resolves_no_trust_source the_tls_statements_are_fixed_text_and_bind_only_the_path;
-    do grep -qF "test s3::tests::$t ... ok" target/p6-lib.log; done; cargo test --locked;
-    if grep -rniE "danger_accept_invalid|tls_danger_|allow_invalid_certificates|dangerous\(\)|with_custom_certificate_verifier|tls_certs_merge|add_root_certificate|with_root_certificate|tls_backend_preconfigured|use_preconfigured_tls|webpki_roots|rustls_native_certs|rustls_platform_verifier|cert_verification[^;]*(false|=[[:space:]]*''?0)"
+    a_plain_http_endpoint_resolves_no_trust_source the_tls_statements_are_fixed_text_and_bind_only_the_path
+    a_bundle_without_a_root_is_refused_naming_aws_ca_bundle a_root_is_a_certificate_its_own_key_signed
+    every_platform_bundle_on_this_host_holds_a_root; do grep -qF "test s3::tests::$t
+    ... ok" target/p6-lib.log; done; cargo test --locked; if grep -rniE "danger_accept_invalid|tls_danger_|allow_invalid_certificates|dangerous\(\)|with_custom_certificate_verifier|tls_certs_merge|add_root_certificate|with_root_certificate|tls_backend_preconfigured|use_preconfigured_tls|webpki_roots|rustls_native_certs|rustls_platform_verifier|cert_verification[^;]*(false|=[[:space:]]*''?0)"
     src; then echo "a TLS path disables verification or trusts more than the one source"
     >&2; exit 1; fi; for f in src/*.rs src/bin/*.rs; do if sed -n ''1,/^#\[cfg(test)\]/p''
     "$f" | grep -vE ''^[[:space:]]*//'' | grep -iE ''cert_verification|ca_cert_file|httpfs_client_implementation''
@@ -207,14 +210,19 @@ phases:
     is in the tree" >&2; exit 1; fi; case "$out" in *"did not match any packages"*)
     ;; *) printf ''%s\n'' "$out" >&2; echo "cargo tree failed while looking for $c"
     >&2; exit 1;; esac; done; cargo tree --locked -e normal --target all -i ring >/dev/null;
-    cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
-    -- --check; echo P6-GATE-GREEN'
+    sed -n ''/^fn bundle_certificates/,/^}/p'' src/s3.rs | grep -vE ''^[[:space:]]*//''
+    | grep -qF ''is_self_signed_root(''; for f in .agents/factory/invariants.md AGENTS.md
+    tests/s3_tests.rs; do grep -qF ''issues/s3-reader-tls-hostname.md'' "$f" || {
+    echo "$f does not cite the hostname seed" >&2; exit 1; }; done; for f in doc/xdu.1.scd
+    doc/xdu-find.1.scd doc/xdu-view.1.scd README.md; do for w in ''subject alternative
+    name'' ''root certificate'' ''common name''; do tr ''\n'' '' '' <"$f" | grep -qiF
+    "$w" || { echo "$f does not say $w" >&2; exit 1; }; done; done; cargo clippy --locked
+    --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo
+    P6-GATE-GREEN'
 review:
   last_reviewed_commit: 9f0019d91d0a623c4950cf10d31ff024daf52391
   verdict: changes-requested
-  blocked_reason: 'review cycle 4 (final approved): readers accept a CN-only host
-    match (CRITICAL, §5); intermediate-only bundle splits writer and readers; human
-    gate'
+  blocked_reason: ''
   cycle: 4
 ---
 # TECH.md — Build an index into S3 and query it in place
@@ -502,6 +510,33 @@ siblings.
   "Review cycle 2" in `evidence/p1-ci.md` and `p5-ci.md`, each checked with `grep -F` against the
   logs. The P1 and P5 gates were re-run from their stored text and are green; every phase is done
   and the FSM is `in_review` for review cycle 3.
+
+## Review cycle 4 — remediation triage
+
+[`REVIEW.md`](REVIEW.md) (cycle 4, changes-requested at `9f0019d`) raised two CONFIRMED findings
+on R11 and one PLAUSIBLE. Cycle 4 was the last cycle the human approved, so the loop stopped for
+the human. **The human ruled option 1 of the hostname blocker, through the foreman, and signed
+off on this high-blast remediation.** Finding 1 lands as R11's one recorded exception, with its
+root fix committed as a follow-up fix cycle; finding 2 is fixed here; finding 3 is seeded. GOAL
+amended (R11 and the 2026-11-06 Clarification); design in PLAN §7.6.
+
+- **F1 (CRITICAL, readers accept a CN-only host match) → P6, recorded, not fixed.** The fallback
+  is httplib's, inside the pinned extension. §5 and `AGENTS.md` invariant 5 name the exception
+  and cite `issues/s3-reader-tls-hostname.md`. A wire test asserts today's split (`xdu` refuses,
+  the readers answer), and the seed takes it as its red-first.
+- **F2 (MEDIUM, an intermediate-only bundle splits the directions) → P6.** The resolver refuses
+  a trust source whose kept certificates include no self-signed root (PLAN §7.6), before any
+  request, naming `AWS_CA_BUNDLE`.
+- **F3 (LOW, dotted bucket names over virtual-hosted TLS) → P5, seeded** as
+  `issues/s3-dotted-bucket-names.md`.
+- **Both seeds → P5's enforced seed list**, each with a `ROADMAP.md` entry.
+- **P6 and P5 reopen together.** Both gates require the workflow's minimum and `AGENTS.md`'s
+  command to carry the listed count, which the two new wire tests raise to 53, so they share a
+  same-commit obligation and the build commits them as one bundle.
+- **Run A / run B.** The fix changes `src/`, so `evidence/p5-ci.md` and `p6-ci.md` no longer
+  describe the head. On the foreman's instruction the build marks P5 and P6 `done` on local
+  evidence and leaves each phase's CI-only item open for run B, which reads the pushed head's
+  logs.
 
 ---
 
@@ -1032,6 +1067,22 @@ by count, and every deferral recorded.
 > workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published
 > man-page text"; the Lint job green. Record in `evidence/p5-ci.md`.
 
+> **Amendment (P5, review cycle 4 remediation):** the deferral ledger takes cycle 4's two seeds
+> (triage above). Gate retuned: the seed list names `s3-reader-tls-hostname` and
+> `s3-dotted-bucket-names`.
+>
+> - [ ] `issues/s3-reader-tls-hostname.md` (kind `fix`): finding 1's root fix, with the review's
+>   reproduction, the exception wire test as its red-first, the two candidate routes of PLAN
+>   §7.6, and the acceptance that removes the R11 and §5 exception. A `ROADMAP.md` entry.
+> - [ ] `issues/s3-dotted-bucket-names.md`: finding 3, with path style as a candidate. A
+>   `ROADMAP.md` entry. The `S3 as an index target` entry's deferral count rises to eight.
+> - [ ] Run B: both legs `s3-wire: '' 53 of 53 passed`, equal to the minimum; the Packaging
+>   literal step printed its `OK:` line; Lint green. Recorded in `evidence/p5-ci.md`.
+>
+> **Run B evidence (cycle 4):** both test legs' `s3-wire: '' 53 of 53 passed`, equal to the
+> workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published
+> man-page text"; the Lint job green. Record in `evidence/p5-ci.md`.
+
 ## Phase P6 — TLS server authentication for both directions
 **Satisfies:** R11 (with R4, R5, R9, R10 as PLAN §7.2 maps) · **Depends on:** P5 · **Size:** ~0.75–1
 day (PLAN §7.4)
@@ -1152,6 +1203,49 @@ review after P6 runs on the human's say-so, not the bound.*
   `.github/workflows/test.yaml`, `.github/workflows/release.yaml` (paths only),
   `packaging/extensions/aws-tls-probe.sh`, `packaging/extensions/check.sh`. The `.github/` and
   `packaging/` files are not on `invariants.md`'s high-blast list.
+
+> **Amendment (P6, review cycle 4 remediation):** F2 fixed and F1 recorded (triage above; PLAN
+> §7.6). Gate retuned: `tls_` runs at 7, with the two new names checked in its list; the whole
+> file at a listed count of at least 53; the three new unit tests by name; the root check called
+> in `bundle_certificates` outside the test module; the exception named, with the seed's path,
+> in `invariants.md` §5, `AGENTS.md` and the exception test; the SAN, root and CN sentences on
+> the three pages and the README.
+>
+> - [ ] **Red first.** Write the unit test for a rootless bundle and the wire test for an
+>   intermediate-only bundle, and show both failing on `src/` at `9f0019d`: the resolver keeps
+>   the intermediate, the writer builds through it, and the readers refuse it after connecting.
+>   Quote the failing lines in the commit body.
+> - [ ] `src/s3.rs`: the root predicate of PLAN §7.6 and its refusal in `bundle_certificates`,
+>   naming `AWS_CA_BUNDLE` for both origins and never saying "not trusted". Unit tests: a
+>   rootless bundle is refused for both origins (and joins the unusable-bundle table, so the
+>   "not trusted" sweep covers it), the predicate (a root, an intermediate, a leaf, and a
+>   certificate whose issuer is its subject but which another key signed), and every platform
+>   bundle present on the host holds a root. Check `/etc/ssl/cert.pem` and a Mozilla-derived
+>   bundle locally.
+> - [ ] `tests/common/s3.rs`: `TestPki` gains an intermediate under the test CA, a leaf it signs
+>   (the front shows the leaf and the intermediate), the intermediate-only and root-plus-
+>   intermediate files, and two test-CA leaves whose CN is `127.0.0.1`: one with
+>   `DNS:wrong.example` as its SAN and one with no SAN.
+> - [ ] `tests/s3_tests.rs`: two `tls_` wire tests. The first refuses an intermediate-only bundle
+>   in all three tools before any connection (0 front connections, 0 proxied requests) and has a
+>   root-plus-intermediate bundle answer in all three. The second documents the exception: `xdu`
+>   refuses both CN leaves under the refusal rule, and `xdu-find` and `xdu-view` answer through
+>   them today. A comment names `issues/s3-reader-tls-hostname.md`. Show that it exercises the
+>   CN fallback: with the leaves' CN changed to another name, its reader assertions go red.
+> - [ ] Manual: §5's exception bullet and its `AGENTS.md` mirror; Testing names the new
+>   `TestPki` identities; the count 53 in `test.yaml` and `AGENTS.md`'s command.
+> - [ ] Docs: `xdu.1`, `xdu-find.1`, `xdu-view.1` and the README say that a private CA's
+>   certificate must name the endpoint's host in its SAN, that the file must include the root,
+>   and that the readers' CN fallback is a known limitation. No counted literal changes; say
+>   whether scdoc rendered them.
+> - [ ] Run B: both legs `s3-wire: '' 53 of 53 passed` with all seven `tls_` tests `ok`, and
+>   every `aws-tls-probe` line an HTTP answer with no certificate, `AWS_CA_BUNDLE` or "cannot
+>   reach" line, on both test legs and every release leg. That shows the root rule accepts the
+>   Debian, RHEL and macOS platform bundles. Recorded in `evidence/p6-ci.md`.
+>
+> **Run B evidence (cycle 4):** as P6's list above, at 53, plus both new tests `ok` on both legs:
+> `tls_a_ca_bundle_without_a_root_is_refused_and_one_with_it_answers` and
+> `tls_a_leaf_naming_the_host_only_in_its_cn_is_refused_by_xdu_alone`.
 
 ---
 
