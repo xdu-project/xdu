@@ -238,6 +238,12 @@ downloaded at run time, and a missing extension or a missing credential says wha
   verified, so one resolved endpoint got two levels of trust. Human ruling via the foreman: option
   1 of the TLS blocker, a fourth build cycle that fixes it under a GOAL amendment. Amended
   2026-11-05.
+- **Q:** Does P6's CI probe against real AWS breach the non-goal on a real-provider check? —
+  **A:** No. The probe uses AWS's documented example key, no cloud account and no secret. It
+  passes on any HTTP status, so it shows only that each CI and release platform finds its trust
+  roots and verifies a real AWS chain. It is a platform smoke check, not acceptance of any R-ID:
+  the loopback endpoint (R10, R11's tests) remains the whole acceptance. Ruled by the foreman as
+  gate judge at the P6 plan gate (resolved 2026-11-05).
 
 ## Notes
 
