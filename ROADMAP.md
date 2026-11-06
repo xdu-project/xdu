@@ -24,26 +24,12 @@ Miller-columns tree view (file-type detection and a scrollable text preview pane
 established too: the release tarball, `install.sh`, the scdoc man pages, and generated shell
 completions (so GitHub issue #4 is effectively resolved). The tarball also carries the DuckDB
 extensions xdu cannot link statically, pinned to its engine version under `lib/xdu/extensions/`, so
-nothing downloads at runtime (record in `spec/duckdb-extension-distribution/`). Everything below
-builds on that baseline.
+nothing downloads at runtime (record in `spec/duckdb-extension-distribution/`). An index can live in
+S3 as well: `xdu -o s3://bucket/prefix` builds straight into a bucket, and `xdu-find` and `xdu-view`
+query it in place over ranged reads, with no local copy (record in `spec/s3-index-target/`).
+Everything below builds on that baseline.
 
 ---
-
-## S3 as an index target
-
-Indices today live on local disk, which ties them to the machine that built them. The
-`<partition>/<chunk>.parquet` layout maps directly onto object-store key prefixes, so writing the
-index to S3-compatible storage is cheap — and it unlocks centralized, build-once/read-anywhere
-indices that any tool (or a future web client) can point at without copying files around.
-
-Reading is the half worth stating precisely, because it is the half a first cycle got wrong by
-staging the whole index to a temp directory per query. DuckDB's `httpfs` reads Parquet over HTTP
-range requests: measured against an 80.1 MiB index, `--count` moved 0.13 MiB and a `--top 10` moved
-3.94 MiB, where a staging design pays the full 80.1 MiB every time. The intention is that a query
-costs what the query asks for, not what the index weighs.
-
-*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: in flight as a pilot (build into a bucket; `xdu-find` and `xdu-view` query in place) — see `spec/s3-index-target/`; its deferrals are the eight entries after `S3 as a crawl source` and the debug-build DuckDB entry*
-**Seed:** [`issues/s3-index-target.md`](issues/s3-index-target.md)
 
 ## S3 as a crawl source
 
@@ -66,7 +52,7 @@ still needs a local copy of it to run a guarded bulk delete. The deletions stay 
 is reading the index in place under every one of `xdu-rm`'s destructive gates unchanged, which is
 high-blast work on the one tool that deletes files.
 
-*Horizon: mid-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL non-goals, R8)*
+*Horizon: mid-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (GOAL non-goals, R8)*
 **Seed:** [`issues/s3-index-rm.md`](issues/s3-index-rm.md)
 
 ## S3 credentials beyond environment variables and the shared files
@@ -78,7 +64,7 @@ Any widening has to stay in the one resolver, so the writer and the readers keep
 identity, and has to settle whether DuckDB's `credential_chain` (the separate `aws` extension) earns a
 place in the pinned set.
 
-*Horizon: mid-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL non-goals)*
+*Horizon: mid-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (GOAL non-goals)*
 **Seed:** [`issues/s3-credential-chain.md`](issues/s3-credential-chain.md)
 
 ## S3 traffic through an HTTP proxy
@@ -88,7 +74,7 @@ writer's client is built with the proxy turned off so that writer and readers ca
 routes. A site that reaches its object store only through a proxy cannot use an S3 index. The fix is
 one proxy configuration that reaches both directions.
 
-*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (PLAN deviation 6)*
+*Horizon: near-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (PLAN deviation 6)*
 **Seed:** [`issues/s3-proxy-support.md`](issues/s3-proxy-support.md)
 
 ## Index non-ASCII top-level directories into S3
@@ -98,7 +84,7 @@ percent-encodes such a name in the key and the readers' glob would no longer mat
 of the same tree works. Building keys raw would admit these names, but only after a reader-parity
 wire test shows how `httpfs` lists and reports such keys.
 
-*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (TECH P3, foreman ruling at P3 run B)*
+*Horizon: near-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (TECH P3, foreman ruling at P3 run B)*
 **Seed:** [`issues/s3-non-ascii-partition-names.md`](issues/s3-non-ascii-partition-names.md)
 
 ## Reach S3 buckets whose names carry capitals or `_`
@@ -109,7 +95,7 @@ stores still create such buckets, and AWS still serves legacy ones. Path-style r
 bucket is a path segment and never part of the host, could reach them, with a wider allow-list that
 still cannot reach the authority in either direction.
 
-*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (TECH review cycle 2 triage, foreman ruling at run B)*
+*Horizon: near-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (TECH review cycle 2 triage, foreman ruling at run B)*
 **Seed:** [`issues/s3-legacy-bucket-names.md`](issues/s3-legacy-bucket-names.md)
 
 ## One TLS check for both S3 directions
@@ -122,7 +108,7 @@ write an index the readers refuse. The pilot lands with all three recorded in it
 fix is committed: make every direction verify alike, through an in-process relay that uses the
 writer's TLS client or an upstream change, and delete the exception and both limits.
 
-*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL R11 and its 2026-11-06 clarifications, REVIEW cycle 4 finding 1, cycle 5 findings 1–2)*
+*Horizon: near-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (GOAL R11 and its 2026-11-06 clarifications, REVIEW cycle 4 finding 1, cycle 5 findings 1–2)*
 **Seed:** [`issues/s3-reader-tls-hostname.md`](issues/s3-reader-tls-hostname.md)
 
 ## Reach an AWS bucket whose name holds a dot
@@ -132,7 +118,7 @@ The bucket rule admits dots, but against AWS every tool addresses the bucket vir
 refuse it as an untrusted certificate, which sends the operator after the wrong cause. Path-style
 addressing in both directions, or a refusal that names the dot, would fix it.
 
-*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (REVIEW cycle 4 finding 3)*
+*Horizon: near-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (REVIEW cycle 4 finding 3)*
 **Seed:** [`issues/s3-dotted-bucket-names.md`](issues/s3-dotted-bucket-names.md)
 
 ## Bind the index path and partition names in local-index reader SQL
@@ -213,7 +199,7 @@ a batch job over complete data nothing. Measured: a partitioned rewrite is one s
 work is the safety around it — a schema that survives, provenance that is not laundered, and a
 failure that leaves no readable-but-wrong index.
 
-*Horizon: mid-term · Depends on: the self-describing marker; S3 as an index target, for the remote side · Refs: —*
+*Horizon: mid-term · Depends on: the self-describing marker; S3 as an index target, for the remote side (met, on `main` since #33) · Refs: —*
 **Seed:** [`issues/xdu-repack.md`](issues/xdu-repack.md)
 
 ## Bulk operations: `xdu-cp` and `xdu-mv` over a shared select-act engine
@@ -318,7 +304,7 @@ rather than the query path. Aggregates report what the caller can see and count 
 true total across invisible rows is a differencing oracle, and a silently filtered one contradicts
 `lfs quota`. Serving queries rather than handing out data is also what keeps grants revocable.
 
-*Horizon: long-term · Depends on: visibility classification, the API contract, authentication; S3 as an index target — expect sub-phases · Refs: —*
+*Horizon: long-term · Depends on: visibility classification, the API contract, authentication; S3 as an index target (met, on `main` since #33) — expect sub-phases · Refs: —*
 **Seed:** [`issues/xdu-api-query-service.md`](issues/xdu-api-query-service.md)
 
 ## Authentication (`xdu-login`) and group resolution for a shared index
@@ -386,7 +372,7 @@ a world-readable index or credentials the user can read back out of it, and a br
 identity with which to scope anything. That constraint is also what makes the served architecture
 unavoidable rather than merely preferable.
 
-*Horizon: long-term · Depends on: the API contract, authentication, `xdu-api`; S3 as an index target for the store · Refs: —*
+*Horizon: long-term · Depends on: the API contract, authentication, `xdu-api`; S3 as an index target for the store (met, on `main` since #33) · Refs: —*
 **Seed:** [`issues/xdu-web-client.md`](issues/xdu-web-client.md)
 
 ## Streaming index updates & Lustre changelog

@@ -37,8 +37,9 @@ Unix-only assumption stops holding for every backend.
 
 ## Notes
 
-- Sequenced after [`s3-index-target.md`](s3-index-target.md), which establishes the locator
-  parsing, credential resolution and endpoint handling this seed reuses. The source direction still
+- Sequenced after the S3 index target, now met: on `main` since #33 (record in
+  `spec/s3-index-target/`), which established the locator parsing, credential resolution and
+  endpoint handling this seed reuses. The source direction still
   needs its own client for listing objects; what it inherits is the configuration surface, not the
   transport.
 - Found by: original roadmap; back-reference retrofitted 2026-09-07.

@@ -1,10 +1,9 @@
 # DuckDB-native S3 reads — the spike `research/03` deferred
 
-> **Pre-cycle evidence, not a design.** Backs
-> [`issues/s3-index-target.md`](../issues/s3-index-target.md) and
-> [`issues/duckdb-extension-distribution.md`](../issues/duckdb-extension-distribution.md). When that
-> seed is promoted, `/xdu-plan` should adopt this as `spec/s3-index-target/research/00-*.md` rather
-> than re-derive it; it is written to that brief's shape for exactly that reason.
+> **Pre-cycle evidence, not a design.** Backed the seeds for the S3 index target and the shipped
+> DuckDB extensions, both retired once their cycles landed (#33 and #31; records in
+> `spec/s3-index-target/` and `spec/duckdb-extension-distribution/`). The S3 cycle adopted it as its
+> evidence base in `spec/s3-index-target/research/00-digest.md` rather than re-deriving it.
 
 Run 2026-09-15 on darwin/arm64, toolchain per `rust-toolchain.toml`, `duckdb` crate 1.4.4
 (`bundled`, `parquet`), MinIO on 127.0.0.1:19000, with a logging HTTP proxy on :19001 attributing

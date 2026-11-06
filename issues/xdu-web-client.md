@@ -59,6 +59,7 @@ Draft R-IDs, to be firmed up at promotion.
 
 - Depends on: [`shared-index-api-contract.md`](shared-index-api-contract.md),
   [`shared-index-authentication.md`](shared-index-authentication.md),
-  [`xdu-api-query-service.md`](xdu-api-query-service.md); S3 as an index target for the store.
+  [`xdu-api-query-service.md`](xdu-api-query-service.md); S3 as an index target for the store (met, on
+  `main` since #33).
 - Related: [`access-scoped-queries.md`](access-scoped-queries.md) (umbrella).
 - Found by: original roadmap; back-reference retrofitted 2026-09-07; revised 2026-09-11.

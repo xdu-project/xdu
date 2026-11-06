@@ -77,7 +77,7 @@ Draft R-IDs, to be firmed up at promotion.
 - Depends on: [`index-visibility-classification.md`](index-visibility-classification.md),
   [`shared-index-api-contract.md`](shared-index-api-contract.md),
   [`shared-index-authentication.md`](shared-index-authentication.md), and S3 as an index target for
-  distribution.
+  distribution (met, on `main` since #33).
 - Related: [`shared-index-deployment-guards.md`](shared-index-deployment-guards.md) enforces R1 at
   startup.
 - Found by: shared-index design pass, 2026-09-11.
