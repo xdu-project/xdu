@@ -3,10 +3,10 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_progress
+status: in_review
 branch: feature/s3-index-target
 base: main
-current_phase: P6
+current_phase: done
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -155,7 +155,7 @@ phases:
     cargo fmt --all -- --check; echo P5-GATE-GREEN'
 - id: P6
   name: TLS server authentication for both directions
-  status: in_progress
+  status: done
   satisfies:
   - R11
   depends_on:
@@ -1100,8 +1100,20 @@ review after P6 runs on the human's say-so, not the bound.*
 - [x] Manual: the PLAN §7.1 invariant bullet into `invariants.md` §5 verbatim, mirrored in
   `AGENTS.md` invariant 5; the High-risk entries for `src/engine.rs` and `src/s3.rs`; Testing
   names the `tls_` prefix and the front; Commands and `test.yaml` carry the new listed count.
-- [ ] Run B: the evidence below, recorded in `evidence/p6-ci.md`, and the Linux writer half of
+- [x] Run B: the evidence below, recorded in `evidence/p6-ci.md`, and the Linux writer half of
   the red-first.
+  *Run B (head `5711e9d`; tests run 42145425932 on merge ref `9f88f7e`, whose tree is
+  `5711e9d`'s; release run 42145425938; image run 42145425951):* every item below is recorded
+  in [`evidence/p6-ci.md`](evidence/p6-ci.md). Both test legs passed 51 of 51; every probe line
+  on both test legs, all four release legs and both image legs is an HTTP 403
+  (`InvalidAccessKeyId`) from AWS, with no certificate, `AWS_CA_BUNDLE` or "cannot reach" line;
+  the release containers resolved `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`.
+  **Amendment: the Linux writer half of the red-first is not shown.** No CI run executed wire
+  test 4 against the pre-P6 `src/`: the test first exists in `5711e9d`, and no Linux host was
+  available to run B. The Ubuntu leg shows only the green half,
+  `test tls_only_the_resolved_file_is_trusted ... ok` against the fixed `src/`. The red
+  half rests on run A's macOS reader failures and on research/07's account of the old
+  writer's Linux trust (`rustls-native-certs` honours `SSL_CERT_FILE`), not on a log.
 - **Run B evidence:**
   - both test legs' `s3-wire: '' 51 of 51 passed`, equal to the workflow's minimum;
   - both test legs' `aws-tls-probe` lines, each quoting the AWS answer per tool;

@@ -216,3 +216,21 @@ is skipped by the parser):
   - The product rule itself belongs in `invariants.md` via the build that fixes the finding, not
     here.
 - **Confidence:** med · **Effort:** small
+
+## F12 — xdu-build has no run B, though every phase here closes on one
+`origin=xdu-build:P6 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-build/SKILL.md`
+- **What happened:** P6's run B was briefed as "follow the skill's run B / CI-evidence
+  procedure". The skill has none. The evidence file's shape, the commit subject (`Close {slug}
+  {id} on CI evidence`), which local gates to re-run at close, and the merge-ref reasoning were
+  all taken from earlier close commits and `evidence/p1-ci.md`…`p5-ci.md`. TECH's run B item
+  also named a red-first half (test 4(a), Linux writer, on the pre-phase tree) that no CI log
+  of a post-phase head can show, and the skill does not say whether such an item blocks `done`.
+- **Skill cause:** Steps 4–7 assume the phase's evidence is local. A phase split into run A
+  (local) and run B (CI logs) is the norm on this branch, but the split, its artifact and its
+  close rules live only in commit history.
+- **Recommended fix:** add a "Run B (close on CI evidence)" step: quote lines verbatim from
+  saved logs with run id, job and step, and check each with `grep -F`; establish the merge
+  ref's tree; re-run the stored `verify:`; commit `[{kind}] Close {slug} {id} on CI evidence`.
+  Say that a red-first which needs the pre-phase tree on another platform must run in run A
+  (or a throwaway worktree), since run B sees only the fixed tree.
+- **Confidence:** high · **Effort:** small
