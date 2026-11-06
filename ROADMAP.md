@@ -241,6 +241,17 @@ guaranteed present by the schema now delivered on `main` (record in `spec/richer
 *Horizon: mid-term · Depends on: richer-schema mtime/ctime, delivered on `main`; after tar above · Refs: —*
 **Seed:** [`issues/index-diff-incremental-select.md`](issues/index-diff-incremental-select.md)
 
+## Bulk operations: `xdu-rm` on the shared select-act engine
+
+The copy/move entry builds its engine for `xdu-cp` and `xdu-mv` and leaves `xdu-rm` on its own
+copy, gaps included: `--safe` re-checks only atime and maximum size though its man page claims
+more, the selection writes the index path and partition name into SQL text, and failed unlinks
+exit 0. Moving `xdu-rm` onto the engine closes all three in the tool that deletes, and makes every
+later engine fix land in every select-act tool at once.
+
+*Horizon: near-term · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (GOAL-gate ruling)*
+**Seed:** [`issues/xdu-rm-on-shared-engine.md`](issues/xdu-rm-on-shared-engine.md)
+
 ## Permission-aware, access-scoped queries
 
 Once ownership and permissions are indexed, the index itself becomes a way to leak information: a

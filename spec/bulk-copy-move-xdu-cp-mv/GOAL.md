@@ -9,9 +9,10 @@
 - **kind:** feature
 - **appetite:** big, bounded by the calendar: the cycle lands by **2026-11-13**, plan, build, CI
   and review included (about 6 working days, so about 3 of build)  ·  *two new tools on one engine
-  lifted out of `xdu-rm`, local index and local files only. S3 as a source index, as a copy target
-  and as a copy source are out (Non-goals). If the box tightens, the cut order in *Notes* applies,
-  through a GOAL amendment, never a silent drop.*
+  built from `xdu-rm`'s pattern, local index and local files only; `xdu-rm` itself is unchanged.
+  Migrating `xdu-rm` onto the engine, and S3 as a source index, a copy target or a copy source,
+  are out (Non-goals). If the box tightens, the cut order in *Notes* applies, through a GOAL
+  amendment, never a silent drop.*
 
 ## Problem
 
@@ -44,32 +45,35 @@ tool would copy it, gaps included. Confirmed against `7689a92`:
   (`src/crawl.rs:270-283`).
 
 The archive tool sequenced next (`issues/xdu-tar-slice-archive.md`) needs the same selection and
-the same staging copy, so the engine and the copy are built once, here.
+the same staging copy, so the engine and the copy are built once, here, without those gaps.
+Moving `xdu-rm` onto the engine waits for its own cycle (`issues/xdu-rm-on-shared-engine.md`).
 
 ## Outcome / vision
 
 An operator runs `xdu-cp` or `xdu-mv` with the filters they already use with `xdu-find`, previews
 the exact set and where each file will land, confirms, and gets exactly that set copied or moved
 into a tree under `--into`, with every file either fully at its destination or untouched at its
-source. `xdu-rm`, `xdu-cp` and `xdu-mv` share one library engine, so `xdu-rm` gains the `--safe`
-checks it claimed and the bound-parameter selection, and `xdu-tar` starts from a selection, a path
-mapping and a copy primitive that already exist.
+source. `xdu-cp` and `xdu-mv` share one library engine with a full `--safe` re-check and a
+bound-parameter selection, so `xdu-tar` starts from a selection, a path mapping and a copy
+primitive that already exist, and `xdu-rm` can move onto the same engine in a later cycle.
 
 ## Acceptance criteria (the contract)
 
-- **R1** — `xdu-rm`, `xdu-cp` and `xdu-mv` SHALL share one library implementation of
-  select-then-act: the version gate and completion warning (§2b), the filter-to-`WHERE` build, the
-  deterministic `ORDER BY path` under `--limit`, the empty-set message, dry-run, confirmation and
-  `--force`, the `--safe` re-stat (R7), the parallel executor and the summary counts. The selection
-  SHALL reach DuckDB with the index glob, including the index path and any partition name, as a
-  bound parameter, so a `'` in either selects the right rows instead of failing or becoming SQL.
-  Apart from R7 and that binding, `xdu-rm`'s flags, prompt, output and exit status SHALL be
-  unchanged, and `tests/rm_tests.rs` SHALL pass with its assertions intact.
+- **R1** — `xdu-cp` and `xdu-mv` SHALL share one library implementation of select-then-act: the
+  version gate and completion warning (§2b), the filter-to-`WHERE` build, the deterministic
+  `ORDER BY path` under `--limit`, the empty-set message, dry-run, confirmation and `--force`, the
+  `--safe` re-stat (R7), the parallel executor and the summary counts. Its selection SHALL be
+  usable apart from the parallel executor, so that `xdu-tar`, and later `xdu-rm`, can use it. The
+  selection SHALL reach DuckDB with the index glob, including the index path and any partition
+  name, as a bound parameter, so a `'` in either selects the right rows instead of failing or
+  becoming SQL. `src/bin/xdu-rm.rs` SHALL be unchanged, and `tests/rm_tests.rs` SHALL pass
+  unchanged.
 - **R2** — WHEN files match an index query, `xdu-cp -i INDEX --into DEST [--root ROOT]` SHALL copy
   exactly the matched set, each file to `DEST/<its path relative to ROOT>`, creating intermediate
   directories as needed; `--root` defaults to `/`, which reproduces each absolute path under `DEST`.
-  Each copy SHALL carry the source's bytes, permission bits, atime and mtime, and its owner and
-  group where the caller may set them, with a refusal counted in the summary, never silent.
+  Each copy SHALL carry the source's bytes, permission bits, atime and mtime. It SHALL attempt to
+  carry the source's owner and group; a refusal is counted in the summary, never silent, and does
+  not fail the file.
   `xdu-cp` SHALL never modify or remove a source file. It SHALL act only on a regular file at the
   path, not following symlinks; anything else at the path is skipped and counted.
 - **R3** — `xdu-cp` and `xdu-mv` SHALL exit non-zero with the cause on stderr, having written
@@ -94,18 +98,17 @@ mapping and a copy primitive that already exist.
   written; `--force` skips it; `--dry-run` prints each source with its destination and performs
   zero filesystem writes (no directory, no file, no unlink); an empty match prints a message and
   exits 0. WHEN `--limit` caps the set, `--dry-run` and the real run SHALL select identical rows.
-- **R7** — WHEN `--safe` is given, each of the three tools SHALL `lstat` every file immediately
+- **R7** — WHEN `--safe` is given, `xdu-cp` and `xdu-mv` SHALL `lstat` every file immediately
   before acting on it and skip it, counted, unless it is still a regular file and every filter
-  given still holds against its live metadata: size against `--min-size`/`--max-size`, atime against
-  `--older-than`/`--newer-than`, and, for `xdu-cp` and `xdu-mv`, mtime, owner, group and mode
-  against their filters. The path pattern holds by construction. This closes §4's `xdu-rm` gaps
-  without weakening its existing atime and size checks, and the `xdu-rm` man page SHALL then
-  describe what is checked.
+  given still holds against its live metadata: size against `--min-size`/`--max-size`, atime
+  against `--older-than`/`--newer-than`, mtime against `--mtime-older-than`/`--mtime-newer-than`,
+  uid against `--owner`, gid against `--group` and permission bits against `--mode`. The path
+  pattern holds by construction. Unlike `xdu-rm`'s today, no filter is left unchecked (§4).
 - **R8** — `xdu-cp` and `xdu-mv` SHALL accept every selection filter `xdu-find` accepts, with the
   same flags and semantics: `-p` glob or `--regex`, `-u`, `--min-size`, `--max-size`,
   `--older-than`, `--newer-than`, `--owner`, `--group`, `--mode`, `--mtime-older-than`,
   `--mtime-newer-than`, plus `-i`/`XDU_INDEX`, `-l`, `-n`, `--safe`, `-f`, `-v` and `-j`/`XDU_JOBS`
-  as `xdu-rm` defines them. `xdu-rm`'s flag set is unchanged.
+  as `xdu-rm` defines them.
 - **R9** — `xdu-cp` and `xdu-mv` SHALL end with a summary that counts each outcome separately
   (copied or moved, missing, existing at destination, skipped by `--safe` or the regular-file rule,
   ownership not preserved, failed), keep progress and per-file diagnostics off stdout except the
@@ -120,8 +123,12 @@ mapping and a copy primitive that already exist.
 
 ## Non-goals (no-gos)
 
-- **S3, every way round.** An `s3://` source index is refused (R3) for all three select-act tools,
-  as `xdu-rm` refuses it today; the engine is local-only so it has one posture. Letting the engine
+- **Migrating `xdu-rm` onto the engine**, and with it every change to `xdu-rm`: the wider `--safe`
+  re-check and its man-page correction, bound SQL for its selection, new filters, and a non-zero
+  exit on failed unlinks. Filed with this GOAL as `issues/xdu-rm-on-shared-engine.md`, with a
+  `ROADMAP.md` entry. `src/bin/xdu-rm.rs` is not touched (R1).
+- **S3, every way round.** An `s3://` source index is refused (R3) by `xdu-cp` and `xdu-mv`, as
+  `xdu-rm` refuses it today; the engine is local-only so it has one posture. Letting the engine
   read an S3 index folds into `issues/s3-index-rm.md`, widened at publish to name `xdu-cp` and
   `xdu-mv`. Copying or moving files into or out of an object store is not in the seed and is out.
 - **Updating the index** after a move or copy, or marking moved rows. The index is a snapshot; a
@@ -137,13 +144,9 @@ mapping and a copy primitive that already exist.
   optimisations beyond what the plan picks for correctness.
 - **Preserving a source's atime on read** (`O_NOATIME`, restoring it after the copy). Documented,
   not changed (R10).
-- **New filters for `xdu-rm`.** Its flag set stays as it is (R8); widening it is a follow-up.
-- **Changing `xdu-rm`'s exit status** on failed unlinks. `xdu-cp` and `xdu-mv` exit non-zero on
-  failure (R9); bringing `xdu-rm` in line is a behavior change on a high-blast file, filed as a
-  follow-up seed at publish.
 - **Bound parameters for `xdu-find` and `xdu-view`'s local SQL.** R1 binds only the engine's
-  selection; the readers stay with `issues/local-reader-bound-parameters.md`, which this cycle
-  narrows.
+  selection; the readers stay with `issues/local-reader-bound-parameters.md`, and `xdu-rm`'s
+  share moves with `issues/xdu-rm-on-shared-engine.md`.
 - **Lossily stored paths.** A row whose name was not valid UTF-8 names no real file and counts as
   missing, as in `xdu-rm`; storing raw bytes is an index-format change.
 - **Everything `xdu-tar` owns**: archive formats, streaming, compression, stdout output, member
@@ -158,47 +161,53 @@ mapping and a copy primitive that already exist.
   calendar: both tools, the shared engine, `--safe` against the richer schema, the full filter
   surface. S3 and every convenience mode go to Non-goals. Set by the foreman's brief (appetite big,
   land by 2026-11-13) (resolved 2026-11-06).
-- **Q:** May the source index be an `s3://` index? — **A:** No, in this cycle, for all three tools
-  on the engine (R3). Shaping decision on the foreman's brief, which left it open: one engine with
-  one S3 posture, matching `xdu-rm`'s refusal, and the reader-side wiring (bound S3 glob, marker
-  read over S3, credential resolver) belongs to the follow-up that brings `xdu-rm` to S3
-  (resolved 2026-11-06, gate to confirm).
+- **Q:** May the source index be an `s3://` index? — **A:** No, in this cycle: `xdu-cp` and
+  `xdu-mv` refuse it as `xdu-rm` does (R3), so the engine has one S3 posture. The reader-side
+  wiring (bound S3 glob, marker read over S3, credential resolver) folds into
+  `issues/s3-index-rm.md`. Proposed at shaping; confirmed by the foreman at the GOAL gate
+  (resolved 2026-11-06).
 - **Q:** What is the destination layout, and what root does it strip? — **A:** `DEST/<path
-  relative to --root>`, `--root` defaulting to `/`, because the index records absolute paths and
-  no crawl root. A selected path outside `--root` refuses the run before any write (R2, R3).
-  Shaping decision (resolved 2026-11-06, gate to confirm).
+  relative to --root>`, `--root` defaulting to `/`, which mirrors absolute paths under `--into`,
+  because the index records absolute paths and no crawl root. A selected path outside `--root`
+  refuses the run before any write (R2, R3). Proposed at shaping; confirmed by the foreman at the
+  GOAL gate (resolved 2026-11-06).
 - **Q:** Collision policy? — **A:** Never overwrite; skip, count, exit non-zero (R4, R9). The
   seed left it to shaping (resolved 2026-11-06).
 - **Q:** `xdu-mv`: rename or copy-plus-unlink, and what across filesystems? — **A:** A
   no-replace rename on one filesystem; across filesystems a complete, flushed copy, a check that
   the source did not change during it, then the unlink (R5). Cross-filesystem is the cold-storage
   case, so it is in scope, not refused. The seed left it to shaping (resolved 2026-11-06).
-- **Q:** Which columns does `--safe` check? — **A:** Every filter given, against live `lstat`
-  metadata, plus the regular-file test; the pattern holds by construction (R7). For `xdu-rm` this
-  covers only its own filters and closes §4's gaps (resolved 2026-11-06).
-- [NEEDS CLARIFICATION: R2's owner and group preservation. Shaped as attempted, with a refusal
-  counted (as `cp -p`): an administrator moving users' files to cold storage needs it, and a move
-  by rename keeps ownership anyway. CI runs unprivileged, so only the success path is testable
-  there; the refusal arm would be a unit test of the counting, not of a real `EPERM`. Gate: keep
-  as shaped, or cut to a Non-goal and document that a cross-filesystem move leaves files owned by
-  the caller?]
-- [NEEDS CLARIFICATION: R7 brings `xdu-rm --safe` onto the shared check now, a behavior change on
-  `src/bin/xdu-rm.rs` (more files skipped, never fewer). Shaped as in scope because one check
-  serving three tools cannot keep `xdu-rm`'s gaps without a special case. Gate: accept, or keep
-  `xdu-rm`'s current checks and file the gap as its own fix seed?]
-- [NEEDS CLARIFICATION: Ten R-IDs sits at the size circuit-breaker's edge. Gate: accept the cut
-  order in *Notes* as the pre-agreed fallback, or split now (for example `xdu-cp` plus the engine
-  this cycle, `xdu-mv` next)?]
+- **Q:** Which columns does `--safe` check? — **A:** For `xdu-cp` and `xdu-mv`, every filter
+  given, against live `lstat` metadata, plus the regular-file test; the pattern holds by
+  construction (R7) (resolved 2026-11-06).
+- **Q:** Does `xdu-rm` move onto the shared engine in this cycle, taking the wider `--safe` check
+  and the bound selection with it? — **A:** No. The engine serves `xdu-cp` and `xdu-mv`, and is
+  designed for `xdu-tar` and a later `xdu-rm` migration; `src/bin/xdu-rm.rs` and
+  `tests/rm_tests.rs` are unchanged (R1, R7). The migration, `xdu-rm`'s `--safe` widening and its
+  bound SQL are filed as `issues/xdu-rm-on-shared-engine.md` with a `ROADMAP.md` entry
+  (Non-goals). Reason: it takes high-blast `src/bin/xdu-rm.rs` off the critical path to
+  2026-11-13 and keeps `xdu-rm`'s behavior stable for the release users have. Ruled by the
+  foreman at the GOAL gate (resolved 2026-11-06).
+- **Q:** Does R2 keep owner and group preservation? — **A:** Yes, best-effort: attempted, a
+  refusal counted and not a failure (R2, R9). CI tests the success path, a `chown` to the caller's
+  own uid and gid. The refusal counting is unit-tested through an injectable seam if that is
+  cheap; otherwise the plan states it as untested. Reason: the headline use is an administrator
+  moving stale data to cold storage across filesystems, where silently losing ownership would be a
+  regression from `mv`. Ruled by the foreman at the GOAL gate (resolved 2026-11-06).
+- **Q:** Split `xdu-cp` from `xdu-mv` to stay under the size circuit-breaker? — **A:** No. With
+  `xdu-rm` out, the scope is under the breaker; the ten R-IDs stay, R1 and R7 narrowed. IF the
+  plan still finds the cycle oversized, THEN the first cut is R5's cross-filesystem path: `xdu-mv`
+  refuses a cross-filesystem move with a clear error, and the path is seeded, before anything else
+  is cut (*Notes*). Ruled by the foreman at the GOAL gate (resolved 2026-11-06).
 
 ## Notes
 
-- **Cut order if the box tightens**, each through a GOAL amendment: (1) R2's ownership
-  preservation, to a Non-goal; (2) R7 for `xdu-rm`, to a fix seed, with `xdu-cp`/`xdu-mv` keeping
-  the full check; (3) R1's bound-parameter selection, to `issues/local-reader-bound-parameters.md`.
-  `xdu-mv`'s cross-filesystem path (R5) is the reason for the tool and is not on the list.
-- **Phase order suggestion for `/xdu-plan`:** engine lifted with `xdu-rm` parity first, so
-  `tests/rm_tests.rs` proves the refactor before anything is built on it; then `xdu-cp` and the copy
-  primitive; then `xdu-mv`; documentation and packaging last.
+- **Cut order if the box tightens**, set at the GOAL gate and applied through a GOAL amendment:
+  first, R5's cross-filesystem path becomes a refusal with a clear error, and the path is seeded.
+  Nothing else is cut before it; a further cut goes back to the gate.
+- **Phase order suggestion for `/xdu-plan`:** the engine and `xdu-cp` with the copy primitive
+  first, then `xdu-mv`'s same-filesystem rename, then its cross-filesystem path, so the first cut
+  above falls on the last phase; documentation and packaging last.
 - **Footguns the plan must design against, not contract terms:** `rename(2)` silently replaces an
   existing destination, so R4 and R5 need a no-replace primitive on both Linux and macOS; R5's
   cross-filesystem path must be testable in CI, whether on two real filesystems or by driving the
@@ -208,7 +217,8 @@ mapping and a copy primitive that already exist.
   confirmation, `--safe`) separable from the parallel executor, because an archive consumes one
   ordered stream; the `--root` path mapping and its outside-root refusal; R2's copy primitive with
   R4's atomic appearance, as the staging path its R3 weighs against streaming; and R9's counted
-  outcomes. Tar's own member order, root handling and output are its own shaping.
+  outcomes. Tar's own member order, root handling and output are its own shaping. The same
+  selection is what `issues/xdu-rm-on-shared-engine.md` moves `xdu-rm` onto.
 
 ## Related materials
 
@@ -217,9 +227,11 @@ mapping and a copy primitive that already exist.
   `issues/index-diff-incremental-select.md`. `ROADMAP.md`, "Bulk operations" entries.
 - Prior art: `src/bin/xdu-rm.rs`; `tests/rm_tests.rs`; `doc/xdu-rm.1.scd`;
   `spec/rm-limit-deterministic-order/` (the `ORDER BY path` rule);
-  `lib::deterministic_limit_clause`, `lib::QueryFilters`, `lib::index_glob`, `lib::parquet_source` (`src/lib.rs`).
+  `lib::deterministic_limit_clause`, `lib::QueryFilters`, `lib::index_glob`,
+  `lib::parquet_source` (`src/lib.rs`).
 - Invariants: `.agents/factory/invariants.md` §2b (gates), §4 (destructive safety), §5 (SQL
   injection surface), §8 (regular files only), §10 (CLI single source), §11 (thin binaries), §13
   (tarball, `install.sh`, `hpccm/`, man-page literal counts).
-- Follow-ups touched: `issues/s3-index-rm.md` (widened to the engine),
+- Follow-ups touched: `issues/xdu-rm-on-shared-engine.md` (filed with this GOAL, at the GOAL
+  gate), `issues/s3-index-rm.md` (widened to the engine at publish),
   `issues/local-reader-bound-parameters.md` (narrowed to the readers).
