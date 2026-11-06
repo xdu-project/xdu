@@ -143,13 +143,19 @@ downloaded at run time, and a missing extension or a missing credential says wha
   the tool SHALL likewise exit non-zero before any request, with an error naming `AWS_CA_BUNDLE`.
   WHEN the endpoint presents a self-signed certificate, or one issued by a CA outside the trust
   source, all three tools SHALL refuse it as R4 refuses an unreachable endpoint, with a cause on
-  stderr that names the certificate. **One exception is recorded**, until the follow-up fix cycle
-  seeded as `issues/s3-reader-tls-hostname.md` lands: the readers' check that the certificate names
-  the endpoint's host is that of `httpfs`'s httplib client, which accepts a certificate whose
-  subject common name (CN) names the host when its subject alternative names (SAN) do not, or when
-  it has none. The writer checks the SAN alone and refuses such a certificate. A test on R10's
-  loopback endpoint SHALL show the exception as it stands, so that removing the fallback fails that
-  test. Nothing else in R11 is relaxed. No option or variable SHALL turn verification off. A plain
+  stderr that names the certificate. **One host-name exception is recorded**, until the follow-up
+  fix cycle seeded as `issues/s3-reader-tls-hostname.md` lands: the readers' check that the
+  certificate names the endpoint's host is that of `httpfs`'s httplib client, which accepts a
+  certificate whose subject common name (CN) names the host when its subject alternative names
+  (SAN) do not, or when it has none. The writer checks the SAN alone and refuses such a
+  certificate. A test on R10's loopback endpoint SHALL show the exception as it stands, so that
+  removing the fallback fails that test. **Two operator-bundle limits are recorded** with it, as
+  narrow exceptions until the same cycle lands: `AWS_CA_BUNDLE` must hold the root of the
+  endpoint's chain, self-signed with SHA-256 or stronger. A file whose only roots are SHA-1-signed,
+  or signed with another algorithm the writer does not verify, is refused as holding no root; and
+  an intermediate whose own root is absent, beside an unrelated root, passes that check, so `xdu`
+  writes an index that both readers refuse. Neither weakens server authentication: in each, the
+  stricter side refuses. Nothing else in R11 is relaxed. No option or variable SHALL turn verification off. A plain
   `http://` endpoint override stays as it is: TLS does not apply to it. Tests on R10's loopback
   endpoint, with TLS in front of it, SHALL exercise each of these cases.
 
@@ -272,6 +278,20 @@ downloaded at run time, and a missing extension or a missing credential says wha
     (LOW, plausible: a dotted bucket cannot reach AWS over virtual-hosted TLS) is seeded as
     `issues/s3-dotted-bucket-names.md`. The human signed off on this high-blast remediation
     through the foreman. Amended 2026-11-06.
+- **Q:** Review cycle 5 found two edges in that root rule. Does this cycle fix them? — **A:** No.
+  It records both in R11 as operator-bundle limits and changes no code. Source: review cycle 5
+  (`REVIEW.md`, "Review cycle 5"), findings 1–2, both MEDIUM, confirmed and fail-closed. PLAN §7.6
+  named both, but the GOAL did not.
+  - **Finding 1.** A root counts only when the writer's TLS stack verifies its self-signature, so
+    a CA file whose only roots are SHA-1-signed is refused as holding no root, although both TLS
+    stacks accept a chain that ends at such a root.
+  - **Finding 2.** The rule asks that the file hold some self-signed root, not that its CA
+    certificates chain to one. With an intermediate beside an unrelated root, the writer anchors
+    at the intermediate and writes the index; both readers then refuse the endpoint as untrusted.
+  - **Human ruling, via the foreman: "record and land."** Both limits are stated in R11, the
+    README and the three man pages, and fold into `issues/s3-reader-tls-hostname.md`, whose
+    acceptance now removes them with the CN exception. Neither weakens server authentication, so
+    `invariants.md` §5 is unchanged. Amended 2026-11-06.
 
 ## Notes
 

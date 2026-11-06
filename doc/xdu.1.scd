@@ -116,10 +116,13 @@ applies to it.
 A private CA's certificate for the endpoint must name the endpoint's host in
 its subject alternative name (SAN), and the CA file must include the root
 certificate its chain ends at: a file holding no self-signed root, such as an
-intermediate CA alone, fails the run before any request. Known limitation:
-xdu checks the SAN alone, but *xdu-find*(1) and *xdu-view*(1) also accept a
-certificate whose subject common name (CN) names the host when its SAN does
-not, or when it has none. A follow-up will make the readers check the SAN
+intermediate CA alone, fails the run before any request. That root must be
+self-signed with SHA-256 or stronger, since a file whose only roots are
+SHA-1-signed fails the same way, and an intermediate must ship with its own
+root: beside an unrelated root, xdu writes an index the readers refuse. Known
+limitation: xdu checks the SAN alone, but *xdu-find*(1) and *xdu-view*(1) also
+accept a certificate whose subject common name (CN) names the host when its SAN
+does not, or when it has none. A follow-up will make the readers check the SAN
 alone.
 
 # ENVIRONMENT

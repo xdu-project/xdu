@@ -435,7 +435,9 @@ self-signed or unknown-CA endpoint is refused by all three tools; a store with a
 `AWS_CA_BUNDLE` set to that CA's file. That file must include the root certificate the chain ends
 at (a file with no self-signed root, such as an intermediate CA alone, is refused before any
 request), and the endpoint's certificate must name its host in the subject alternative name (SAN).
-Known limitation: `xdu-find` and `xdu-view` also accept a certificate whose subject common name
+That root must be self-signed with SHA-256 or stronger, since a file whose only roots are
+SHA-1-signed is refused the same way, and an intermediate must ship with its own root: beside an
+unrelated root, `xdu` writes an index the readers refuse. Known limitation: `xdu-find` and `xdu-view` also accept a certificate whose subject common name
 (CN) names the host when its SAN does not, which `xdu` refuses; a follow-up
 ([`issues/s3-reader-tls-hostname.md`](issues/s3-reader-tls-hostname.md)) will make the readers
 check the SAN alone.

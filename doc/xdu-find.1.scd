@@ -120,10 +120,14 @@ none of this applies to it.
 A private CA's certificate for the endpoint must name the endpoint's host in
 its subject alternative name (SAN), and the CA file must include the root
 certificate its chain ends at: a file holding no self-signed root, such as an
-intermediate CA alone, is refused before any request. Known limitation:
-xdu-find and *xdu-view*(1) accept a certificate whose subject common name (CN)
-names the host when its SAN does not, or when it has none, while *xdu*(1)
-refuses it. A follow-up will make the readers check the SAN alone.
+intermediate CA alone, is refused before any request. That root must be
+self-signed with SHA-256 or stronger, since a file whose only roots are
+SHA-1-signed is refused the same way, and an intermediate must ship with its
+own root: beside an unrelated root, *xdu*(1) writes an index that xdu-find
+refuses. Known limitation: xdu-find and *xdu-view*(1) accept a certificate whose
+subject common name (CN) names the host when its SAN does not, or when it has
+none, while *xdu*(1) refuses it. A follow-up will make the readers check the
+SAN alone.
 
 The bucket must have a name S3 allows: 3 to 63 lowercase letters, digits, dots
 and hyphens, beginning and ending with a letter or digit, with no two dots

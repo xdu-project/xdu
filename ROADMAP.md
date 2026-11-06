@@ -112,16 +112,17 @@ still cannot reach the authority in either direction.
 *Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (TECH review cycle 2 triage, foreman ruling at run B)*
 **Seed:** [`issues/s3-legacy-bucket-names.md`](issues/s3-legacy-bucket-names.md)
 
-## One host-name rule for both S3 directions
+## One TLS check for both S3 directions
 
 `xdu-find` and `xdu-view` accept an `https` S3 endpoint whose certificate names the host only in its
 subject CN, which `xdu` refuses: the readers' TLS client is the pinned `httpfs`'s httplib, which
-falls back on the CN when the SAN does not name the host. The pilot lands with this as a recorded
-exception to its TLS rule, and the fix is committed: make the readers check the SAN alone, through
-an in-process relay that uses the writer's TLS client or an upstream change, and delete the
-exception.
+falls back on the CN when the SAN does not name the host. Two CA-bundle limits ride with it: a file
+whose only roots are SHA-1-signed is refused, and an intermediate without its own root lets `xdu`
+write an index the readers refuse. The pilot lands with all three recorded in its TLS rule, and the
+fix is committed: make every direction verify alike, through an in-process relay that uses the
+writer's TLS client or an upstream change, and delete the exception and both limits.
 
-*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL R11 and its 2026-11-06 clarification, REVIEW cycle 4 finding 1)*
+*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL R11 and its 2026-11-06 clarifications, REVIEW cycle 4 finding 1, cycle 5 findings 1–2)*
 **Seed:** [`issues/s3-reader-tls-hostname.md`](issues/s3-reader-tls-hostname.md)
 
 ## Reach an AWS bucket whose name holds a dot
