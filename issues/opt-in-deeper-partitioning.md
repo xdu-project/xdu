@@ -102,8 +102,9 @@ any `stat` and therefore cost nothing. Keys that need file metadata are a batch 
   [`chunk-clustering-and-row-groups.md`](chunk-clustering-and-row-groups.md) (whose granularity this
   trades against). Landing this first would measure partitioning against a baseline leaving 8x
   unclaimed and reach the wrong conclusion about how much partitioning is worth.
-- Related: [`xdu-repack.md`](xdu-repack.md), [`s3-index-target.md`](s3-index-target.md) (where the
-  numbers were taken),
+- Related: [`xdu-repack.md`](xdu-repack.md),
+  [`research/duckdb-native-s3-reads.md`](../research/duckdb-native-s3-reads.md) (where the numbers
+  were taken, for the S3 index target now on `main` since #33),
   [`orphan-partition-survives-reindex.md`](orphan-partition-survives-reindex.md) and
   [`index-diff-incremental-select.md`](index-diff-incremental-select.md) (both read the layout, and
   both benefit from a finer unit of scoped re-indexing),

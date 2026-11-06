@@ -93,5 +93,6 @@ future.
   recorded once the marker grows a schema),
   [`opt-in-deeper-partitioning.md`](opt-in-deeper-partitioning.md) (the granularity this trades
   against), [`xdu-repack.md`](xdu-repack.md) (which re-clusters an existing index without
-  re-crawling), [`s3-index-target.md`](s3-index-target.md) (where the measurement was taken).
+  re-crawling), [`research/duckdb-native-s3-reads.md`](../research/duckdb-native-s3-reads.md)
+  (where the measurement was taken, for the S3 index target now on `main` since #33).
 - Found by: the DuckDB-native S3 read spike, 2026-09-15.

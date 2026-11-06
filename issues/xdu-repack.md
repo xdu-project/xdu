@@ -102,7 +102,8 @@ And three shaping questions for promotion:
 - Related: [`opt-in-deeper-partitioning.md`](opt-in-deeper-partitioning.md) (whose metadata-derived
   half this absorbs), [`self-describing-index-marker.md`](self-describing-index-marker.md)
   (prerequisite), [`chunk-clustering-and-row-groups.md`](chunk-clustering-and-row-groups.md) (a
-  repack re-clusters without re-crawling), [`s3-index-target.md`](s3-index-target.md) (R6),
+  repack re-clusters without re-crawling), `spec/s3-index-target/` (on `main` since #33; the
+  `s3://` locator, writer and readers R6 builds on),
   [`index-diff-incremental-select.md`](index-diff-incremental-select.md) (the other tool that reads
   one index and writes another).
 - Found by: the DuckDB-native S3 read spike and the layout design that followed it, 2026-09-15.

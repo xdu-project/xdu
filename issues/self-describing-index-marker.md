@@ -84,8 +84,9 @@ distinction, the first cosmetic key added will hard-fail some reader in the fiel
   ([`marker-scoped-run-attestation.md`](marker-scoped-run-attestation.md)). That is a separate
   defect in the same file; this seed changes the marker's vocabulary, not the accuracy of its
   counts.
-- **Open question carried in.** Over an S3-backed index the marker has no size cap: `read_text` and
-  `read_blob` fetch the whole object and `glob()` exposes only `file`, so `MARKER_READ_LIMIT` has no
-  equivalent. Growing the marker's contents makes deciding this more pressing, not less
-  ([`s3-index-target.md`](s3-index-target.md)).
+- **The S3 marker cap is settled.** The S3 index target (on `main` since #33, record in
+  `spec/s3-index-target/`) caps the marker read over S3 too: a HEAD reads the object's size, and a
+  marker over `MARKER_READ_LIMIT` is refused as `MarkerRead::Oversized` without its GET. Growing the
+  marker's contents has to stay inside that cap, which is now a limit on this seed in both
+  directions rather than an open question.
 - Found by: the DuckDB-native S3 read spike, 2026-09-15.
