@@ -185,7 +185,7 @@ is skipped by the parser):
 - **Recommended fix:** in Step 2, prefer a brief file assembled verbatim by `cat` from the
   committed files at the reviewed head, outside `spec/`, and have `REVIEW.md` record that it was
   used. Blindness is unchanged: the file holds only the three allowed texts.
-- **Confidence:** med · **Effort:** small · seen again (review cycles 3 and 4)
+- **Confidence:** med · **Effort:** small · seen again (review cycles 3, 4 and 5)
 
 ## F10 — A command a remediation writes into the manual is never run in the form it was written
 `origin=xdu-build:remediation-cycle-2 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-build/SKILL.md`
@@ -262,4 +262,22 @@ is skipped by the parser):
 - **Recommended fix:** set `bindir="${CARGO_TARGET_DIR:-$root/target}/release"`, or take the
   executables' paths from `cargo build --message-format=json`. In Step 2, say that concurrent
   reviewers each take their own `CARGO_TARGET_DIR`.
-- **Confidence:** high · **Effort:** small
+- **Confidence:** high · **Effort:** small · seen again (review cycle 5)
+
+## F14 — A limitation recorded only in the PLAN has no defined standing at review
+`origin=xdu-review:step-3 severity=low category=missing-guidance status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** cycle 4's remediation recorded two limits of its fix in PLAN §7.6 ("What it
+  costs" and "What it does not close"), in the same commit as the approved GOAL amendment. The
+  GOAL recorded neither and says "Nothing else in R11 is relaxed". Both blind reviewers
+  reproduced both. The orchestrator then had to decide, with no rule, whether PLAN text approved
+  beside a GOAL amendment waives a finding, on the last approved cycle.
+- **Skill cause:** the skill keeps the reviewer blind to the PLAN and grades the GOAL, but never
+  says what the orchestrator does with a residual the PLAN or a seed admits and the GOAL does not.
+  Step 1's contract-drift check approves GOAL commits, and does not say that PLAN text riding in
+  the same commit is not contract.
+- **Recommended fix:** in Step 3, state that only the GOAL records an exception: a limitation
+  admitted only in `PLAN.md`, `TECH.md` or a seed is graded as a finding, and `REVIEW.md` notes
+  where it was admitted. In `xdu-build`'s remediation guidance, route such a residual to the GOAL
+  gate as a named exception before review. This does not weaken blind-review integrity; it makes
+  it explicit.
+- **Confidence:** med · **Effort:** small

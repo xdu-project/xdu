@@ -1119,3 +1119,236 @@ and the diff, but not this file or `META.md`.
 - **Nothing planned was dropped silently.** One planned item was not done but is recorded in
   `TECH.md`: P6's red-first run of the writer's wire test on Linux. It is an evidence gap with no
   seed.
+
+## Review cycle 5 — changes-requested (2026-11-06)
+
+- **Reviewed commit:** e77576607d4ac52fe7303a653093157f50e7d2be  ·  **Graded diff:** cycle 4's
+  remediation, `edefe69..HEAD`, spec-excluded  ·  **Date:** 2026-11-06
+- **Verdict:** changes-requested
+- **Cycle:** 5, mirroring `review.cycle` in `TECH.md`. The human approved this one cycle to grade
+  the remediation of cycle 4. It is the last approved cycle, so any CONFIRMED finding stops the
+  loop here. Nothing was remediated in this session.
+
+### How this review ran
+
+- **Mode: scoped to the remediation**, on the foreman's ruling.
+  - The graded diff is `git diff edefe69..HEAD -- . ':(exclude)spec/'`: 13 files, namely
+    `src/s3.rs`, `tests/common/s3.rs`, `tests/s3_tests.rs`, three man pages, `README.md`,
+    `AGENTS.md`, `invariants.md`, `ROADMAP.md`, the CI count and two seeds.
+  - The reviewers could read the full spec-excluded `git diff main...HEAD` for context. They
+    reported only defects the remediation introduced, cycle 4 findings it left unfixed, or
+    defects it newly exposed.
+- **The `debate` variant, for the fifth time.** Reviewer A argued "ship" and B argued "block".
+  Neither saw the other's output, this file, or any account of cycle 4 beyond the GOAL's own
+  Clarification.
+- **What the reviewers saw:**
+  - `GOAL.md`, `invariants.md` and `review-rubric.md`, verbatim at `e775766`, in one brief file
+    built with `git show HEAD:<path>` under `target/review5-tmp/` (meta-note F9, seen again).
+  - The two diffs, `AGENTS.md` and the runnable worktree.
+  - They were pointed at the root rule, the CN exception, the docs, the two seeds, and the gates
+    with their count of 53.
+  - They were barred from the rest of `spec/`, commit bodies, `target/ci/` and scratch they did not
+    create. They ran the wire tier with `cargo test`, not `tests/s3-wire.sh`. They drove their
+    own binaries rather than `temp_index.sh` (meta-note F13, seen again).
+- **Contract drift: six GOAL commits.** Five are the ones cycle 4 graded. The sixth, `378e585`,
+  amends R11 on the human's option-1 ruling: the recorded CN exception, the clause refusing a
+  trust source with no self-signed root, and the 2026-11-06 Clarification. It was approved
+  before this review, so this cycle grades the GOAL as it stands. The recorded exception is
+  contract, not a finding.
+- **Artifact-deliverable R-IDs:** none. O graded the CI-run halves of R3 and R10 from the CI
+  logs.
+- **Completeness sub-pass:** skipped, on the foreman's ruling.
+
+### Verification run
+
+"A" and "B" are the blind reviewers; "O" is the orchestrator.
+
+- **The wire gate (O).** O ran `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 53`,
+  the relative form `AGENTS.md` documents, in its own target dir. It exited 0:
+  - `s3-wire: '' 53 of 53 passed`, with all seven `tls_` tests `ok`;
+  - `s3-count-bytes: received 138351 of 16784047 stored bytes (0.824%)`, and the negative
+    control's `(90.271%)`;
+  - `write-unsafe-names: 4 case(s), non-UTF-8 case skipped` (APFS).
+- **Local gates (A, B).**
+  - `cargo fmt --all -- --check` and `cargo clippy --locked --offline --all-targets
+    --all-features -- -D warnings` exited 0.
+  - `cargo test --lib` gave `169 passed`. The plain `s3_tests` tier gave `4 passed; 49 ignored`
+    (A).
+  - The wire tier through `cargo test`: 53 listed, 53 passed, each reviewer twice.
+- **Controls on the CN exception test (A, B),** each in its own `git archive` export.
+  - A renamed both CN-only leaves' CN away from the host. The test went red at
+    `tests/s3_tests.rs:3338` with "xdu-find: refused the CN-only leaf".
+  - B bound the readers' `ca_cert_file` to an unrelated CA, and got the same red.
+  - So the reader half fails once the readers refuse, and the root fix must flip it. The writer
+    half asserts the refusal through `assert_tools_refuse(&["xdu"])`: the certificate alert, and
+    no request.
+- **Controls for the findings (A, B, O):** under each finding.
+- **CI (O), on `e1311fc`.** `e775766` adds only `spec/` evidence. None of the three logs has a
+  `##[error]` line.
+  - **Tests run 42239258332,** on the merge ref `324e9bd` (`e1311fc` into `a0cdd95`).
+    - Both legs: `test result: ok. 53 passed; 0 failed`, then `s3-wire: '' 53 of 53 passed`,
+      then `s3-count-bytes` at 0.824%.
+    - The plain step: lib `169 passed`, which includes
+      `every_platform_bundle_on_this_host_holds_a_root`, and `s3_tests` `4 passed; 0 failed; 49
+      ignored`.
+    - Packaging: `OK: every asserted literal survived into the published man-page text`.
+    - The AWS smoke probe (not acceptance) found `/etc/ssl/certs/ca-certificates.crt` on Ubuntu
+      and `/etc/ssl/cert.pem` on macOS, and all three tools got AWS's HTTP 403.
+  - **Release run 42239258104,** at `e1311fc`: the probe and the extension check ran on all four
+    builds. Both Linux builds used `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` and both
+    macOS builds `/etc/ssl/cert.pem`. Each tool got the 403, so the root rule accepted every
+    platform bundle CI met.
+  - **Image run 42239257985:** both validate jobs, the Debian bundle, the same 403 from all three
+    tools.
+- **Man-page render (local): unavailable again.** `scdoc` is not installed, and this session
+  installs nothing.
+  - The added man-page lines carry no counted literal (O). A and B matched the source counts
+    against the workflow's `Nx:` specs.
+  - CI's count gate is green, but the published text has still not been read locally. That
+    remains an unclosed gap for the human.
+- **Tree state (O).**
+  - `git status --porcelain` was empty after both hand-backs and after O's controls.
+  - `target/test-ext/httpfs.duckdb_extension` hashed `9a3eef9c…afe8be` before and after (A, B,
+    O). `target/lib/` does not exist.
+  - O's run of `tests/s3-wire.sh` rewrote `target/wire-all.log` and `target/wire-all.list`.
+  - A and B each restored their target dirs with `cargo clean -p xdu` and a rebuild from the
+    worktree. Each proved the restore with a 53/53 run that listed no probe.
+  - O's controls ran in O's own target dir, whose binaries were last built from exports with the
+    same `src/` as `HEAD`.
+  - Scratch is under `target/review5-tmp/`, git-ignored and left for the foreman: `A` 12G, `B`
+    12G and `O` 8.1G. Free disk fell by about 30 GiB during the review.
+
+### Earlier findings at this head (O)
+
+| Finding | Status at `e775766` |
+|---|---|
+| Cycle 4, 1. The readers accept a certificate whose CN alone names the host | **Recorded, not a finding.** It is R11's one named exception (`378e585`). It is stated once each in R11, `invariants.md` §5 (`:228-235`) and `AGENTS.md` invariant 5 (`:529-532`), and as a "Known limitation" in the README and the three man pages. `AGENTS.md` omits "or when it has none", which narrows it. `tls_a_leaf_naming_the_host_only_in_its_cn_is_refused_by_xdu_alone` pins it, and A's and B's controls turn it red once the readers refuse. Its root fix is seeded as `issues/s3-reader-tls-hostname.md` (`kind: fix`); that seed's R3 makes deleting every statement of the exception its acceptance, and it has a `ROADMAP.md` entry. |
+| Cycle 4, 2. With an intermediate-only bundle, the writer builds what the readers refuse | **Fixed for the shape reported.** `tls_a_ca_bundle_without_a_root_is_refused_and_one_with_it_answers` passes (O, A, B, both CI legs). All three tools refuse before any connection, naming `AWS_CA_BUNDLE` and the file, never "not trusted". Root plus intermediate answers with the plain-HTTP count. **The class is not closed: finding 2 below.** |
+| Cycle 4, 3. A dotted bucket cannot reach AWS over TLS | **Seeded** as `issues/s3-dotted-bucket-names.md` (`kind: fix`), with a `ROADMAP.md` entry. A and B checked its code anchors. `ROADMAP.md`'s "eight entries" count is right (A, B). |
+| Cycles 1–3 | No regression. The remediation touches none of their code, and the wire tier passes 53/53 (O, A, B, CI). |
+
+### Requirement → evidence matrix (remediation scope)
+
+| R-ID | Implemented by | Verified how (who) | Status |
+|------|----------------|--------------------|--------|
+| R2 | The reader path, unchanged; the root-plus-intermediate case | Wire tier 53/53 (O, A, B, CI). Over a root-plus-intermediate chain, the TLS count equals plain HTTP's (A, B) | ✅, except the bundles of findings 1 and 2 |
+| R9 | Three man pages and the README: the SAN rule, the root rule and the CN limitation | Read against the code (A, B, O); source counts (A, B); CI count gate green (O); **render not read locally** | ✅ (gap noted) |
+| R10 | Two new `tls_` tests; the count of 53 in CI, `AGENTS.md` and the P5/P6 gates | `--list --include-ignored` gives 53 (O, A, B); 53/53 locally and on both CI legs | ✅ |
+| R11 | `bundle_certificates`' root check, `is_self_signed_root`, `CertificateParts`; the recorded exception and its test | Three new unit tests and the seven `tls_` tests (O, A, B, CI); the exception controls (A, B); the probes for findings 1 and 2 (A, B, O) | ❌ findings 1 and 2 |
+
+The remediation does not touch the other R-IDs; cycle 4 graded them. **Unmapped changes:** none
+(A, B).
+
+### Findings
+
+Two CONFIRMED, both MEDIUM, both in `src/s3.rs`. A and B each found both independently, and O
+reproduced both. In each, the stricter side refuses, so neither weakens server authentication or
+breaks `invariants.md` §5.
+
+#### [MEDIUM/CONFIRMED] 1. A root self-signed with SHA-1 does not count as a root, so a CA file holding only such roots is refused
+- **Where:** `src/s3.rs:761-779`. `is_self_signed_root` counts a root only when one of ring's
+  algorithms verifies its self-signature (`:766-773`). `bundle_certificates` applies it at
+  `:739-748`. The code is new in this remediation.
+- **Failure scenario:**
+  - `AWS_CA_BUNDLE` names a file whose roots are all self-signed with SHA-1 RSA, such as DigiCert
+    Global Root CA, or an older private root.
+  - All three tools exit 1 before any request: "holds no root CA certificate (one issued and
+    signed by itself)".
+  - That is false. The certificate is issued and signed by itself, and both TLS stacks accept a
+    chain that ends at it.
+- **Contract text:**
+  - R11 refuses a trust source that "holds no self-signed root certificate".
+  - The man pages (`doc/xdu.1.scd:116-119` and the same paragraph in the readers' pages),
+    `README.md:435-437`, `AGENTS.md:521-522`, `:576` and `invariants.md` §5 say the same.
+  - None of them names an algorithm. The code comment at `src/s3.rs:757-760` calls the
+    narrowing deliberate, but the GOAL does not record it.
+- **Evidence:**
+  - **O's CLI drive.** O cut DigiCert Global Root CA from `/etc/ssl/cert.pem`. It is
+    `sha1WithRSAEncryption`, its issuer equals its subject, and `openssl verify -CAfile r.pem
+    r.pem` gives `OK`.
+    - With it as `AWS_CA_BUNDLE` and an `https` endpoint, `xdu-find`, `xdu-view` and `xdu -o`
+      each exited 1 with that error and no stdout.
+    - With ISRG Root X1 (SHA-256) appended to the file, `xdu-find` passed the resolver and failed
+      only at the dead endpoint: "cannot reach the S3 endpoint".
+  - **O ran A's wire probe** `probe_a_sha1_self_signed_root_is_refused_though_both_stacks_take_it`,
+    from A's export (with the same `src/` as `HEAD`), in O's target dir: 1 passed. A SHA-1 root
+    made with `openssl` signs a SHA-256 leaf for `IP:127.0.0.1`.
+    - With the root alone, all three tools gave `exit_ok=false proxied_requests=0
+      tls_connections=0`.
+    - With the root plus an unrelated SHA-256 root:
+      - `xdu-find`: `exit_ok=true proxied_requests=11 stdout="143"`;
+      - `xdu`: `exit_ok=true`, with the marker written;
+      - `xdu-view`: 13 requests, then the no-terminal stop.
+  - **A and B: the platform bundle.** Of the 128 certificates in `/etc/ssl/cert.pem`, 87 count as
+    roots. The other 41 are all SHA-1 roots, and each is refused when it is the whole file.
+  - **B: a Mozilla-derived bundle.** 25 of its certificates are refused alone: 22 SHA-1 roots, 2
+    P-521 roots, and 1 real intermediate.
+  - **No platform bundle loses every root,** so platform bundles are not refused (A, B, and CI's
+    platform bundles above).
+- **Touches:** the high-blast `src/s3.rs`; R11. It fails closed and trusts nothing extra.
+
+#### [MEDIUM/CONFIRMED] 2. A file holding an intermediate and an unrelated root passes the root rule, and the writer builds what the readers refuse
+- **Where:** `src/s3.rs:739-748`. The rule asks only that some kept certificate be a self-signed
+  root, not that the file's CA certificates chain to one. The `TrustSource` comment at
+  `src/s3.rs:355-356`, "so the two directions trust one set", does not hold for such a file.
+- **Failure scenario:**
+  - An operator appends a private intermediate to a copy of the system bundle, or names an
+    intermediate beside a root it does not chain to.
+  - webpki anchors at the intermediate, so `xdu` writes the index and its marker over TLS.
+  - `xdu-find` and `xdu-view` then refuse the endpoint as untrusted.
+  - This is cycle 4 finding 2's failure, reached through a file the new rule accepts.
+- **Contract text:**
+  - R11: "one trust source … used by both directions". Cycle 4 graded the same split ❌ under R11
+    and R2.
+  - R11 also says "Nothing else in R11 is relaxed". `invariants.md:235` ("Nothing else in this
+    rule has an exception") and `AGENTS.md:532` likewise make the CN fallback the only exception.
+- **Evidence:**
+  - **O's control.** O took an export of `HEAD` with the same `src/`, and built the test PKI's
+    `root-and-intermediate.pem` from the unrelated CA and the intermediate, in place of the test
+    CA. `tls_a_ca_bundle_without_a_root_is_refused_and_one_with_it_answers` failed at
+    `tests/s3_tests.rs:3274`.
+    - `xdu`'s assertions had already passed: it exited 0, sent its requests and wrote the
+      marker.
+    - The panic read: "root and intermediate, xdu-find: Error: the S3 endpoint's TLS certificate
+      is not trusted while listing the index for s3://xdu-test/chained/idx; … (IO Error: SSL
+      server verification failed …)".
+  - **B, an intermediate plus the unrelated test CA:** `xdu ok=true proxied=9 marker=true`, and
+    both readers refused. The same index over plain HTTP counted `52`.
+    - With `/etc/ssl/cert.pem` plus the intermediate, B got the same split.
+    - B's control, the root plus the intermediate: all three tools answered.
+  - **A:** the same split, from the intermediate plus the unrelated CA.
+- **Where it is recorded:**
+  - PLAN §7.6 ("What it does not close"), and the Notes of `issues/s3-reader-tls-hostname.md`
+    (`:113`). Neither is the contract.
+  - That seed's acceptance is deleting the CN exception, and its Notes say route 2 (an upstream
+    change) would not close this edge. So no committed acceptance owns it (B).
+- **Touches:** the high-blast `src/s3.rs`; R11 and R2.
+
+**Both were disclosed in PLAN §7.6,** committed with the GOAL amendment in `378e585`. "What it
+costs" names the SHA-1 refusal, and "What it does not close" names finding 2. The GOAL records
+only the CN exception and says nothing else in R11 relaxes. The reviewers grade the GOAL, so a
+limitation that only the PLAN records is graded as a finding (meta-note F14).
+
+**Considered and dropped** (A and B, merged):
+
+- **DER edge cases:** v1 certificates with no version field, long-form or non-minimal lengths,
+  and trailing data are handled or refused earlier (B).
+- **A certificate whose issuer equals its subject but that another key signed:** it does not
+  count, and a unit test holds that (A, B).
+- **A bundle of cross-signed certificates alone:** refused (B).
+- **Look-alike roots built from key identifiers and key usage:** contrived, and covered by
+  finding 2 (B).
+
+### Human-gate triggers
+
+- **Triggered by path.** Both findings are CONFIRMED in `src/s3.rs`, which is on the
+  authoritative list.
+- **Not triggered by invariant.** Neither finding weakens server authentication, so §5 holds.
+- **This was the last approved cycle.** The skill stops here, records the findings, and
+  recommends no `/xdu-build` without the human. Nothing was remediated in this session.
+- **For the human:**
+  - **Finding 1:** count a root by its name and key, as OpenSSL does, rather than by ring
+    verifying its self-signature; or record the algorithm condition in R11 and the docs.
+  - **Finding 2:** refuse a file whose CA certificates do not chain to a root it holds; or
+    record the edge in R11 and §5 as a second named exception, and give it an owner.
+  - The local man-page render is still unread (above).

@@ -3,7 +3,7 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_review
+status: blocked
 branch: feature/s3-index-target
 base: main
 current_phase: done
@@ -220,10 +220,11 @@ phases:
     --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo
     P6-GATE-GREEN'
 review:
-  last_reviewed_commit: 9f0019d91d0a623c4950cf10d31ff024daf52391
+  last_reviewed_commit: e77576607d4ac52fe7303a653093157f50e7d2be
   verdict: changes-requested
-  blocked_reason: ''
-  cycle: 4
+  blocked_reason: 'review cycle 5: root rule refuses SHA-1 roots; intermediate plus
+    unrelated root still splits writer and readers'
+  cycle: 5
 ---
 # TECH.md — Build an index into S3 and query it in place
 
