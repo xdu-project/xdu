@@ -36,6 +36,7 @@ use common::s3::{
     test_extension_dir, varied_source_tree, wide_source_tree,
 };
 use xdu::engine::open_s3_connection_from;
+use xdu::s3::PLATFORM_CA_BUNDLES;
 use xdu::view_query::{self, DirEntry};
 use xdu::{COMPLETION_MARKER, IndexLocator, MARKER_READ_LIMIT, QueryFilters, SortMode};
 
@@ -2646,4 +2647,492 @@ fn view_failures_name_distinct_causes_before_the_terminal() {
         "a chunk was read in a failing case"
     );
     assert_clean(&s3, &hermetic);
+}
+
+// =============================================================================
+// TLS server authentication
+// =============================================================================
+
+/// The phrase every refusal of an endpoint's certificate carries, in both directions, and that
+/// no other error does: a test that finds it knows the server was refused, not that no roots
+/// were found.
+const UNTRUSTED: &str = "TLS certificate is not trusted";
+
+/// A platform bundle is present on this host, or the test cannot ask what trusting the platform
+/// means here: it panics naming the list rather than pass on a refusal for want of roots.
+fn require_a_platform_bundle() {
+    assert!(
+        PLATFORM_CA_BUNDLES
+            .iter()
+            .any(|bundle| Path::new(bundle).is_file()),
+        "no platform CA bundle on this host (looked for {PLATFORM_CA_BUNDLES:?})"
+    );
+}
+
+/// The three tools against the endpoint at `url`: `xdu-find --count` and `xdu-view` reading
+/// `WRITE_PREFIX`, and `xdu` building `source` into it. `ca_bundle` is `AWS_CA_BUNDLE`, unset when
+/// `None`, and `extra` sets anything else.
+fn tls_tools(
+    s3: &TestS3,
+    hermetic: &Hermetic,
+    url: &str,
+    ca_bundle: Option<&Path>,
+    extra: &[(&str, &OsString)],
+    source: &Path,
+) -> [(&'static str, Command); 3] {
+    let locator = s3.url(WRITE_PREFIX);
+    let mut xdu = s3.write_command(hermetic);
+    xdu.args(xdu_args(source, &locator, "2"));
+    let mut find = s3.find_command(hermetic);
+    find.args(["-i", &locator, "--count"]);
+    let mut view = s3.view_command(hermetic);
+    view.args(["-i", &locator]);
+    let mut tools = [("xdu-find", find), ("xdu-view", view), ("xdu", xdu)];
+    for (_, cmd) in &mut tools {
+        cmd.env("AWS_ENDPOINT_URL", url);
+        if let Some(bundle) = ca_bundle {
+            cmd.env("AWS_CA_BUNDLE", bundle);
+        }
+        for (name, value) in extra {
+            cmd.env(name, value);
+        }
+    }
+    tools
+}
+
+/// Each tool, against a fresh front showing `identity`, refuses the endpoint's certificate:
+/// non-zero exit, nothing on stdout, the certificate refusal on stderr, at least one connection
+/// at the front and no request at the proxy. The writer also shows a handshake it failed with
+/// a certificate alert. Nothing in the bucket changed.
+fn assert_each_tool_refuses(
+    s3: &TestS3,
+    identity: &common::s3::FrontIdentity,
+    case: &str,
+    ca_bundle: Option<&Path>,
+    extra: &[(&str, &OsString)],
+    source: &Path,
+    before: &BTreeMap<String, Vec<u8>>,
+) {
+    for tool in 0..3 {
+        let hermetic = Hermetic::new();
+        let front = s3.tls_front(identity);
+        let mut tools = tls_tools(s3, &hermetic, &front.url(), ca_bundle, extra, source);
+        let (name, cmd) = &mut tools[tool];
+        let proxied = s3.requests().len();
+        let (out, err, ok) = run(cmd);
+        let what = format!("{case}, {name}");
+        assert!(!ok, "{what}: the tool succeeded: {err}");
+        assert!(out.is_empty(), "{what}: stdout written: {out:?}");
+        assert!(
+            err.contains(UNTRUSTED),
+            "{what}: stderr does not say '{UNTRUSTED}': {err}"
+        );
+        assert!(
+            err.contains("AWS_CA_BUNDLE"),
+            "{what}: stderr does not name AWS_CA_BUNDLE: {err}"
+        );
+        let connections = front.connections();
+        assert!(
+            !connections.is_empty(),
+            "{what}: the front accepted no connection, so nothing was refused"
+        );
+        assert_eq!(
+            s3.requests().len(),
+            proxied,
+            "{what}: a request reached the endpoint: {:#?}",
+            &s3.requests()[proxied..]
+        );
+        if *name == "xdu" {
+            assert!(
+                connections
+                    .iter()
+                    .any(common::s3::FrontRecord::failed_with_certificate_alert),
+                "{what}: no handshake failed with a certificate alert: {connections:?}"
+            );
+        }
+        assert_eq!(
+            s3.snapshot(WRITE_PREFIX),
+            *before,
+            "{what}: the index changed"
+        );
+        hermetic.assert_left_empty();
+    }
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn tls_a_self_signed_endpoint_is_refused_by_all_three_tools() {
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 5)]);
+    let pki = common::s3::TestPki::new();
+    let ca = pki.ca_file();
+
+    assert_each_tool_refuses(
+        &s3,
+        &pki.self_signed,
+        "self-signed, AWS_CA_BUNDLE names the test CA",
+        Some(&ca),
+        &[],
+        &source,
+        &before,
+    );
+    assert_each_tool_refuses(
+        &s3,
+        &pki.wrong_name,
+        "the test CA's certificate for another name",
+        Some(&ca),
+        &[],
+        &source,
+        &before,
+    );
+    require_a_platform_bundle();
+    assert_each_tool_refuses(
+        &s3,
+        &pki.self_signed,
+        "self-signed, the platform bundle",
+        None,
+        &[],
+        &source,
+        &before,
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn tls_only_the_resolved_file_is_trusted() {
+    // OpenSSL trusts SSL_CERT_FILE when no CA file is set, and Linux's native store reads it
+    // too; neither may widen the one source. SSL_CERT_DIR is not tried: OpenSSL reads it only
+    // as a hashed directory, so naming a file there would prove nothing.
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 5)]);
+    let pki = common::s3::TestPki::new();
+    let ssl_cert_file = pki.ca_file().into_os_string();
+
+    require_a_platform_bundle();
+    assert_each_tool_refuses(
+        &s3,
+        &pki.leaf,
+        "AWS_CA_BUNDLE unset, SSL_CERT_FILE names the signing CA",
+        None,
+        &[("SSL_CERT_FILE", &ssl_cert_file)],
+        &source,
+        &before,
+    );
+    assert_each_tool_refuses(
+        &s3,
+        &pki.leaf,
+        "AWS_CA_BUNDLE names another CA, SSL_CERT_FILE names the signing CA",
+        Some(&pki.other_ca_file()),
+        &[("SSL_CERT_FILE", &ssl_cert_file)],
+        &source,
+        &before,
+    );
+}
+
+/// `cmd` without a controlling terminal, so `xdu-view` cannot reach one through `/dev/tty`
+/// whatever terminal the test runner has.
+fn without_a_terminal(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid is async-signal-safe and touches no state of the parent's.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd
+}
+
+/// Run `cmd` and count the requests the proxy recorded while it ran.
+fn run_counting(s3: &TestS3, cmd: &mut Command) -> (String, String, bool, usize) {
+    let before = s3.requests().len();
+    let (out, err, ok) = run(cmd);
+    (out, err, ok, s3.requests().len() - before)
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn tls_an_endpoint_the_named_ca_signed_answers_as_plain_http_does() {
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    varied_source_tree(&source);
+    let pki = common::s3::TestPki::new();
+    let ca = pki.ca_file();
+    let front = s3.tls_front(&pki.leaf);
+    let hermetic = Hermetic::new();
+    let tls = |mut cmd: Command| {
+        cmd.env("AWS_ENDPOINT_URL", front.url())
+            .env("AWS_CA_BUNDLE", &ca);
+        cmd
+    };
+
+    // The writer: one source tree into one prefix over TLS and another over plain HTTP. One
+    // crawl thread and one chunk a partition, so the two runs encode the same bytes, and each
+    // chunk is larger than the footer read a query opens it with.
+    let (tls_prefix, http_prefix) = ("over-tls/idx", "over-http/idx");
+    for (prefix, mut cmd) in [
+        (tls_prefix, tls(s3.write_command(&hermetic))),
+        (http_prefix, s3.write_command(&hermetic)),
+    ] {
+        cmd.args(xdu_args_chunked(&source, &s3.url(prefix), "1", "100000"));
+        let (out, err, ok, proxied) = run_counting(&s3, &mut cmd);
+        assert!(ok, "xdu into {prefix} failed: {err}");
+        assert!(out.is_empty(), "xdu printed to stdout: {out}");
+        assert!(
+            proxied > 0,
+            "xdu into {prefix} reached the endpoint with nothing"
+        );
+    }
+    let (over_tls, over_http) = (s3.snapshot(tls_prefix), s3.snapshot(http_prefix));
+    assert!(
+        over_tls.contains_key(COMPLETION_MARKER),
+        "{:?}",
+        over_tls.keys()
+    );
+    assert_eq!(
+        over_tls.keys().collect::<Vec<_>>(),
+        over_http.keys().collect::<Vec<_>>()
+    );
+    for (key, bytes) in &over_tls {
+        if key == COMPLETION_MARKER {
+            assert_eq!(
+                marker_without_time(bytes),
+                marker_without_time(&over_http[key])
+            );
+        } else {
+            assert!(
+                bytes == &over_http[key],
+                "{key} differs between the two runs"
+            );
+        }
+    }
+
+    // xdu-find: the same answers, byte for byte, over TLS and over plain HTTP.
+    let locator = s3.url(tls_prefix);
+    for args in [&["--count"][..], &["-u", "alice"], &["--top", "3"], &[]] {
+        let mut over_tls = tls(s3.find_command(&hermetic));
+        over_tls.args(["-i", &locator]).args(args);
+        let (got, err, ok, proxied) = run_counting(&s3, &mut over_tls);
+        assert!(ok, "xdu-find {args:?} over TLS failed: {err}");
+        assert!(proxied > 0, "xdu-find {args:?} sent no request");
+        let (want, err, ok) = run(s3.find_command(&hermetic).args(["-i", &locator]).args(args));
+        assert!(ok, "xdu-find {args:?} over HTTP failed: {err}");
+        assert!(!want.trim().is_empty(), "xdu-find {args:?} printed nothing");
+        assert!(
+            got == want,
+            "xdu-find {args:?}:\n--- HTTP\n{want}\n--- TLS\n{got}"
+        );
+    }
+
+    // xdu-view's statements give the same entries on a connection over each.
+    let index = IndexLocator::parse(OsString::from(&locator).as_os_str()).unwrap();
+    let tls_settings = common::s3::MapEnv::new(&[
+        ("AWS_ACCESS_KEY_ID", ACCESS_KEY),
+        ("AWS_SECRET_ACCESS_KEY", SECRET_KEY),
+        ("AWS_ENDPOINT_URL", &front.url()),
+        ("AWS_CA_BUNDLE", ca.to_str().unwrap()),
+    ]);
+    let tls_settings = xdu::s3::S3Settings::resolve(&tls_settings).unwrap();
+    let before = s3.requests().len();
+    let tls_conn = open_s3_connection_from(&tls_settings, s3.extension_dir())
+        .unwrap_or_else(|e| panic!("open_s3_connection over TLS failed: {e:#}"));
+    let http_conn = open_s3_connection_from(&s3.settings(), s3.extension_dir())
+        .unwrap_or_else(|e| panic!("open_s3_connection over HTTP failed: {e:#}"));
+    let both = |what: &str, query: &dyn Fn(&Connection) -> anyhow::Result<Vec<DirEntry>>| {
+        let got = query(&tls_conn).unwrap_or_else(|e| panic!("{what} over TLS: {e:#}"));
+        let want = query(&http_conn).unwrap_or_else(|e| panic!("{what} over HTTP: {e:#}"));
+        (got, want)
+    };
+    let filters = QueryFilters::new();
+    let mut compared = 0;
+    for sort_mode in SortMode::ALL {
+        let (got, want) = both("partitions", &|conn| {
+            view_query::partitions(conn, &index, &filters, sort_mode)
+        });
+        compared += assert_same_view("partitions", Some(sort_mode), &want, &got);
+    }
+    let alice = view_query::partition_root(&http_conn, &index, "alice").unwrap();
+    assert_eq!(
+        view_query::partition_root(&tls_conn, &index, "alice").unwrap(),
+        alice
+    );
+    let (got, want) = both("alice's root", &|conn| {
+        view_query::list_directory(conn, &index, "alice", &alice, &filters, SortMode::Name)
+    });
+    compared += assert_same_view("alice's root", Some(SortMode::Name), &want, &got);
+    assert!(compared > 0);
+    assert!(
+        s3.requests().len() > before,
+        "the view statements sent no request"
+    );
+
+    // The binary, with no terminal, reads the marker through the front and stops only for
+    // want of a terminal.
+    let mut view = tls(s3.view_command(&hermetic));
+    view.args(["-i", &locator]);
+    let (out, err, ok, proxied) = run_counting(&s3, without_a_terminal(&mut view));
+    assert!(!ok, "xdu-view ran without a terminal");
+    assert!(out.is_empty(), "xdu-view wrote to stdout: {out:?}");
+    assert!(proxied > 0, "xdu-view sent no request");
+    assert!(
+        !err.contains(UNTRUSTED) && !err.to_lowercase().contains("certificate"),
+        "xdu-view refused the endpoint: {err}"
+    );
+
+    assert!(
+        front
+            .connections()
+            .iter()
+            .all(|c| c.handshake.is_ok() || !c.application_bytes),
+        "{:?}",
+        front.connections()
+    );
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn tls_an_unusable_ca_bundle_is_refused_before_any_connection() {
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 5)]);
+    // An index whose chunk a count reads by range, for the plain-HTTP runs.
+    let wide_source = work.path().join("wide-source");
+    let wide_index = work.path().join("wide-index");
+    wide_source_tree(&wide_source, "alice", ROWS);
+    build_index(&wide_source, &wide_index);
+    s3.seed_index(&wide_index, PREFIX);
+    let pki = common::s3::TestPki::new();
+    let empty = pki.dir().join("empty.pem");
+    fs::write(&empty, "").unwrap();
+    let key_only = pki.dir().join("key-only.pem");
+    fs::write(
+        &key_only,
+        rcgen::KeyPair::generate().unwrap().serialize_pem(),
+    )
+    .unwrap();
+    let cases = [
+        ("a missing file", pki.dir().join("missing.pem")),
+        ("a directory", pki.dir().to_path_buf()),
+        ("an empty file", empty),
+        ("a key and no certificate", key_only),
+    ];
+
+    for (case, bundle) in &cases {
+        for tool in 0..3 {
+            let hermetic = Hermetic::new();
+            let front = s3.tls_front(&pki.leaf);
+            let mut tools = tls_tools(&s3, &hermetic, &front.url(), Some(bundle), &[], &source);
+            let (name, cmd) = &mut tools[tool];
+            let (out, err, ok, proxied) = run_counting(&s3, cmd);
+            let what = format!("{case}, {name}");
+            assert!(!ok, "{what}: the tool succeeded: {err}");
+            assert!(out.is_empty(), "{what}: stdout written: {out:?}");
+            assert!(
+                err.contains("AWS_CA_BUNDLE"),
+                "{what}: stderr does not name AWS_CA_BUNDLE: {err}"
+            );
+            assert!(
+                err.contains(bundle.to_str().unwrap()),
+                "{what}: stderr does not name the file: {err}"
+            );
+            assert!(!err.contains(UNTRUSTED), "{what}: {err}");
+            assert_eq!(
+                front.connections().len(),
+                0,
+                "{what}: the tool connected before refusing"
+            );
+            assert_eq!(proxied, 0, "{what}: a request reached the endpoint");
+            assert_eq!(
+                s3.snapshot(WRITE_PREFIX),
+                before,
+                "{what}: the index changed"
+            );
+            hermetic.assert_left_empty();
+        }
+
+        // TLS does not apply to a plain http:// endpoint, so the same value does not stop it.
+        let hermetic = Hermetic::new();
+        let mut find = s3.find_command(&hermetic);
+        find.args(["-i", &s3.url(PREFIX), "--count"])
+            .env("AWS_CA_BUNDLE", bundle);
+        let (out, err, ok, proxied) = run_counting(&s3, &mut find);
+        assert!(ok, "{case}, plain HTTP: xdu-find failed: {err}");
+        assert_eq!(out.trim(), ROWS.to_string(), "{case}, plain HTTP");
+        assert!(proxied > 0);
+        hermetic.assert_left_empty();
+    }
+    s3.assert_no_whole_parquet_get();
+    s3.assert_proxy_clean();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn tls_the_reader_connection_pins_verification_and_the_ca_file() {
+    let (s3, _work) = seeded();
+    let pki = common::s3::TestPki::new();
+    // A quote in the directory would end a literal in SQL text; bound, it is just a byte.
+    let quoted = pki.dir().join("it's");
+    fs::create_dir(&quoted).unwrap();
+    let bundle = quoted.join("ca.pem");
+    fs::copy(pki.ca_file(), &bundle).unwrap();
+    let front = s3.tls_front(&pki.leaf);
+
+    let settings = xdu::s3::S3Settings::resolve(&common::s3::MapEnv::new(&[
+        ("AWS_ACCESS_KEY_ID", ACCESS_KEY),
+        ("AWS_SECRET_ACCESS_KEY", SECRET_KEY),
+        ("AWS_ENDPOINT_URL", &front.url()),
+        ("AWS_CA_BUNDLE", bundle.to_str().unwrap()),
+    ]))
+    .unwrap();
+    let settings_of = |conn: &Connection| -> (String, bool, bool, String) {
+        conn.query_row(
+            "SELECT current_setting('httpfs_client_implementation'), \
+             current_setting('enable_server_cert_verification'), \
+             current_setting('enable_curl_server_cert_verification'), \
+             current_setting('ca_cert_file')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    };
+
+    let conn = open_s3_connection_from(&settings, s3.extension_dir())
+        .unwrap_or_else(|e| panic!("open_s3_connection over TLS failed: {e:#}"));
+    assert_eq!(
+        settings_of(&conn),
+        (
+            "httplib".to_string(),
+            true,
+            true,
+            bundle.to_str().unwrap().to_string()
+        )
+    );
+    // And the connection reads through the front with that file.
+    let before = s3.requests().len();
+    assert_eq!(count_rows(&conn, &s3).unwrap(), ROWS as i64);
+    assert!(s3.requests().len() > before, "the count sent no request");
+    assert!(
+        front.connections().iter().any(|c| c.application_bytes),
+        "nothing went through the front"
+    );
+
+    // Over plain HTTP the client is pinned and verification on all the same, with no file.
+    let conn = open_s3_connection_from(&s3.settings(), s3.extension_dir())
+        .unwrap_or_else(|e| panic!("open_s3_connection over HTTP failed: {e:#}"));
+    assert_eq!(
+        settings_of(&conn),
+        ("httplib".to_string(), true, true, String::new())
+    );
+    s3.assert_no_whole_parquet_get();
+    s3.assert_proxy_clean();
 }

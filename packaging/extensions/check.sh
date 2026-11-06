@@ -123,6 +123,12 @@ dry=$(cold_run "$x/bin/xdu-rm" -i "$s/index" --pattern '*.log' --dry-run)
 if ! printf '%s\n' "$dry" | grep -qF '2 file(s) would be deleted'; then die "bin/xdu-rm --dry-run did not match the two .log files: $dry"; fi
 if [ ! -f "$tree/user1/a.log" ]; then die "bin/xdu-rm --dry-run deleted a file"; fi
 
+# The shipped tools find this host's CA bundle and verify AWS's real chain with it, in both TLS
+# stacks: a platform smoke check, not acceptance (the loopback tests own that). It needs the
+# extracted lib/ still in place, so it runs before expect_absent moves it aside, and under the
+# cold HOME, which must stay empty.
+cold_run sh "$here/aws-tls-probe.sh" "$x/bin"
+
 # An absent extension fails naming the exact path, and nothing is fetched in its place.
 # expect_absent DIR [OVERRIDE]: the probe must fail naming DIR/<first>.duckdb_extension.
 expect_absent() {

@@ -213,7 +213,7 @@ assume `nightly` — use the pinned toolchain.
 cargo build --release                                   # all bins (bundled DuckDB C++ is the slow part)
 cargo test                                              # lib unit tests + tests/ integration
 cargo test --test rm_tests                              # one integration file
-XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 46   # S3 wire tier (see Testing)
+XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 51   # S3 wire tier (see Testing)
 cargo clippy --all-targets --all-features -- -D warnings   # lint gate (must be clean)
 cargo fmt --all -- --check                              # format gate
 
@@ -281,7 +281,9 @@ the `S3 INDICES` section of `xdu-find.1` and `xdu-view.1`) and once as the `ENVI
 corrupting only the `ENVIRONMENT` entry publishes a variable name that does not exist while a
 presence check stays green.
 All of them are counted for that reason, and so are the `AWS_*` names on the pages that list them
-and `xdu.1`'s two `s3://BUCKET/PREFIX` (under `-o` and in `S3 OUTPUT`). **Whether a literal is duplicated is a fact about the page,
+(`AWS_CA_BUNDLE` twice on each of `xdu.1`, `xdu-find.1` and `xdu-view.1`: the trust paragraph of the
+S3 section, then its `ENVIRONMENT` entry) and `xdu.1`'s two `s3://BUCKET/PREFIX` (under `-o` and in
+`S3 OUTPUT`). **Whether a literal is duplicated is a fact about the page,
 not about the literal** — adding one cross-reference to a `.scd` can duplicate a previously-unique
 literal — so re-count when you edit a `.scd` that carries an asserted literal; nothing re-derives it
 for you. A new page is not covered at all: the `check` list names four pages while the render step
@@ -337,7 +339,9 @@ share/           # GENERATED (man + completions); git-ignored; built in CI / by 
 build.sh install.sh Dockerfile   # packaging / ops scripts
 packaging/extensions/   # footer.sh (check an extension's engine/platform footer), fetch.sh (download the
                  # probe's pinned set), check.sh (the release gate: runs every shipped binary and
-                 # loads the set from the extracted tarball under a cold HOME, before upload)
+                 # loads the set from the extracted tarball under a cold HOME, before upload),
+                 # aws-tls-probe.sh (a smoke check that the tools verify AWS's real chain against
+                 # the host's CA bundle; check.sh and the test legs run it)
 packaging/rpm/   # xdu.spec: ad-hoc / COPR-style EL build from the source tag; no workflow runs it
                  # (see issues/native-os-packages-deb-rpm.md)
 .agents/         # the spec-driven "software factory" (see below)
@@ -511,7 +515,18 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    or the canonical exe's `../../lib/xdu/extensions`, into `LOAD '<path>'`, and refuses a path
    containing `'` or not valid UTF-8 before any SQL runs. The unit tests
    `engine::tests::quoted_directory_is_refused_before_any_sql` and
-   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold that rule.
+   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold that rule. **Every S3
+   connection authenticates the server against one trust source**, which `S3Settings::resolve`
+   picks once for both directions: the file `AWS_CA_BUNDLE` names, else the first of
+   `s3::PLATFORM_CA_BUNDLES` present; a missing, unreadable or certificate-free source refuses
+   before any request, naming `AWS_CA_BUNDLE`. The writer's client trusts only that file's
+   certificates (`tls_certs_only`). The reader's `engine::open_s3_connection` runs fixed text
+   after the `LOAD`, pinning `httpfs_client_implementation` to `httplib`, turning
+   `enable_server_cert_verification` and `enable_curl_server_cert_verification` on, and binding the
+   path as `SET ca_cert_file = ?`, never as SQL text. Nothing disables verification, nothing adds
+   roots beside the source, and `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in directory
+   and the macOS keychain are never sources; a plain `http://` override resolves none. The `tls_`
+   wire tests hold it (`invariants.md` §5).
 6. **Unix-only.** `MetadataExt` (atime; disk usage = `st_blocks`×512) is load-bearing; don't add
    code assuming portability. A future S3/Windows source must special-case (S3 has no atime).
 7. **Shared rayon-pool concurrency.** See Architecture. Preserve the single-pool + driver-thread +
@@ -548,11 +563,15 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   that guards both.
 - **`src/engine.rs`** — the one place a DuckDB connection opens (autoload and autoinstall off), and
   `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5);
-  `open_s3_connection` adds the reader's one bound `CREATE SECRET`.
+  `open_s3_connection` adds the reader's one bound `CREATE SECRET`, and before it the fixed statements
+  that pin httplib, turn certificate verification on and bind the trust source's path as the CA file.
 - **`src/s3.rs`** — the S3 side of invariants 2 and 2b (`S3Sink`: one PUT per chunk, the LIST and
   DELETE prune past gaps, the marker DELETE first and PUT last), the S3 partition-name refusal, and the
   one credential resolver. Its `CREATE SECRET` must bind every key `httpfs` would otherwise take from
   the environment, and no request error may print a response body (one can echo the session token).
+  The resolver also picks the one TLS trust source (`AWS_CA_BUNDLE`, else the first of
+  `PLATFORM_CA_BUNDLES`) for both directions, and `S3Sink`'s client trusts only its certificates
+  (`tls_certs_only`); a change here can widen or drop server authentication (invariant 5).
 - **`src/view_query.rs`** — every `xdu-view` statement, on the invariant 5 surface.
 - **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning (through
   `IndexSink`; `LocalSink` is the local protocol); the reserved-index-name collision rejection in
@@ -599,10 +618,14 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   under `--include-ignored` libtest always prints `0 ignored`. CI's `Tests` workflow fetches the
   extension and runs the script on both test legs as the "S3 tests" step, with `N` set to the file's
   listed count by hand: **raise it in the commit that adds a test**. A selection by prefix
-  (`harness_`, `find_`, `write_`, `view_`) runs one family. Wire tests never return early (the script
+  (`harness_`, `find_`, `write_`, `view_`, `tls_`) runs one family. The `tls_` family reaches the
+  endpoint over `https` through `TestS3::tls_front`, a TLS terminator before the counting proxy,
+  with certificates `TestPki` makes per run (a test CA, an unrelated CA, a wrong-name leaf and a
+  self-signed end-entity one), and asserts on proxied requests, never on handshakes. Wire tests never return early (the script
   refuses an early `return`); the fixture panics when it cannot bind or find the extension. Spawned
-  binaries run hermetic (`tests/common/s3.rs`'s `Hermetic`: no `AWS_*`, `DUCKDB_*` or `*_PROXY`,
-  empty `HOME`, `TMPDIR` and working directory, checked empty afterwards).
+  binaries run hermetic (`tests/common/s3.rs`'s `Hermetic`: no `AWS_*`, `DUCKDB_*`, `*_PROXY`,
+  `SSL_CERT_FILE` or `SSL_CERT_DIR`, empty `HOME`, `TMPDIR` and working directory, checked empty
+  afterwards).
 - **Verify by driving the CLI, not just tests.** Use `.agents/factory/bin/temp_index.sh` so a drive
   hits a throwaway index, never a real one. Exit 0 is necessary but not sufficient — assert a concrete
   post-condition (row count, a stdout token, files actually gone/kept).
@@ -636,7 +659,9 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   unless `XDU_EXTENSION_DIR` names another directory. The container image and the HPCCM recipe keep
   the same layout under their prefix. Every release leg runs `packaging/extensions/check.sh` on the
   exact tarball it uploads, under a cold `HOME`, before the upload; it executes every shipped binary
-  and loads the pinned set from the extracted layout. `cargo install` builds carry no
+  and loads the pinned set from the extracted layout, and runs `aws-tls-probe.sh`, which shows the
+  shipped tools find the platform's CA bundle and verify AWS's real chain with it (any HTTP answer
+  to AWS's documented example key passes; a platform smoke check, not acceptance). `cargo install` builds carry no
   extensions. `/xdu-release` cuts versions (bump `Cargo.toml` + `Cargo.lock`, gate, tag, publish);
   see its skill.
 - **Pre-release gate (mirrored by CI and `/xdu-release`):** `cargo fmt --all -- --check`,

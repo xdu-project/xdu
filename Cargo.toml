@@ -43,7 +43,12 @@ hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 # The s3s `S3` trait is an async-trait; the test endpoint wraps s3s-fs to list keys the way S3
 # encodes them.
 async-trait = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "io-util", "time"] }
+# The TLS front the certificate tests put before the loopback endpoint: certificates made per
+# run, so no private key is committed and none expires in the tree. ring only, as the runtime
+# tree is: rcgen's defaults are ring, and tokio-rustls' defaults would bring aws-lc.
+rcgen = "=0.14.10"
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
 
 [[bin]]
 name = "xdu"

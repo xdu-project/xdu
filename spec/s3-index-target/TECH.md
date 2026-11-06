@@ -155,7 +155,7 @@ phases:
     cargo fmt --all -- --check; echo P5-GATE-GREEN'
 - id: P6
   name: TLS server authentication for both directions
-  status: pending
+  status: in_progress
   satisfies:
   - R11
   depends_on:
@@ -1043,12 +1043,18 @@ platform. Design: PLAN §7; probes: [`research/07`](research/07-tls-server-auth.
 `86bf298`. P6 is a fourth build cycle: the review bound in `review.cycle` was spent at 3, so the
 review after P6 runs on the human's say-so, not the bound.*
 
-- [ ] **Red first.** On the tree before this phase, write wire tests 1 and 4 (PLAN §7.1) and show
+- [x] **Red first.** On the tree before this phase, write wire tests 1 and 4 (PLAN §7.1) and show
   them failing: the readers answer through a self-signed front, and through a test-CA front
   trusted only via `SSL_CERT_FILE`. Quote the failing lines in the commit body. On macOS only
   the readers' half of 4(a) goes red; the writer's half needs a Linux host, so run B confirms it
   from the Ubuntu leg's history or a Linux run.
-- [ ] `src/s3.rs`: `TrustSource`, `PLATFORM_CA_BUNDLES` (httpfs's order), `S3Settings.trust`
+  *Run A (macOS arm64):* with `src/` at `d5913be` (unchanged through `b0894c2`), tests 1 and 4
+  failed with `xdu-find` exiting 0: through the self-signed front with `AWS_CA_BUNDLE` naming the
+  test CA, and through the test-CA front with only `SSL_CERT_FILE` naming it. The lines are in
+  the commit body. The tools run readers first, so a reader that answers is the first failure;
+  the writer refused both (macOS keychain) in words that said "cannot reach". The Linux writer
+  half of 4(a) stays open for run B.
+- [x] `src/s3.rs`: `TrustSource`, `PLATFORM_CA_BUNDLES` (httpfs's order), `S3Settings.trust`
   resolved in `S3Settings::resolve` only for an `https` endpoint; the PEM parse, keeping what
   `RootCertStore::add` accepts; the refusals naming `AWS_CA_BUNDLE` and the path; `Debug` shows
   the path and origin. The PEM rules: refuse malformed PEM, invalid DER and `TRUSTED
@@ -1056,22 +1062,22 @@ review after P6 runs on the human's say-so, not the bound.*
   "TLS certificate is not trusted". `duckdb_tls_statements()` sits beside
   `duckdb_secret_statement`, each statement whole on one line. The nine unit tests PLAN §7.1
   names.
-- [ ] `src/engine.rs`: `open_s3_connection_from` runs the fixed batch, then the bound
+- [x] `src/engine.rs`: `open_s3_connection_from` runs the fixed batch, then the bound
   `SET ca_cert_file = ?`, after the `LOAD` and before the `CREATE SECRET`; every error
   propagates. The doc comment says what it trusts.
-- [ ] `src/s3.rs`: `DirectConnector` carries the source's certificates and builds its client with
+- [x] `src/s3.rs`: `DirectConnector` carries the source's certificates and builds its client with
   `tls_certs_only` (an empty list over plain HTTP). `S3Sink::request_error` words a rustls
   certificate refusal as untrusted, ahead of its unreachable branch.
-- [ ] `src/lib.rs`: `S3Cause::Untrusted` in `classify_s3_text`, and its message in
+- [x] `src/lib.rs`: `S3Cause::Untrusted` in `classify_s3_text`, and its message in
   `s3_request_error`, the same words as the writer's.
-- [ ] `tests/common/s3.rs`: `TestPki` (rcgen; the self-signed certificate is end-entity),
+- [x] `tests/common/s3.rs`: `TestPki` (rcgen; the self-signed certificate is end-entity),
   `TlsFront` relaying to the counting proxy with its connection and handshake counts, and
   `SSL_CERT_FILE`/`SSL_CERT_DIR` stripped in `Hermetic::command_for`. `Cargo.toml`
   dev-dependencies `rcgen = "=0.14.10"` and `tokio-rustls` `=0.26.4` with ring only;
   `Cargo.lock` gains only what `rcgen` needs.
-- [ ] `tests/s3_tests.rs`: the five `tls_` wire tests (PLAN §7.1), each through the front and
+- [x] `tests/s3_tests.rs`: the five `tls_` wire tests (PLAN §7.1), each through the front and
   the proxy, never returning early.
-- [ ] `packaging/extensions/aws-tls-probe.sh` (new): any HTTP status passes; "certificate",
+- [x] `packaging/extensions/aws-tls-probe.sh` (new): any HTTP status passes; "certificate",
   `AWS_CA_BUNDLE` and a third "cannot reach" fail. It runs:
   - from `test.yaml`'s test legs, after the S3 step;
   - from `check.sh`, with `HOME` the cold home, after the shipped-tools block and before
@@ -1079,13 +1085,23 @@ review after P6 runs on the human's say-so, not the bound.*
   `release.yaml`'s `pull_request.paths` gains `src/s3.rs` and `src/lib.rs`. *Subject to Q4
   (PLAN §7.4): if the foreman rules it out, drop this item and the gate's `aws-tls-probe` and
   `release.yaml` predicates through `set_phase.py --verify-file`, and record the ruling here.*
-- [ ] Docs, same commit (§10, §13): `AWS_CA_BUNDLE` and the trust sentence on `xdu.1`,
+  *Q4 ruled keep (GOAL clarification, P6 plan gate): a platform smoke check, not acceptance.*
+  *Run A:* the probe's own failure path ran here with no route to AWS (the sandbox): it
+  retried, then failed naming "cannot reach", and the cold HOME stayed empty. Its AWS answers
+  are run B's to read.
+- [x] Docs, same commit (§10, §13): `AWS_CA_BUNDLE` and the trust sentence on `xdu.1`,
   `xdu-find.1` and `xdu-view.1`; counts re-derived; each page's `check` block and `AGENTS.md`'s
   duplicated-literal sentence; the README sentence. Read each page rendered, or say scdoc was
   not installed.
-- [ ] Manual: the PLAN §7.1 invariant bullet into `invariants.md` §5 verbatim, mirrored in
+  *Run A:* scdoc is not installed here, so the pages were not rendered. `AWS_CA_BUNDLE` occurs
+  twice in each `.scd` (the S3 section's trust paragraph, then its `ENVIRONMENT` entry), counted
+  `2x:` in each `check` block; no line opens with `.` or `'`. The Packaging job's literal step is
+  the rendered check, in run B.
+- [x] Manual: the PLAN §7.1 invariant bullet into `invariants.md` §5 verbatim, mirrored in
   `AGENTS.md` invariant 5; the High-risk entries for `src/engine.rs` and `src/s3.rs`; Testing
   names the `tls_` prefix and the front; Commands and `test.yaml` carry the new listed count.
+- [ ] Run B: the evidence below, recorded in `evidence/p6-ci.md`, and the Linux writer half of
+  the red-first.
 - **Run B evidence:**
   - both test legs' `s3-wire: '' 51 of 51 passed`, equal to the workflow's minimum;
   - both test legs' `aws-tls-probe` lines, each quoting the AWS answer per tool;
@@ -1095,6 +1111,27 @@ review after P6 runs on the human's say-so, not the bound.*
   Record them in `evidence/p6-ci.md`. A certificate error or a "cannot reach" in any probe line
   is a phase failure, never re-worded.
 - **Verify:** see frontmatter.
+- *Run A notes (amendments, none against GOAL):*
+  - `Cargo.toml`'s dev `tokio` gains `io-util` and `time`, for the front's relay and its
+    handshake timeout. Features are not in `Cargo.lock`.
+  - `Cargo.lock` gains `rcgen`, `pem`, `yasna` and their optional dependencies (`x509-parser`,
+    `asn1-rs`, `der-parser`, `oid-registry`, `nom` 7 and kin), which the lockfile records
+    whether or not a feature turns them on. `cargo tree -e normal,dev -i x509-parser` finds
+    nothing: only `rcgen`, `pem` and `yasna` build.
+  - "Not valid DER" is judged by the certificate's shape (one SEQUENCE spanning the block,
+    holding SEQUENCE, SEQUENCE, BIT STRING, every element well formed), not by webpki's
+    `BadDer`, so a platform certificate webpki cannot parse is dropped rather than refusing the
+    whole platform bundle.
+  - Each tool's certificate refusal ends with its stack's own cause in parentheses: rustls's
+    `invalid peer certificate: …` for the writer, DuckDB's text (`SSL server verification
+    failed …`) for the readers.
+  - Wire test 3's plain-HTTP `--count` reads a wide index under a second prefix, so its ranged
+    reads never cover a whole chunk; the refused runs target the seeded small index.
+  - `xdu-view` driven with no terminal runs in a new session (`setsid`), so it cannot reach a
+    terminal through `/dev/tty` on a developer's machine.
+  - The verify gate went red once on purpose: with the CA-file statement dropped from
+    `duckdb_tls_statements`, wire tests 2, 4 and 5 and the statements unit test failed;
+    `src/s3.rs` was restored by `cp` and checked with `cmp`.
 - **Touches:** `src/s3.rs`, `src/engine.rs`, `src/lib.rs` (all high-blast), `tests/common/s3.rs`,
   `tests/s3_tests.rs`, `Cargo.toml`, `Cargo.lock`, `doc/xdu.1.scd`, `doc/xdu-find.1.scd`,
   `doc/xdu-view.1.scd`, `README.md`, `AGENTS.md`, `.agents/factory/invariants.md`,

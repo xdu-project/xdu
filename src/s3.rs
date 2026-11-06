@@ -12,6 +12,11 @@
 //! a credential, an endpoint value or any other value read from those sources: each names the
 //! variable or the file and profile it came from.
 //!
+//! The resolver also picks the one CA file both directions authenticate an `https` endpoint
+//! against: the file `AWS_CA_BUNDLE` names, else the first platform bundle present. The writer's
+//! client trusts only that file's certificates and the readers hand `httpfs` its path, so one
+//! resolved endpoint gets one level of trust whichever way the bytes go.
+//!
 //! `S3Sink` is the crawler's S3 destination. Each chunk is one PUT at its final key, a
 //! partition's stale tail goes by LIST and DELETE, and the completion marker is a DELETE before
 //! the first chunk and a PUT after the last partition. Nothing it sends is staged on local disk.
@@ -34,6 +39,8 @@ use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpError, HttpErrorKind};
 use object_store::path::{Path as ObjectPath, PathPart};
 use object_store::{BackoffConfig, ClientOptions, ObjectStore, ObjectStoreExt, RetryConfig};
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::{PemObject, SectionKind};
 
 use crate::COMPLETION_MARKER;
 use crate::crawl::{IndexSink, TopEntry, chunk_final_name};
@@ -321,6 +328,66 @@ impl S3Endpoint {
     }
 }
 
+/// The platform CA bundles, in the order the pinned `httpfs` probes them: Debian-family hosts,
+/// RHEL-family hosts (two spellings), SUSE, then macOS and the BSDs.
+pub const PLATFORM_CA_BUNDLES: &[&str] = &[
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/ssl/cert.pem",
+];
+
+/// Where a trust source came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustOrigin {
+    /// The file `AWS_CA_BUNDLE` names.
+    AwsCaBundle,
+    /// The first of `PLATFORM_CA_BUNDLES` present.
+    Platform,
+}
+
+/// The one CA file every `https` connection authenticates its server against, in both
+/// directions.
+///
+/// It is read once, by the resolver. The writer trusts the certificates read here and nothing
+/// else; the readers bind the path for `httpfs`, whose OpenSSL reopens it at the first request.
+/// The certificates kept are those both TLS stacks load, so the two directions trust one set.
+/// `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in directory and the macOS keychain are
+/// never a source.
+#[derive(Clone)]
+pub struct TrustSource {
+    /// Absolute, and valid UTF-8, since the readers bind it as text.
+    path: String,
+    origin: TrustOrigin,
+    certificates: Vec<CertificateDer<'static>>,
+}
+
+impl fmt::Debug for TrustSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrustSource")
+            .field("path", &self.path)
+            .field("origin", &self.origin)
+            .field("certificates", &self.certificates.len())
+            .finish()
+    }
+}
+
+impl TrustSource {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn origin(&self) -> TrustOrigin {
+        self.origin
+    }
+
+    /// The CA certificates kept from the file, in file order.
+    pub fn certificates(&self) -> &[CertificateDer<'static>] {
+        &self.certificates
+    }
+}
+
 /// Everything an S3 client needs, resolved once from the AWS variables and shared files.
 ///
 /// `Debug` prints neither the secret nor the session token.
@@ -336,6 +403,9 @@ pub struct S3Settings {
     /// Path-style addressing (`host/bucket/key`). On whenever an endpoint override is set,
     /// since S3-compatible stores rarely serve virtual-hosted names; off for AWS itself.
     pub path_style: bool,
+    /// The CA file the server is authenticated against: `Some` exactly when requests go over
+    /// TLS, and `None` for a plain `http://` override, where TLS does not apply.
+    pub trust: Option<TrustSource>,
 }
 
 impl fmt::Debug for S3Settings {
@@ -350,12 +420,24 @@ impl fmt::Debug for S3Settings {
             .field("region", &self.region)
             .field("endpoint", &self.endpoint)
             .field("path_style", &self.path_style)
+            .field("trust", &self.trust)
             .finish()
     }
 }
 
 /// The name of the one secret a reader connection holds.
 const DUCKDB_SECRET_NAME: &str = "xdu_s3";
+
+/// The statements that make `httpfs` verify every server, each whole on its own line: the
+/// client pinned to httplib, then verification on for both of its clients.
+const DUCKDB_TLS_PINNING: [&str; 3] = [
+    "SET httpfs_client_implementation = 'httplib'",
+    "SET enable_server_cert_verification = true",
+    "SET enable_curl_server_cert_verification = true",
+];
+
+/// The statement that names the trust source's file to `httpfs`, its path bound.
+const DUCKDB_TLS_CA_FILE: &str = "SET ca_cert_file = ?";
 
 impl S3Settings {
     /// Resolve credentials, region and endpoint.
@@ -369,9 +451,15 @@ impl S3Settings {
     /// `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE`, else `~/.aws/credentials` and
     /// `~/.aws/config`.
     ///
+    /// Trust, for an `https` endpoint (every AWS one): the CA file `AWS_CA_BUNDLE` names, else
+    /// the first of `PLATFORM_CA_BUNDLES` present. A plain `http://` override resolves none, so
+    /// an unusable `AWS_CA_BUNDLE` does not stop it.
+    ///
     /// It fails closed: half-set environment credentials, a profile holding only one half of
     /// a key pair, a profile named by `AWS_PROFILE` that neither file holds, no credentials at
-    /// all, and an endpoint that is not a bare `http(s)://host[:port]` are errors.
+    /// all, an endpoint that is not a bare `http(s)://host[:port]`, and, for an `https`
+    /// endpoint, no trust source or one that is unreadable or holds no usable CA certificate
+    /// are errors.
     pub fn resolve(env: &dyn EnvSource) -> Result<S3Settings> {
         let profile_var = env_text(env, "AWS_PROFILE")?;
         let profile = profile_var
@@ -449,6 +537,11 @@ impl S3Settings {
             );
         }
         let path_style = endpoint.is_some();
+        let trust = if endpoint.as_ref().is_none_or(S3Endpoint::use_ssl) {
+            Some(resolve_trust(env)?)
+        } else {
+            None
+        };
 
         Ok(S3Settings {
             access_key_id,
@@ -457,6 +550,7 @@ impl S3Settings {
             region,
             endpoint,
             path_style,
+            trust,
         })
     }
 
@@ -520,6 +614,197 @@ impl S3Settings {
         ];
         (sql, params)
     }
+
+    /// The statements a reader connection runs after the `LOAD` and before the `CREATE
+    /// SECRET`, each with the values it binds, so that `httpfs` authenticates every `https`
+    /// server against the trust source.
+    ///
+    /// `httpfs` verifies nothing until told to, and with no CA file it trusts OpenSSL's
+    /// defaults, `SSL_CERT_FILE` among them. So its client is pinned to httplib, the one that
+    /// reads the CA file: the curl client ignores it, an engine whose default moved to curl
+    /// would change the trust source silently, and an engine without httplib fails the
+    /// statement. Verification goes on for both clients, so curl, if anything selected it,
+    /// would still refuse. Then, when there is a trust source, its path is bound as the CA
+    /// file. The text of every statement is fixed; the path is a bound value, never SQL text.
+    pub fn duckdb_tls_statements(&self) -> Vec<(&'static str, Vec<Value>)> {
+        let mut statements: Vec<(&'static str, Vec<Value>)> = DUCKDB_TLS_PINNING
+            .iter()
+            .map(|sql| (*sql, Vec::new()))
+            .collect();
+        if let Some(trust) = &self.trust {
+            statements.push((DUCKDB_TLS_CA_FILE, vec![Value::Text(trust.path.clone())]));
+        }
+        statements
+    }
+}
+
+/// Pick the trust source: the file `AWS_CA_BUNDLE` names when it is set and non-empty, else the
+/// first of `PLATFORM_CA_BUNDLES` present. A candidate that is present but unreadable or
+/// unusable is an error; the search does not skip on past it. Every error names
+/// `AWS_CA_BUNDLE`, the remedy, and never says the server's certificate was refused: that
+/// phrase belongs to the endpoint's refusal alone.
+fn resolve_trust(env: &dyn EnvSource) -> Result<TrustSource> {
+    if let Some(named) = env_text(env, "AWS_CA_BUNDLE")? {
+        let path = std::path::absolute(&named)
+            .ok()
+            .and_then(|absolute| absolute.into_os_string().into_string().ok())
+            .ok_or_else(|| {
+                anyhow!("AWS_CA_BUNDLE names {named}, which cannot be made an absolute path")
+            })?;
+        let text = env.read_file(Path::new(&path)).map_err(|failure| {
+            anyhow!(
+                "AWS_CA_BUNDLE names {path}, which cannot be read ({})",
+                failure.kind()
+            )
+        })?;
+        let certificates = bundle_certificates(&text)
+            .map_err(|reason| anyhow!("AWS_CA_BUNDLE names {path}, which {reason}"))?;
+        return Ok(TrustSource {
+            path,
+            origin: TrustOrigin::AwsCaBundle,
+            certificates,
+        });
+    }
+    for candidate in PLATFORM_CA_BUNDLES {
+        let text = match env.read_file(Path::new(candidate)) {
+            Ok(text) => text,
+            Err(failure) if failure.kind() == io::ErrorKind::NotFound => continue,
+            Err(failure) => bail!(
+                "the platform CA bundle {candidate} cannot be read ({}); set AWS_CA_BUNDLE to a \
+                 CA file",
+                failure.kind()
+            ),
+        };
+        let certificates = bundle_certificates(&text).map_err(|reason| {
+            anyhow!("the platform CA bundle {candidate} {reason}; set AWS_CA_BUNDLE to a CA file")
+        })?;
+        return Ok(TrustSource {
+            path: candidate.to_string(),
+            origin: TrustOrigin::Platform,
+            certificates,
+        });
+    }
+    bail!(
+        "no platform CA bundle found (looked for {}); set AWS_CA_BUNDLE to a CA file",
+        PLATFORM_CA_BUNDLES.join(", ")
+    )
+}
+
+/// The CA certificates of a PEM bundle that both TLS stacks load, or why the bundle cannot
+/// serve, worded to follow the file's name.
+///
+/// The readers' OpenSSL fails at its first request on a block that is not valid PEM or a
+/// certificate that is not valid DER, and it trusts a `TRUSTED CERTIFICATE` block, which the
+/// writer's webpki cannot read; each of those refuses the whole file here, so the two stacks
+/// never load different sets. A certificate that is valid DER but that webpki will not take as
+/// an anchor is dropped: kept, it would fail the writer's client, and a platform bundle can
+/// hold one. Blocks of other kinds, such as keys, are skipped.
+fn bundle_certificates(text: &str) -> std::result::Result<Vec<CertificateDer<'static>>, String> {
+    if text.lines().any(|line| {
+        line.trim_start()
+            .starts_with("-----BEGIN TRUSTED CERTIFICATE-----")
+    }) {
+        return Err(
+            "holds a TRUSTED CERTIFICATE block, which only one of the two TLS stacks \
+                    reads; give its plain CERTIFICATE form"
+                .to_string(),
+        );
+    }
+    let mut anchors = rustls::RootCertStore::empty();
+    let mut kept = Vec::new();
+    for section in <(SectionKind, Vec<u8>)>::pem_slice_iter(text.as_bytes()) {
+        let Ok((kind, der)) = section else {
+            return Err("is not valid PEM".to_string());
+        };
+        if kind != SectionKind::Certificate {
+            continue;
+        }
+        if !is_certificate_der(&der) {
+            return Err("holds a CERTIFICATE block that is not a DER certificate".to_string());
+        }
+        let certificate = CertificateDer::from(der);
+        if anchors.add(certificate.clone()).is_ok() {
+            kept.push(certificate);
+        }
+    }
+    if kept.is_empty() {
+        return Err("holds no usable CA certificate".to_string());
+    }
+    Ok(kept)
+}
+
+/// Whether `der` has a DER certificate's shape: one SEQUENCE spanning the whole input, holding
+/// a SEQUENCE, a SEQUENCE and a BIT STRING (the signed body, the signature algorithm and the
+/// signature), with every element below it well formed.
+fn is_certificate_der(der: &[u8]) -> bool {
+    const SEQUENCE: u8 = 0x30;
+    const BIT_STRING: u8 = 0x03;
+    let Some((SEQUENCE, body, [])) = der_element(der) else {
+        return false;
+    };
+    let mut tags = Vec::new();
+    let mut rest = body;
+    while let Some((tag, content, after)) = der_element(rest) {
+        if is_constructed(tag) && !der_well_formed(content) {
+            return false;
+        }
+        tags.push(tag);
+        rest = after;
+    }
+    rest.is_empty() && tags == [SEQUENCE, SEQUENCE, BIT_STRING]
+}
+
+fn is_constructed(tag: u8) -> bool {
+    tag & 0x20 != 0
+}
+
+/// Every element of `input` is a well-formed DER element, through every constructed one.
+fn der_well_formed(mut input: &[u8]) -> bool {
+    while !input.is_empty() {
+        let Some((tag, content, after)) = der_element(input) else {
+            return false;
+        };
+        if is_constructed(tag) && !der_well_formed(content) {
+            return false;
+        }
+        input = after;
+    }
+    true
+}
+
+/// The first DER element of `input`: its tag, its content and what follows it. Only one-byte
+/// tags, which are all an X.509 certificate uses, and definite lengths in their shortest form,
+/// as DER requires.
+fn der_element(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    if tag & 0x1f == 0x1f {
+        return None;
+    }
+    let (&first, rest) = rest.split_first()?;
+    let (len, rest) = if first < 0x80 {
+        (usize::from(first), rest)
+    } else {
+        let count = usize::from(first & 0x7f);
+        if count == 0 || count > 4 || rest.len() < count {
+            return None;
+        }
+        let (digits, rest) = rest.split_at(count);
+        if digits[0] == 0 {
+            return None;
+        }
+        let len = digits
+            .iter()
+            .fold(0usize, |len, digit| (len << 8) | usize::from(*digit));
+        if len < 0x80 {
+            return None;
+        }
+        (len, rest)
+    };
+    if rest.len() < len {
+        return None;
+    }
+    let (content, rest) = rest.split_at(len);
+    Some((tag, content, rest))
 }
 
 /// An AWS region name: lowercase letters, digits and `-`, as `us-east-1` or `eu-central-2`.
@@ -848,20 +1133,34 @@ fn retry_config() -> RetryConfig {
 
 /// The writer's HTTP client: direct to the endpoint, whatever the proxy variables say, as the
 /// readers' engine is; with its own timeouts, since a custom connector bypasses the store's.
+///
+/// It trusts the trust source's certificates and nothing else: not the platform's verifier,
+/// not its native store, and not `SSL_CERT_FILE`. For a plain `http://` endpoint there is no
+/// source and the list is empty, so no TLS handshake can complete, a redirect's included.
 #[derive(Debug)]
-struct DirectConnector;
+struct DirectConnector {
+    roots: Vec<CertificateDer<'static>>,
+}
 
 impl HttpConnector for DirectConnector {
     fn connect(&self, _options: &ClientOptions) -> object_store::Result<HttpClient> {
+        let generic = |source: reqwest::Error| object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(source),
+        };
+        let roots = self
+            .roots
+            .iter()
+            .map(|der| reqwest::Certificate::from_der(der))
+            .collect::<reqwest::Result<Vec<_>>>()
+            .map_err(generic)?;
         let client = reqwest::Client::builder()
+            .tls_certs_only(roots)
             .no_proxy()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .map_err(|e| object_store::Error::Generic {
-                store: "S3",
-                source: Box::new(e),
-            })?;
+            .map_err(generic)?;
         Ok(HttpClient::new(client))
     }
 }
@@ -900,7 +1199,13 @@ impl S3Sink {
             .with_allow_http(!settings.use_ssl())
             .with_retry(retry_config())
             .with_disable_bulk_delete(true)
-            .with_http_connector(DirectConnector);
+            .with_http_connector(DirectConnector {
+                roots: settings
+                    .trust
+                    .as_ref()
+                    .map(|trust| trust.certificates.clone())
+                    .unwrap_or_default(),
+            });
         if let Some(token) = &settings.session_token {
             builder = builder.with_token(token);
         }
@@ -996,8 +1301,8 @@ impl S3Sink {
         Ok(ids)
     }
 
-    /// Name the cause of a failed request: the endpoint unreachable, the credentials refused,
-    /// the bucket missing, or the store's own words.
+    /// Name the cause of a failed request: the endpoint's certificate untrusted, the endpoint
+    /// unreachable, the credentials refused, the bucket missing, or the store's own words.
     ///
     /// The store's words stop before the response body. An S3 error body can echo the request
     /// as signed, header values included, so a session token rides in a `SignatureDoesNotMatch`
@@ -1024,6 +1329,14 @@ impl S3Sink {
             Some(404) => anyhow!(
                 "bucket '{}' does not exist at the S3 endpoint (HTTP 404 while {what} for {index})",
                 index.bucket()
+            ),
+            // A refused certificate fails the connection, so it is named before the
+            // unreachable endpoint it would otherwise read as.
+            _ if let Some(cause) = untrusted_certificate(&err) => anyhow!(
+                "the S3 endpoint's TLS certificate is not trusted while {what} for {index}; it \
+                 must chain to a CA in the file AWS_CA_BUNDLE names, else the platform's CA \
+                 bundle ({})",
+                self.redacted(&cause)
             ),
             _ if is_unreachable(&err) => anyhow!(
                 "cannot reach the S3 endpoint while {what} for {index}: no connection could be \
@@ -1098,6 +1411,17 @@ fn status_in_text(text: &str) -> Option<u16> {
         .all(|b| b.is_ascii_digit())
         .then(|| digits.parse().ok())
         .flatten()
+}
+
+/// The words of the TLS stack's refusal of the server's certificate, if the error chain holds
+/// one: the deepest error that says so.
+fn untrusted_certificate(err: &object_store::Error) -> Option<String> {
+    const REFUSAL: &str = "invalid peer certificate";
+    error_chain(err)
+        .map(|link| link.to_string())
+        .filter(|text| text.contains(REFUSAL))
+        .last()
+        .map(|text| text[text.find(REFUSAL).unwrap_or(0)..].to_string())
 }
 
 /// Whether the error chain ends in a failure to connect, or a timeout.
@@ -1312,6 +1636,7 @@ mod tests {
             region: DEFAULT_REGION.to_string(),
             endpoint: None,
             path_style: false,
+            trust: None,
         };
         let suffix = format!(".{}", settings.endpoint_authority());
         for c in (0u32..0x300).filter_map(char::from_u32) {
@@ -1425,22 +1750,57 @@ mod tests {
         assert!(err.contains("not valid UTF-8"), "{err}");
     }
 
-    /// Variables from a map, files from disk.
-    struct FixtureEnv(HashMap<String, OsString>);
+    /// Variables from a map; files from disk, except the ones the fixture stands in for.
+    ///
+    /// The platform CA bundles are always stood in for, so no test depends on the host's: each
+    /// is absent but the last, which holds `test_ca()`'s certificate.
+    struct FixtureEnv {
+        vars: HashMap<String, OsString>,
+        files: HashMap<PathBuf, std::result::Result<String, io::ErrorKind>>,
+    }
 
     impl FixtureEnv {
         fn new(vars: &[(&str, &str)]) -> Self {
-            FixtureEnv(
-                vars.iter()
+            let mut files: HashMap<_, _> = PLATFORM_CA_BUNDLES
+                .iter()
+                .map(|bundle| (PathBuf::from(bundle), Err(io::ErrorKind::NotFound)))
+                .collect();
+            files.insert(
+                PathBuf::from(PLATFORM_CA_BUNDLES[PLATFORM_CA_BUNDLES.len() - 1]),
+                Ok(test_ca().0.clone()),
+            );
+            FixtureEnv {
+                vars: vars
+                    .iter()
                     .map(|(k, v)| (k.to_string(), OsString::from(v)))
                     .collect(),
-            )
+                files,
+            }
+        }
+
+        /// `file` reads as `contents`, or fails with that kind.
+        fn with_file(
+            mut self,
+            file: &str,
+            contents: std::result::Result<&str, io::ErrorKind>,
+        ) -> Self {
+            self.files
+                .insert(PathBuf::from(file), contents.map(str::to_string));
+            self
         }
     }
 
     impl EnvSource for FixtureEnv {
         fn var(&self, name: &str) -> Option<OsString> {
-            self.0.get(name).cloned()
+            self.vars.get(name).cloned()
+        }
+
+        fn read_file(&self, file: &Path) -> io::Result<String> {
+            match self.files.get(file) {
+                Some(Ok(text)) => Ok(text.clone()),
+                Some(Err(kind)) => Err(io::Error::from(*kind)),
+                None => fs::read_to_string(file),
+            }
         }
     }
 
@@ -2273,5 +2633,374 @@ s3 =
 
         sink.clear_marker().unwrap();
         assert!(!stored_keys(&sink, &store).contains(&"idx/.xdu-complete".to_string()));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The trust source
+    // ---------------------------------------------------------------------------------------
+
+    /// A CA certificate made once per test process: its PEM and its DER.
+    fn test_ca() -> &'static (String, CertificateDer<'static>) {
+        static CA: std::sync::OnceLock<(String, CertificateDer<'static>)> =
+            std::sync::OnceLock::new();
+        CA.get_or_init(|| make_ca("xdu unit-test CA", false))
+    }
+
+    /// A self-signed CA certificate. With `refused_extension`, it also carries a critical
+    /// extension no verifier knows: valid DER that webpki will not take as an anchor.
+    fn make_ca(name: &str, refused_extension: bool) -> (String, CertificateDer<'static>) {
+        use rcgen::{BasicConstraints, CertificateParams, CustomExtension, DnType, IsCa, KeyPair};
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(DnType::CommonName, name);
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        if refused_extension {
+            let mut extension =
+                CustomExtension::from_oid_content(&[1, 3, 6, 1, 4, 1, 55555, 1], vec![0x05, 0x00]);
+            extension.set_criticality(true);
+            params.custom_extensions.push(extension);
+        }
+        let certificate = params.self_signed(&key).unwrap();
+        (certificate.pem(), certificate.der().clone())
+    }
+
+    /// A PEM block of `label` around `der`.
+    fn pem_block(label: &str, der: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut body = String::new();
+        for group in der.chunks(3) {
+            let bits = group.iter().enumerate().fold(0u32, |bits, (i, byte)| {
+                bits | u32::from(*byte) << (16 - 8 * i)
+            });
+            for i in 0..4 {
+                if i <= group.len() {
+                    body.push(char::from(ALPHABET[(bits >> (18 - 6 * i) & 0x3f) as usize]));
+                } else {
+                    body.push('=');
+                }
+            }
+        }
+        let lines: Vec<&str> = body
+            .as_bytes()
+            .chunks(64)
+            .map(|line| std::str::from_utf8(line).unwrap())
+            .collect();
+        format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            lines.join("\n")
+        )
+    }
+
+    const KEY_PAIR: [(&str, &str); 2] = [
+        ("AWS_ACCESS_KEY_ID", "key-id-AK19"),
+        ("AWS_SECRET_ACCESS_KEY", SECRET),
+    ];
+
+    /// Resolve with the fixture key pair, `extra` and `files` in place.
+    fn trust_env(extra: &[(&str, &str)]) -> FixtureEnv {
+        let mut vars: Vec<(&str, &str)> = KEY_PAIR.to_vec();
+        vars.push(("HOME", ""));
+        vars.extend_from_slice(extra);
+        FixtureEnv::new(&vars)
+    }
+
+    /// A temporary file holding `contents`, in a directory the caller keeps.
+    fn bundle_file(dir: &TempDir, name: &str, contents: &str) -> String {
+        let file = dir.path().join(name);
+        fs::write(&file, contents).unwrap();
+        file.to_str().unwrap().to_string()
+    }
+
+    /// The endpoints a trust source applies to: AWS's, and an `https://` override.
+    const HTTPS_ENDPOINTS: [&[(&str, &str)]; 2] =
+        [&[], &[("AWS_ENDPOINT_URL", "https://127.0.0.1:9000")]];
+
+    #[test]
+    fn the_trust_source_is_the_file_aws_ca_bundle_names() {
+        let dir = TempDir::new().unwrap();
+        let (pem, der) = test_ca();
+        let file = bundle_file(&dir, "ca.pem", pem);
+        for endpoint in HTTPS_ENDPOINTS {
+            let mut extra = vec![("AWS_CA_BUNDLE", file.as_str())];
+            extra.extend_from_slice(endpoint);
+            let settings = S3Settings::resolve(&trust_env(&extra)).unwrap();
+            let trust = settings
+                .trust
+                .as_ref()
+                .expect("an https endpoint has a source");
+            assert_eq!(trust.path(), file);
+            assert_eq!(trust.origin(), TrustOrigin::AwsCaBundle);
+            assert_eq!(trust.certificates(), std::slice::from_ref(der));
+            let shown = format!("{settings:?}");
+            assert!(
+                shown.contains(&file) && shown.contains("AwsCaBundle"),
+                "{shown}"
+            );
+        }
+
+        // A relative path is made absolute against the working directory, since the readers
+        // hand it on for OpenSSL to open later.
+        let relative = "relative/ca.pem";
+        let absolute = std::env::current_dir().unwrap().join(relative);
+        let env = trust_env(&[("AWS_CA_BUNDLE", relative)])
+            .with_file(absolute.to_str().unwrap(), Ok(pem));
+        let settings = S3Settings::resolve(&env).unwrap();
+        assert_eq!(
+            settings.trust.as_ref().unwrap().path(),
+            absolute.to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn an_empty_aws_ca_bundle_is_unset() {
+        let settings = S3Settings::resolve(&trust_env(&[("AWS_CA_BUNDLE", "")])).unwrap();
+        let trust = settings.trust.unwrap();
+        assert_eq!(trust.origin(), TrustOrigin::Platform);
+        assert_eq!(
+            trust.path(),
+            PLATFORM_CA_BUNDLES[PLATFORM_CA_BUNDLES.len() - 1]
+        );
+    }
+
+    #[test]
+    fn without_aws_ca_bundle_the_first_platform_bundle_present_is_the_source() {
+        let (pem, der) = test_ca();
+        for first in 0..PLATFORM_CA_BUNDLES.len() {
+            let mut env = trust_env(&[]);
+            for later in &PLATFORM_CA_BUNDLES[first..] {
+                env = env.with_file(later, Ok(pem));
+            }
+            let trust = S3Settings::resolve(&env).unwrap().trust.unwrap();
+            assert_eq!(trust.path(), PLATFORM_CA_BUNDLES[first]);
+            assert_eq!(trust.origin(), TrustOrigin::Platform);
+            assert_eq!(trust.certificates(), std::slice::from_ref(der));
+        }
+
+        // A bundle that is present but unreadable stops the search; it is not skipped.
+        let env =
+            trust_env(&[]).with_file(PLATFORM_CA_BUNDLES[0], Err(io::ErrorKind::PermissionDenied));
+        let err = format!("{:#}", S3Settings::resolve(&env).unwrap_err());
+        assert!(err.contains(PLATFORM_CA_BUNDLES[0]), "{err}");
+        assert!(err.contains("AWS_CA_BUNDLE"), "{err}");
+    }
+
+    /// Every platform bundle absent.
+    fn no_platform_bundle(extra: &[(&str, &str)]) -> FixtureEnv {
+        PLATFORM_CA_BUNDLES
+            .iter()
+            .fold(trust_env(extra), |env, bundle| {
+                env.with_file(bundle, Err(io::ErrorKind::NotFound))
+            })
+    }
+
+    #[test]
+    fn no_platform_bundle_is_refused_naming_aws_ca_bundle() {
+        for endpoint in HTTPS_ENDPOINTS {
+            let err = format!(
+                "{:#}",
+                S3Settings::resolve(&no_platform_bundle(endpoint)).unwrap_err()
+            );
+            assert!(err.contains("no platform CA bundle found"), "{err}");
+            assert!(err.contains("set AWS_CA_BUNDLE"), "{err}");
+            for bundle in PLATFORM_CA_BUNDLES {
+                assert!(err.contains(bundle), "{bundle} is not named: {err}");
+            }
+        }
+    }
+
+    /// Every way a CA file can fail to serve, as `(case, contents or read failure, the words
+    /// the refusal carries)`.
+    fn unusable_bundles() -> Vec<(
+        &'static str,
+        std::result::Result<String, io::ErrorKind>,
+        &'static str,
+    )> {
+        let (pem, der) = test_ca();
+        let key = rcgen::KeyPair::generate().unwrap().serialize_pem();
+        vec![
+            ("missing", Err(io::ErrorKind::NotFound), "cannot be read"),
+            (
+                "unreadable",
+                Err(io::ErrorKind::PermissionDenied),
+                "cannot be read",
+            ),
+            ("empty", Ok(String::new()), "holds no usable CA certificate"),
+            ("a key only", Ok(key), "holds no usable CA certificate"),
+            (
+                "malformed PEM",
+                Ok(format!("{pem}-----BEGIN CERTIFICATE-----\nMIIB\n")),
+                "is not valid PEM",
+            ),
+            (
+                "invalid DER",
+                Ok(format!(
+                    "{pem}{}",
+                    pem_block("CERTIFICATE", b"not a certificate")
+                )),
+                "not a DER certificate",
+            ),
+            (
+                "a DER certificate cut short",
+                Ok(format!(
+                    "{pem}{}",
+                    pem_block("CERTIFICATE", &der[..der.len() - 1])
+                )),
+                "not a DER certificate",
+            ),
+            (
+                "a TRUSTED CERTIFICATE block",
+                Ok(format!("{pem}{}", pem_block("TRUSTED CERTIFICATE", der))),
+                "TRUSTED CERTIFICATE",
+            ),
+        ]
+    }
+
+    /// The resolver's refusal for each unusable file, named by `AWS_CA_BUNDLE` and as a platform
+    /// bundle, over each `https` endpoint.
+    fn unusable_bundle_errors() -> Vec<(String, String, &'static str)> {
+        let named = "/fixture/named-ca.pem";
+        let mut errors = Vec::new();
+        for (case, contents, words) in unusable_bundles() {
+            let contents = contents.as_deref().map_err(|kind| *kind);
+            for endpoint in HTTPS_ENDPOINTS {
+                let mut extra = vec![("AWS_CA_BUNDLE", named)];
+                extra.extend_from_slice(endpoint);
+                let env = trust_env(&extra).with_file(named, contents);
+                let err = format!("{:#}", S3Settings::resolve(&env).unwrap_err());
+                errors.push((format!("AWS_CA_BUNDLE, {case}"), err, words));
+                // An absent platform bundle is skipped, not refused.
+                if contents == Err(io::ErrorKind::NotFound) {
+                    continue;
+                }
+                let platform = PLATFORM_CA_BUNDLES[1];
+                let env = no_platform_bundle(endpoint).with_file(platform, contents);
+                let err = format!("{:#}", S3Settings::resolve(&env).unwrap_err());
+                errors.push((format!("{platform}, {case}"), err, words));
+            }
+        }
+        errors
+    }
+
+    #[test]
+    fn an_unusable_bundle_is_refused_naming_aws_ca_bundle() {
+        let errors = unusable_bundle_errors();
+        assert_eq!(errors.len(), (8 + 7) * 2);
+        for (case, err, words) in errors {
+            assert!(err.contains("AWS_CA_BUNDLE"), "{case}: {err}");
+            assert!(err.contains(words), "{case}: does not say '{words}': {err}");
+            let file = if case.starts_with("AWS_CA_BUNDLE") {
+                "/fixture/named-ca.pem"
+            } else {
+                PLATFORM_CA_BUNDLES[1]
+            };
+            assert!(err.contains(file), "{case}: does not name {file}: {err}");
+            assert!(!err.contains(SECRET), "{case}: {err}");
+        }
+    }
+
+    #[test]
+    fn no_resolver_error_says_the_certificate_is_not_trusted() {
+        let mut errors: Vec<String> = unusable_bundle_errors()
+            .into_iter()
+            .map(|(_, err, _)| err)
+            .collect();
+        for endpoint in HTTPS_ENDPOINTS {
+            errors.push(format!(
+                "{:#}",
+                S3Settings::resolve(&no_platform_bundle(endpoint)).unwrap_err()
+            ));
+        }
+        assert!(errors.len() > 30);
+        for err in errors {
+            assert!(!err.contains("TLS certificate is not trusted"), "{err}");
+            assert!(!err.contains("not trusted"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_certificate_webpki_rejects_is_dropped_and_the_rest_kept() {
+        let (refused_pem, refused_der) = make_ca("xdu refused CA", true);
+        let (kept_pem, kept_der) = make_ca("xdu kept CA", false);
+        // The premise: the refused certificate is DER that webpki will not take as an anchor.
+        assert!(is_certificate_der(&refused_der));
+        assert!(
+            rustls::RootCertStore::empty()
+                .add(refused_der.clone())
+                .is_err()
+        );
+
+        let both = format!("{refused_pem}{kept_pem}");
+        assert_eq!(bundle_certificates(&both).unwrap(), vec![kept_der.clone()]);
+        let env = trust_env(&[("AWS_CA_BUNDLE", "/fixture/mixed.pem")])
+            .with_file("/fixture/mixed.pem", Ok(&both));
+        let trust = S3Settings::resolve(&env).unwrap().trust.unwrap();
+        assert_eq!(trust.certificates(), std::slice::from_ref(&kept_der));
+
+        // Alone, it leaves nothing to trust.
+        let err = bundle_certificates(&refused_pem).unwrap_err();
+        assert!(err.contains("holds no usable CA certificate"), "{err}");
+    }
+
+    #[test]
+    fn a_plain_http_endpoint_resolves_no_trust_source() {
+        let http = ("AWS_ENDPOINT_URL", "http://127.0.0.1:9000");
+        // Neither an unusable AWS_CA_BUNDLE nor a host without a platform bundle stops it.
+        for env in [
+            trust_env(&[http, ("AWS_CA_BUNDLE", "/fixture/missing.pem")])
+                .with_file("/fixture/missing.pem", Err(io::ErrorKind::NotFound)),
+            no_platform_bundle(&[http]),
+            trust_env(&[http]),
+        ] {
+            let settings = S3Settings::resolve(&env).unwrap();
+            assert!(settings.trust.is_none(), "{settings:?}");
+            assert!(!settings.use_ssl());
+        }
+        let https = ("AWS_ENDPOINT_URL", "https://127.0.0.1:9000");
+        assert!(S3Settings::resolve(&no_platform_bundle(&[https])).is_err());
+    }
+
+    #[test]
+    fn the_tls_statements_are_fixed_text_and_bind_only_the_path() {
+        let dir = TempDir::new().unwrap();
+        let quoted = dir.path().join("it's; DROP");
+        fs::create_dir(&quoted).unwrap();
+        let (pem, _) = test_ca();
+        let files = [bundle_file(&dir, "ca.pem", pem), {
+            let file = quoted.join("ca.pem");
+            fs::write(&file, pem).unwrap();
+            file.to_str().unwrap().to_string()
+        }];
+        let plain =
+            S3Settings::resolve(&trust_env(&[("AWS_ENDPOINT_URL", "http://127.0.0.1:9000")]))
+                .unwrap()
+                .duckdb_tls_statements();
+        // Over plain HTTP: the three fixed statements, binding nothing.
+        assert_eq!(plain.len(), 3);
+        for (sql, params) in &plain {
+            assert!(params.is_empty(), "{sql}");
+            assert!(sql.starts_with("SET ") && !sql.contains(';'), "{sql}");
+        }
+        for file in &files {
+            for endpoint in HTTPS_ENDPOINTS {
+                let mut extra = vec![("AWS_CA_BUNDLE", file.as_str())];
+                extra.extend_from_slice(endpoint);
+                let statements = S3Settings::resolve(&trust_env(&extra))
+                    .unwrap()
+                    .duckdb_tls_statements();
+                // The same text whatever the path; the fixed three first, then the file.
+                let texts: Vec<&str> = statements.iter().map(|(sql, _)| *sql).collect();
+                let plain_texts: Vec<&str> = plain.iter().map(|(sql, _)| *sql).collect();
+                assert_eq!(texts[..3], plain_texts[..]);
+                assert_eq!(texts.len(), 4);
+                let (sql, params) = &statements[3];
+                assert_eq!(sql.matches('?').count(), 1, "{sql}");
+                assert_eq!(params, &vec![Value::Text(file.clone())]);
+                for (sql, _) in &statements {
+                    assert!(!sql.contains(file.as_str()), "{sql}");
+                    assert!(!sql.contains("it's"), "{sql}");
+                }
+            }
+        }
     }
 }

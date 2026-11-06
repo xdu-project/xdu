@@ -426,6 +426,14 @@ stderr and print no rows. The bucket must have a name S3 allows (3 to 63 lowerca
 dots and hyphens, beginning and ending with a letter or digit); any other, and a locator carrying
 credentials, is refused before a request is sent, without the locator being repeated.
 
+Every `https` connection, the writer's and the readers', authenticates the server against one CA
+file: the one `AWS_CA_BUNDLE` names, else the platform's bundle (the first of
+`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`,
+`/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem` and `/etc/ssl/cert.pem` present).
+`SSL_CERT_FILE` and the macOS keychain are not read, nothing turns verification off, and a
+self-signed or unknown-CA endpoint is refused by all three tools; a store with a private CA needs
+`AWS_CA_BUNDLE` set to that CA's file.
+
 ### Querying with DuckDB
 
 The Parquet index integrates seamlessly with DuckDB for instant analytics:

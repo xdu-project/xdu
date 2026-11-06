@@ -99,6 +99,20 @@ variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY) are not used: requests go
 straight to the endpoint. Building an index needs no DuckDB extension; querying
 it does (see *xdu-find*(1)).
 
+Every connection to an https endpoint, which is every AWS one, authenticates
+the server's certificate against one CA file: the file *AWS_CA_BUNDLE* names,
+else the first of /etc/ssl/certs/ca-certificates.crt,
+/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem,
+/etc/pki/tls/certs/ca-bundle.crt, /etc/ssl/ca-bundle.pem and /etc/ssl/cert.pem
+that exists, the same file *xdu-find*(1) trusts. SSL_CERT_FILE, SSL_CERT_DIR
+and the macOS keychain are not read, so an endpoint whose CA was added only to
+the keychain needs that CA's file named; nothing turns verification off. A
+certificate that does not chain to a CA in that file fails the run at the first
+listing, with an error naming the certificate and any existing index as it was;
+a missing or unreadable file, or one holding no CA certificate, fails it before
+any request. A plain http:// endpoint does not use TLS, and none of this
+applies to it.
+
 # ENVIRONMENT
 
 *XDU_JOBS*
@@ -133,6 +147,11 @@ it does (see *xdu-find*(1)).
 	An endpoint to use in place of AWS S3, as http:// or https:// with a host
 	and an optional port, in that order ahead of the profile's. Requests to an
 	endpoint set this way use path-style addressing.
+
+*AWS_CA_BUNDLE*
+	A PEM file of the CA certificates an https endpoint's certificate must
+	chain to, in place of the platform's bundle. An empty value means unset.
+	Not read for an http:// endpoint.
 
 # EXAMPLES
 

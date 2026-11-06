@@ -21,9 +21,11 @@ subsystems.
 `src/lib.rs` (schema + `QueryFilters`/SQL + `index_glob` + layout constants + `RESERVED_INDEX_NAMES`) ·
 `src/cli.rs` (the one CLI definition) ·
 `src/s3.rs` (`S3Sink`'s chunk PUTs, prune and marker sequencing + the S3 partition-name refusal +
-the one credential resolver and the reader's bound `CREATE SECRET`) ·
+the one credential resolver and the reader's bound `CREATE SECRET` + the one TLS trust source and
+the writer's `tls_certs_only` client) ·
 `src/view_query.rs` (every `xdu-view` statement) ·
-`src/engine.rs` (the one connection open, the extension load and `open_s3_connection`)
+`src/engine.rs` (the one connection open, the extension load and `open_s3_connection`, with the
+reader's certificate-verification statements)
 
 ---
 
@@ -197,6 +199,29 @@ ordering is load-bearing:
   `s3::tests::the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on` and
   the `harness_stray_*` wire tests hold that. No credential is ever SQL text, and
   `duckdb_secrets()` lists the secret redacted.
+- **Every S3 connection authenticates the server, against one trust source.**
+  `S3Settings::resolve` picks the source once for both directions: the file `AWS_CA_BUNDLE`
+  names, else the first of `s3::PLATFORM_CA_BUNDLES` present. A missing, unreadable or
+  certificate-free source refuses before any request, naming `AWS_CA_BUNDLE`.
+  - **Writer.** `S3Sink`'s client trusts only that file's certificates
+    (`tls_certs_only`): never the platform verifier, built-in roots or
+    `tls_certs_merge`.
+  - **Reader.** `engine::open_s3_connection` runs fixed text after the `LOAD`: it pins
+    `httpfs_client_implementation` to `httplib`, turns `enable_server_cert_verification` and
+    `enable_curl_server_cert_verification` on, and binds the path as `SET ca_cert_file = ?`.
+    The path is never SQL text.
+  - **Nothing disables verification:** no `danger_accept_invalid_*`, `tls_danger_*`,
+    `allow_invalid_certificates` or custom verifier; no `false` for either flag; no option
+    or variable that turns it off.
+  - **Nothing adds roots beside the one source:** no `tls_certs_merge`,
+    `add_root_certificate`, `with_root_certificate`, `webpki-roots`, `rustls-native-certs`
+    or platform verifier.
+  - **Never trust sources:** `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in
+    directory and the macOS keychain. A plain `http://` endpoint override resolves no source.
+  - **The tests that hold it:** the `tls_` wire tests. A self-signed, unknown-CA or
+    wrong-name endpoint is refused by all three tools; an endpoint the named CA signed
+    answers as plain HTTP does; an unusable `AWS_CA_BUNDLE` stops each tool before it
+    connects.
 
 ## 6. Unix-only
 

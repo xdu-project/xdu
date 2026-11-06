@@ -152,17 +152,26 @@ pub fn load_extension(conn: &Connection, name: &str) -> Result<PathBuf> {
     load_extension_from(conn, &dir, name)
 }
 
-/// Open a connection that reads `s3://` paths with the given credentials.
+/// Open a connection that reads `s3://` paths with the given credentials, authenticating every
+/// `https` server against the settings' trust source.
 ///
-/// `open_connection`, then the pinned `httpfs` from the extension directory in effect, then
-/// one prepared `CREATE SECRET` whose every value is a bound parameter. A local index never
-/// comes through here, so a local query loads no extension at all.
+/// `open_connection`, then the pinned `httpfs` from the extension directory in effect, then the
+/// statements that make it verify every server's certificate against the one CA file the
+/// resolver chose (`AWS_CA_BUNDLE`, else the platform's bundle) and no other, then one prepared
+/// `CREATE SECRET` whose every value is a bound parameter. A local index never comes through
+/// here, so a local query loads no extension at all.
 pub fn open_s3_connection(settings: &S3Settings) -> Result<Connection> {
     let dir = extension_dir()?;
     open_s3_connection_from(settings, &dir)
 }
 
 /// `open_s3_connection` with the extension directory given.
+///
+/// What the connection trusts: for an `https` endpoint, exactly the certificates in the trust
+/// source's file, whose path is bound, never written into SQL. A plain `http://` override names
+/// no file, since TLS does not apply to it. Either way `httpfs`'s client is pinned to httplib and
+/// verification is on for both of its clients. Each statement runs before the secret and before
+/// any request, and every failure is an error.
 ///
 /// The secret goes in after the `LOAD`: a `Config` key naming an `s3_*` setting is refused at
 /// open while autoload is off, and turning autoload on would reopen the download path that
@@ -171,6 +180,10 @@ pub fn open_s3_connection(settings: &S3Settings) -> Result<Connection> {
 pub fn open_s3_connection_from(settings: &S3Settings, dir: &Path) -> Result<Connection> {
     let conn = open_connection()?;
     load_extension_from(&conn, dir, "httpfs")?;
+    for (sql, params) in settings.duckdb_tls_statements() {
+        conn.execute(sql, params_from_iter(params))
+            .context("failed to make httpfs authenticate the S3 endpoint's TLS certificate")?;
+    }
     let (sql, params) = settings.duckdb_secret_statement();
     conn.execute(&sql, params_from_iter(params))
         .context("failed to hand the S3 credentials to DuckDB")?;

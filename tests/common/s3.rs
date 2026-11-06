@@ -11,6 +11,10 @@
 //! can leave one running. Starting panics when the pinned `httpfs` is missing or the bind is
 //! refused, whatever else is set: a wire test that cannot run must fail, never report `ok`.
 //! The `#[ignore]` on each wire test is what keeps a machine without the extension quiet.
+//!
+//! `TestS3::tls_front` puts a TLS terminator before the proxy, with certificates `TestPki`
+//! makes per run, so the certificate tests reach the same endpoint, through the same meter, over
+//! `https`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -36,6 +40,7 @@ use s3s::dto::{
 use s3s::service::S3ServiceBuilder;
 use s3s::{S3, S3Request, S3Response, S3Result, s3_error};
 use tempfile::TempDir;
+use tokio_rustls::rustls;
 
 use xdu::s3::{EnvSource, S3Settings};
 
@@ -511,6 +516,277 @@ impl Drop for TestS3 {
     }
 }
 
+/// What a TLS endpoint shows its clients: one certificate and its key.
+#[derive(Clone)]
+pub struct FrontIdentity {
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    key: Vec<u8>,
+}
+
+/// Certificates made for one test run with `rcgen`: a test CA, an unrelated CA, and the
+/// identities a TLS front can show.
+///
+/// The self-signed certificate is an end-entity one. A self-signed CA certificate shown as a
+/// server's would be refused as a CA used as an end entity, which is a different rule from the
+/// one an untrusted issuer breaks. Each CA's PEM file sits in a directory of its own, apart from
+/// every `Hermetic` directory, so a child that wrote beside it would still be caught.
+pub struct TestPki {
+    dir: TempDir,
+    /// A leaf the test CA signed for `IP:127.0.0.1`.
+    pub leaf: FrontIdentity,
+    /// A leaf the test CA signed for `DNS:wrong.example` only.
+    pub wrong_name: FrontIdentity,
+    /// A self-signed end-entity certificate for `IP:127.0.0.1`.
+    pub self_signed: FrontIdentity,
+}
+
+impl TestPki {
+    pub fn new() -> TestPki {
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+
+        let make_ca = |name: &str| {
+            let key = KeyPair::generate().expect("CA key");
+            let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+            params.distinguished_name.push(DnType::CommonName, name);
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let certificate = params.self_signed(&key).expect("CA certificate");
+            (certificate, Issuer::new(params, key))
+        };
+        let identity = |names: &[&str], issuer: Option<&Issuer<'_, KeyPair>>| {
+            let key = KeyPair::generate().expect("leaf key");
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            let mut params = CertificateParams::new(names).expect("leaf params");
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "xdu test endpoint");
+            let certificate = match issuer {
+                Some(issuer) => params.signed_by(&key, issuer),
+                None => params.self_signed(&key),
+            }
+            .expect("leaf certificate");
+            FrontIdentity {
+                certificate: certificate.der().clone(),
+                key: key.serialize_der(),
+            }
+        };
+
+        let (ca_certificate, ca) = make_ca("xdu test CA");
+        let (other_certificate, _) = make_ca("xdu unrelated CA");
+        let dir = TempDir::new().expect("PKI directory");
+        fs::write(dir.path().join("ca.pem"), ca_certificate.pem()).expect("test CA file");
+        fs::write(dir.path().join("other-ca.pem"), other_certificate.pem())
+            .expect("unrelated CA file");
+        TestPki {
+            leaf: identity(&["127.0.0.1"], Some(&ca)),
+            wrong_name: identity(&["wrong.example"], Some(&ca)),
+            self_signed: identity(&["127.0.0.1"], None),
+            dir,
+        }
+    }
+
+    /// The test CA's PEM file.
+    pub fn ca_file(&self) -> PathBuf {
+        self.dir.path().join("ca.pem")
+    }
+
+    /// A CA that signed nothing the fronts show.
+    pub fn other_ca_file(&self) -> PathBuf {
+        self.dir.path().join("other-ca.pem")
+    }
+
+    /// A directory beside the CA files, for a test that needs files of its own there.
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// How long a TLS front waits for a handshake, and `connections` for each to finish.
+const FRONT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What became of one connection a TLS front accepted.
+#[derive(Default)]
+struct FrontConnection {
+    /// `None` until the handshake ends; then its outcome, with the alert the client sent if it
+    /// sent one.
+    handshake: Mutex<Option<Result<(), Option<rustls::AlertDescription>>>>,
+    /// The client sent application data after a completed handshake.
+    application_bytes: AtomicBool,
+    done: AtomicBool,
+}
+
+/// One connection a TLS front accepted, once it finished.
+#[derive(Debug, Clone)]
+pub struct FrontRecord {
+    /// `Ok` for a completed handshake; else the alert the client sent, if any. `Err(None)`
+    /// also stands for a handshake that never ended.
+    pub handshake: Result<(), Option<rustls::AlertDescription>>,
+    /// Bytes followed the handshake, so the client went on to send a request.
+    pub application_bytes: bool,
+}
+
+impl FrontRecord {
+    /// The handshake failed with the client refusing the certificate it was shown.
+    pub fn failed_with_certificate_alert(&self) -> bool {
+        use rustls::AlertDescription as A;
+        matches!(
+            self.handshake,
+            Err(Some(
+                A::BadCertificate
+                    | A::UnsupportedCertificate
+                    | A::CertificateRevoked
+                    | A::CertificateExpired
+                    | A::CertificateUnknown
+                    | A::UnknownCA
+            ))
+        )
+    }
+}
+
+/// A TLS terminator on loopback that relays each connection's plaintext to the counting proxy.
+///
+/// It runs on its `TestS3`'s runtime and records every connection it accepts: how the
+/// handshake ended and whether any application data followed. A connection reaches the proxy
+/// only once the client has sent application data, so a client that refused the certificate
+/// leaves the proxy untouched and every proxy assertion keeps its meaning.
+///
+/// Tests never count handshakes as the verdict. httplib completes the handshake and only then
+/// checks the certificate, so a refusing reader shows a completed handshake closed without a
+/// request; the writer's TLS stack refuses inside the handshake, and its retries can repeat it.
+pub struct TlsFront {
+    addr: SocketAddr,
+    connections: Arc<Mutex<Vec<Arc<FrontConnection>>>>,
+    acceptor: tokio::task::JoinHandle<()>,
+}
+
+impl TestS3 {
+    /// A TLS front before this endpoint's proxy, showing `identity`.
+    pub fn tls_front(&self, identity: &FrontIdentity) -> TlsFront {
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("TLS versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![identity.certificate.clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key.clone())),
+            )
+            .expect("TLS front configuration");
+        let tls = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("cannot bind the TLS front: {e}"));
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking TLS front listener");
+        let addr = listener.local_addr().expect("TLS front address");
+        let upstream = self.proxy.addr;
+        let connections: Arc<Mutex<Vec<Arc<FrontConnection>>>> = Arc::default();
+        let accepted = Arc::clone(&connections);
+        let runtime = self
+            .runtime
+            .as_ref()
+            .expect("the endpoint runtime is running");
+        let acceptor = runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("TLS front listener");
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    continue;
+                };
+                // Counted at accept, so a test that asks once its client exited sees every
+                // connection the client made.
+                let connection = Arc::new(FrontConnection::default());
+                accepted.lock().unwrap().push(Arc::clone(&connection));
+                let tls = tls.clone();
+                tokio::spawn(async move {
+                    let handshake = tokio::time::timeout(FRONT_TIMEOUT, tls.accept(socket)).await;
+                    let mut stream = match handshake {
+                        Ok(Ok(stream)) => {
+                            *connection.handshake.lock().unwrap() = Some(Ok(()));
+                            stream
+                        }
+                        Ok(Err(error)) => {
+                            let alert = error
+                                .get_ref()
+                                .and_then(|e| e.downcast_ref::<rustls::Error>())
+                                .and_then(|e| match e {
+                                    rustls::Error::AlertReceived(alert) => Some(*alert),
+                                    _ => None,
+                                });
+                            *connection.handshake.lock().unwrap() = Some(Err(alert));
+                            connection.done.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        Err(_) => {
+                            *connection.handshake.lock().unwrap() = Some(Err(None));
+                            connection.done.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                    };
+                    let mut first = vec![0u8; 16 * 1024];
+                    let n = match tokio::time::timeout(FRONT_TIMEOUT, stream.read(&mut first)).await
+                    {
+                        Ok(Ok(n)) => n,
+                        _ => 0,
+                    };
+                    if n > 0 {
+                        connection.application_bytes.store(true, Ordering::SeqCst);
+                        if let Ok(mut proxy) = tokio::net::TcpStream::connect(upstream).await
+                            && proxy.write_all(&first[..n]).await.is_ok()
+                        {
+                            let _ = tokio::io::copy_bidirectional(&mut stream, &mut proxy).await;
+                        }
+                    }
+                    let _ = stream.shutdown().await;
+                    connection.done.store(true, Ordering::SeqCst);
+                });
+            }
+        });
+        TlsFront {
+            addr,
+            connections,
+            acceptor,
+        }
+    }
+}
+
+impl TlsFront {
+    /// The endpoint URL a client is given.
+    pub fn url(&self) -> String {
+        format!("https://{}", self.addr)
+    }
+
+    /// Every connection accepted so far, once each has finished, in accept order.
+    pub fn connections(&self) -> Vec<FrontRecord> {
+        let deadline = Instant::now() + FRONT_TIMEOUT + Duration::from_secs(5);
+        let connections = self.connections.lock().unwrap().clone();
+        connections
+            .iter()
+            .map(|connection| {
+                while !connection.done.load(Ordering::SeqCst) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "a TLS front connection is still open after {FRONT_TIMEOUT:?}"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                FrontRecord {
+                    handshake: connection.handshake.lock().unwrap().unwrap_or(Err(None)),
+                    application_bytes: connection.application_bytes.load(Ordering::SeqCst),
+                }
+            })
+            .collect()
+    }
+}
+
+impl Drop for TlsFront {
+    fn drop(&mut self) {
+        self.acceptor.abort();
+    }
+}
+
 /// One request as the proxy relayed it.
 #[derive(Debug, Clone)]
 pub struct ProxyRecord {
@@ -917,8 +1193,9 @@ impl Hermetic {
     }
 
     /// A command for any program, with every variable that could steer an S3 client removed:
-    /// `AWS_*`, `DUCKDB_*` and every `*_PROXY`, in any case, and the tools' own `XDU_INDEX`
-    /// and `XDU_EXTENSION_DIR`. The test adds back exactly what it means to.
+    /// `AWS_*`, `DUCKDB_*` and every `*_PROXY`, in any case, OpenSSL's `SSL_CERT_FILE` and
+    /// `SSL_CERT_DIR`, and the tools' own `XDU_INDEX` and `XDU_EXTENSION_DIR`. The test adds
+    /// back exactly what it means to.
     pub fn command_for(&self, program: &Path) -> Command {
         let mut cmd = Command::new(program);
         for (name, _) in std::env::vars_os() {
@@ -926,6 +1203,8 @@ impl Hermetic {
             if upper.starts_with("AWS_")
                 || upper.starts_with("DUCKDB_")
                 || upper.ends_with("_PROXY")
+                || upper == "SSL_CERT_FILE"
+                || upper == "SSL_CERT_DIR"
                 || upper == "XDU_INDEX"
                 || upper == "XDU_EXTENSION_DIR"
             {

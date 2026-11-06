@@ -198,6 +198,8 @@ pub fn parquet_source(
 /// Why an S3 request failed, as far as the reader can tell from DuckDB's error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum S3Cause {
+    /// The endpoint's TLS certificate does not chain to a CA in the trust source.
+    Untrusted,
     /// No connection to the endpoint could be established.
     Unreachable,
     /// The endpoint refused the request's credentials or signature (HTTP 403).
@@ -211,7 +213,9 @@ pub enum S3Cause {
 /// Name the cause of a failed S3 request from DuckDB's error text.
 ///
 /// `httpfs` reports causes only in prose, so this matches the texts it is known to produce: a
-/// dead endpoint is `Could not establish connection`; a rejected signature carries `HTTP 403`,
+/// refused certificate is httplib's `SSL server verification failed` (or curl's `SSL peer
+/// certificate`, should anything select curl); a dead endpoint is `Could not establish
+/// connection`; a rejected signature carries `HTTP 403`,
 /// or `403 (Forbidden)` in the form an object request takes; and a missing bucket or key
 /// carries `HTTP 404` or `404 (Not Found)` (a missing key's text says `Unable to connect`,
 /// though the endpoint answered). The fallback keeps DuckDB's text, which names the URL but
@@ -221,7 +225,9 @@ pub fn classify_s3_error(error: &duckdb::Error) -> S3Cause {
 }
 
 fn classify_s3_text(text: &str) -> S3Cause {
-    if text.contains("Could not establish connection") {
+    if text.contains("SSL server verification failed") || text.contains("SSL peer certificate") {
+        S3Cause::Untrusted
+    } else if text.contains("Could not establish connection") {
         S3Cause::Unreachable
     } else if text.contains("HTTP 403") || text.contains("403 (Forbidden)") {
         S3Cause::Forbidden
@@ -235,6 +241,11 @@ fn classify_s3_text(text: &str) -> S3Cause {
 /// The error for a failed S3 request that is not a missing object, naming the cause.
 fn s3_request_error(index: &S3Locator, what: &str, error: &duckdb::Error) -> anyhow::Error {
     match classify_s3_error(error) {
+        S3Cause::Untrusted => anyhow::anyhow!(
+            "the S3 endpoint's TLS certificate is not trusted while {what} for {index}; it must \
+             chain to a CA in the file AWS_CA_BUNDLE names, else the platform's CA bundle \
+             ({error})"
+        ),
         S3Cause::Unreachable => anyhow::anyhow!(
             "cannot reach the S3 endpoint while {what} for {index}: no connection could be \
              established; check AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL or the profile's \
@@ -2271,6 +2282,13 @@ mod tests {
 
     #[test]
     fn test_classify_s3_text_names_each_measured_cause() {
+        assert_eq!(
+            classify_s3_text(
+                "IO Error: SSL server verification failed error for HTTP GET to \
+                 '/b/?encoding-type=url&list-type=2&prefix=p%2F'"
+            ),
+            S3Cause::Untrusted
+        );
         assert_eq!(
             classify_s3_text(
                 "IO Error: Could not establish connection error for HTTP GET to '/b/?list-type=2'"
