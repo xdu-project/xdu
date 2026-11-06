@@ -252,6 +252,18 @@ later engine fix land in every select-act tool at once.
 *Horizon: near-term · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (GOAL-gate ruling)*
 **Seed:** [`issues/xdu-rm-on-shared-engine.md`](issues/xdu-rm-on-shared-engine.md)
 
+## Bulk operations: the site lists `xdu-cp` and `xdu-mv` at their release
+
+The copy/move entry adds two binaries but leaves `www/` alone, because the site deploys on every push
+to `main` and would advertise tools no release yet ships. Until the release that carries them, the
+site's tools table and its "all four" count omit them, and its roadmap still lists them as `† v0.8`
+with a sentence that puts `rm` on the shared engine, which it is not until the entry above lands.
+At that release the site moves both tools into its table, counts six, and says what the engine
+serves.
+
+*Horizon: near-term, at the release that ships the tools · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P4)*
+**Seed:** [`issues/www-cp-mv-at-release.md`](issues/www-cp-mv-at-release.md)
+
 ## Permission-aware, access-scoped queries
 
 Once ownership and permissions are indexed, the index itself becomes a way to leak information: a
@@ -433,9 +445,11 @@ Four measured gaps in what the literal gate can structurally see, all pre-existi
 alone because the pass that found them was scoped to making the *existing* assertions
 layout-insensitive; the fourth turned out to be an unmet requirement of that pass and was fixed there. No
 literal names the binary it belongs to, so copying one rendered page over another is green. The page
-list is hard-coded while the render step globs `doc/*.scd`, so a fifth man page is entirely unasserted
-— measured shipping the exact historical `OUTDIR//.parquet` corruption past a green gate, which matters
-because the bulk-operations theme queues new binaries above. The four env-var assertions are thin
+list is hard-coded while the render step globs `doc/*.scd`, so a seventh man page is entirely
+unasserted — measured shipping the exact historical `OUTDIR//.parquet` corruption past a green gate.
+The bulk copy/move cycle took the list from four pages to six by hand: `xdu-cp.1` and `xdu-mv.1`
+rendered unasserted until a later phase added their `check` lines, the step this gap relies on
+someone remembering. The four env-var assertions are thin
 literals — a well-chosen path per page would catch more than a variable name does (their
 *duplicate-occurrence* blind spot was an unmet R7 and is already fixed). And
 `col -b` rewrites multibyte characters as literal `\xNN` text outside a UTF-8 locale, which bounds what

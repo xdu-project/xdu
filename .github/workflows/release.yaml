@@ -155,7 +155,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} --bins --example extension-probe
 
       # Fail the leg when the runtime floor floats: the maximum GLIBC_* version node
-      # across the four binaries must not exceed 2.28, GLIBCXX_* must not exceed RHEL8
+      # across the six binaries must not exceed 2.28, GLIBCXX_* must not exceed RHEL8
       # stock 3.4.25, and GCC_* must not exceed 8.0.0 (libgcc-8.5.0, measured on ubi8).
       # An empty GLIBC maximum fails rather than passing vacuously; absent C++ families
       # (pure-Rust xdu needs none) pass. A final allowlist catches any surprise new .so
@@ -165,7 +165,7 @@ jobs:
         run: |
           set -eu
           fail=0
-          for bin in xdu xdu-find xdu-view xdu-rm; do
+          for bin in xdu xdu-find xdu-view xdu-rm xdu-cp xdu-mv; do
             f="target/${{ matrix.target }}/release/$bin"
             max=$(objdump -T "$f" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu | tail -n 1)
             if [ -z "$max" ]; then
@@ -205,7 +205,7 @@ jobs:
           set -eu
           STAGING="staging"
           mkdir -p "${STAGING}/bin"
-          for bin in xdu xdu-find xdu-view xdu-rm; do
+          for bin in xdu xdu-find xdu-view xdu-rm xdu-cp xdu-mv; do
             cp "target/${{ matrix.target }}/release/${bin}" "${STAGING}/bin/"
           done
           tar czvf "xdu-${TAG}-${{ matrix.target }}.tar.gz" -C "${STAGING}" bin share lib
@@ -286,7 +286,7 @@ jobs:
           set -eu
           STAGING="staging"
           mkdir -p "${STAGING}/bin"
-          for bin in xdu xdu-find xdu-view xdu-rm; do
+          for bin in xdu xdu-find xdu-view xdu-rm xdu-cp xdu-mv; do
             cp "target/${{ matrix.target }}/release/${bin}" "${STAGING}/bin/"
           done
           tar czvf "xdu-${TAG}-${{ matrix.target }}.tar.gz" -C "${STAGING}" bin share lib

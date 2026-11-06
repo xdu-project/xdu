@@ -27,10 +27,7 @@ RUN mkdir -p /opt/xdu && \
     tar -xzf /xdu-dist.tar.gz -C /opt/xdu && \
     rm -f /xdu-dist.tar.gz
 
-RUN /opt/xdu/bin/xdu --version && \
-    /opt/xdu/bin/xdu-find --version && \
-    /opt/xdu/bin/xdu-view --version && \
-    /opt/xdu/bin/xdu-rm --version && \
+RUN for b in /opt/xdu/bin/xdu*; do "$b" --version || exit 1; done && \
     test -f /opt/xdu/lib/xdu/extensions/httpfs.duckdb_extension
 
 ENV MANPATH=/opt/xdu/share/man:$MANPATH \

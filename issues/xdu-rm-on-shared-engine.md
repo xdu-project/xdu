@@ -58,5 +58,8 @@ once.
 - Its R3 retires `xdu-rm`'s share of `issues/local-reader-bound-parameters.md`, which then covers
   `xdu-find` and `xdu-view`.
 - An `s3://` index for the engine stays with `issues/s3-index-rm.md`.
+- The migration also adds `*xdu-cp*(1)` and `*xdu-mv*(1)` to the SEE ALSO of `doc/xdu-rm.1.scd`.
+  The copy/move cycle cross-referenced every other page but left `xdu-rm.1` untouched, under its
+  non-goal of no change to `xdu-rm`; re-count that page's asserted literals in the same commit.
 - Related: `spec/bulk-copy-move-xdu-cp-mv/GOAL.md` (Non-goals, Clarifications); invariant §4.
 - Found by: `bulk-copy-move-xdu-cp-mv` GOAL gate, 2026-11-06.

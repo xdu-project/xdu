@@ -6,7 +6,7 @@ appetite: big
 status: in_progress
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
-current_phase: P4
+current_phase: P5
 last_updated: '2026-11-06'
 phases:
 - id: P1
@@ -140,14 +140,14 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P3-GATE-GREEN'
 - id: P4
   name: Man pages, README and packaging in lockstep
-  status: pending
+  status: done
   satisfies:
   - R10
   depends_on:
   - P3
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: downhill
   verify: 'set -eu; mkdir -p target; for f in doc/xdu-cp.1.scd doc/xdu-mv.1.scd; do
     grep -qF "The index is not updated." "$f"; grep -qF "Reading a source may update
     its atime" "$f"; grep -qF "XDU_INDEX" "$f"; grep -qF "XDU_JOBS" "$f"; if grep
@@ -446,35 +446,35 @@ the cut applies.
 **Goal:** both tools ship everywhere the four existing binaries ship, documented, with their man
 pages under the counted literal gate. With P1–P4 done the cycle is publishable even if P5 is cut.
 
-- [ ] `doc/xdu-cp.1.scd`, `doc/xdu-mv.1.scd`: final R10 pass; SEE ALSO; `XDU_INDEX` and
+- [x] `doc/xdu-cp.1.scd`, `doc/xdu-mv.1.scd`: final R10 pass; SEE ALSO; `XDU_INDEX` and
   `XDU_JOBS` each named twice (flag and ENVIRONMENT), as `xdu-rm.1` does. Cross-references in
   `doc/xdu.1.scd` (SEE ALSO, the marker-warning list, the lossy-path note), `doc/xdu-find.1.scd`
   and `doc/xdu-view.1.scd` SEE ALSO. **Not** `doc/xdu-rm.1.scd` (GOAL non-goal): add a line to
   `issues/xdu-rm-on-shared-engine.md` that its migration also adds `xdu-cp(1)`/`xdu-mv(1)` to
   `xdu-rm.1`'s SEE ALSO.
-- [ ] `.github/workflows/test.yaml`: `check share/man/man1/xdu-cp.1 '2x:XDU_INDEX' '2x:XDU_JOBS'
+- [x] `.github/workflows/test.yaml`: `check share/man/man1/xdu-cp.1 '2x:XDU_INDEX' '2x:XDU_JOBS'
   '1x:s3://BUCKET/PREFIX' '<N>x:<its worked destination path>'` and the same for `xdu-mv.1`
   with its own path (free of `_` and `*`; counts derived from an ubuntu-24.04 render and
   re-counted by hand); +2 man, +2 bash, +2 zsh entries in the produced list; "all six" in its OK
   line. The same-commit three-place obligation (§13): `AGENTS.md` Commands and `invariants.md`
   §13 name the new literal class.
-- [ ] `release.yaml` lines 168, 208, 289 and `packaging/extensions/check.sh` lines 49, 100, 108:
+- [x] `release.yaml` lines 168, 208, 289 and `packaging/extensions/check.sh` lines 49, 100, 108:
   `… xdu-rm xdu-cp xdu-mv; do`; optional `xdu-cp --dry-run` cold smoke beside `check.sh:122`.
   `Dockerfile` `--bin` and `cp` lists and its "four" comment **in the same commit as `check.sh`**
   (both run it).
-- [ ] `install.sh` `BINARIES`; `packaging/rpm/xdu.spec` (`--bin`, `install`, `%files`).
-- [ ] `hpccm/xdu.py`: replace the named `--version` smoke with a loop over `{bindir}/xdu*`;
+- [x] `install.sh` `BINARIES`; `packaging/rpm/xdu.spec` (`--bin`, `install`, `%files`).
+- [x] `hpccm/xdu.py`: replace the named `--version` smoke with a loop over `{bindir}/xdu*`;
   regenerate `xdu.def` and `xdu.docker` with `make -B` (hpccm is not on the planning host; if it
   is absent on the build host, say so, hand-edit the specs to the recipe's exact output, and
   rely on CI's `make check`); `hpccm/README.md` binary list.
-- [ ] `tests/cli_version_tests.rs` array.
-- [ ] `README.md`: one `xdu-cp -i …` and one `xdu-mv -i …` example after "Bulk Deletion".
-- [ ] `AGENTS.md` (binary counts, `#[command]` count, pages count, repo map, data flow, CLI
+- [x] `tests/cli_version_tests.rs` array.
+- [x] `README.md`: one `xdu-cp -i …` and one `xdu-mv -i …` example after "Bulk Deletion".
+- [x] `AGENTS.md` (binary counts, `#[command]` count, pages count, repo map, data flow, CLI
   surface, tarball layout, §5's engine statement) and `invariants.md` (§5 engine binding, §13
   counts and tarball, the high-blast list gains `src/select.rs`, `src/atomic_fs.rs`,
   `src/relocate.rs`, `src/bin/xdu-mv.rs`). `issues/manpage-gate-coverage-gaps.md` and its
   ROADMAP paragraph: six pages, two hand-added this cycle.
-- [ ] File `issues/www-cp-mv-at-release.md` (from `templates/ISSUE.md`) with a `ROADMAP.md` entry:
+- [x] File `issues/www-cp-mv-at-release.md` (from `templates/ISSUE.md`) with a `ROADMAP.md` entry:
   at the release that ships the tools, move them from the site's roadmap (`www/index.html`,
   † v0.8) to its tools table, and correct "one shared engine behind `rm`, `cp` and `mv`" (rm is
   not migrated). `www/` deploys on push to `main`, so it is not edited in this cycle.
@@ -482,6 +482,34 @@ pages under the counted literal gate. With P1–P4 done the cycle is publishable
   packaging list by exact count; generated completions; `cli_version_tests`; issue files;
   `doc/xdu-rm.1.scd` and `www/` untouched; the whole suite; clippy; fmt). CI's packaging job is
   the render, literal-count and `make check` proof.
+- **Build notes (2026-11-06).** Red first: the stored gate, run before any edit, stopped at
+  `grep -qF "xdu-cp -i" README.md`. After the work it ran green as stored; mutating the
+  `check.sh` engine loop (dropping `xdu-mv`) and the `cli_version_tests` array each turned it red,
+  and both files were restored by copy and `cmp`. `scdoc` is not installed on the build host, so
+  the counts in the new `check` lines were derived by an emulation of the CI step (scdoc's `*`,
+  boundary-`_` and backslash rules, then the whitespace strip) that reproduces all 54 existing
+  `check` specs on the edited pages with no mismatch; it gives `XDU_INDEX` 2, `XDU_JOBS` 2,
+  `s3://BUCKET/PREFIX` 1 and the worked path 1 on each new page. hpccm 26.5.0 regenerated
+  `xdu.def`/`xdu.docker`, and `make check` is green with the specs staged. The `check.sh` tool
+  smoke, with the new `xdu-cp --dry-run` lines, was run against `target/release` under a cold
+  HOME and matched the two `.log` files with nothing written under `--into`; the glob smoke loop
+  was checked to fail on a failing binary and on an empty `bin/`. Deviations, none touching a GOAL
+  R-ID: the worked-path literal is counted once per page (`/cold/alice/logs/app.log`,
+  `/archive/carol/runs/r1.h5`), and the pages' mirrored paths are left unasserted; `xdu-find.1`'s
+  "refuses S3 indices" sentence now names `xdu-cp`(1) and `xdu-mv`(1) too; `xdu-cp.1` gains
+  `xdu-mv`(1) in SEE ALSO and one over-long source line is rewrapped; the README's move example
+  stays on one filesystem (an attic under `/home`), so it holds whether or not P5 lands, and points
+  at `xdu-mv`(1) for other filesystems; `AGENTS.md`'s high-risk quick reference gains the engine
+  files beside `invariants.md`'s high-blast list; the `release.yaml` floor comment, `docker.yaml`
+  and the rpm spec's comment count six binaries. Not touched: `build.sh` (its output list already
+  omits `xdu-rm`, pre-existing) and `.agents/skills/xdu-release/SKILL.md:96`, whose "all four
+  `#[command(...)]` blocks" is now stale but is a skill's text (META F3, for `/xdu-harness`).
+- **CI must show (not provable on this host):** the man-page render and the new `check` lines for
+  `xdu-cp.1` and `xdu-mv.1` on ubuntu-24.04's scdoc, with the "all six" produced-files step; the
+  Linux `cli_version_tests`; `make check` in the packaging job; the Docker build (`docker.yaml`'s
+  path filter takes `Dockerfile` and `packaging/extensions/**`), which runs the edited `check.sh`
+  on the six-binary tree. The release legs (`release.yaml`'s floor loop and both assembly loops)
+  run only at a tag; `check.sh`'s presence loop is their backstop there.
 - **Touches:** `doc/*.scd` (not `xdu-rm.1.scd`), `README.md`, `.github/workflows/test.yaml`,
   `.github/workflows/release.yaml`, `packaging/extensions/check.sh`, `Dockerfile`, `install.sh`,
   `packaging/rpm/xdu.spec`, `hpccm/` (recipe, specs, README), `tests/cli_version_tests.rs`,

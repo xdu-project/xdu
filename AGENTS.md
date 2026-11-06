@@ -22,7 +22,7 @@ size/age/pattern questions instantly. The directory names are bare, not Hive `ke
 DuckDB derives no partition column from them and partition scoping comes from the glob
 (`lib::index_glob`) rather than from partition metadata.
 
-Five binaries (`Cargo.toml [[bin]]`), four user-facing plus one build helper:
+Seven binaries (`Cargo.toml [[bin]]`), six user-facing plus one build helper:
 
 | Binary | Role |
 |--------|------|
@@ -30,6 +30,8 @@ Five binaries (`Cargo.toml [[bin]]`), four user-facing plus one build helper:
 | **`xdu-find`** | Query CLI — DuckDB over the index; filters + `--count`/`--top`/formats. |
 | **`xdu-view`** | ncdu-style interactive TUI (ratatui/crossterm); read-only list + tree views. |
 | **`xdu-rm`** | **Destructive** bulk deletion of files matching an index query, with `--safe` re-stat. |
+| **`xdu-cp`** | Bulk copy of the files matching an index query into a tree under `--into`, never replacing a file; `--safe` re-checks every filter. |
+| **`xdu-mv`** | **Destructive at the source**: bulk move of the matching files into a tree under `--into` by a no-replace rename; `--safe` re-checks every filter. |
 | **`gen-completions`** | Dev helper — emits bash+zsh completions from the `src/cli.rs` clap structs. |
 
 The index schema is deliberately minimal: `path` (UTF-8), `size` (INT64 bytes), `uid`,
@@ -51,7 +53,7 @@ feature) so there is no external DuckDB dependency.
   is tracked in the **PR body** instead, which ends with an attribution trailer naming the
   actual harness, model, and variant.
 - **Version is single-sourced from `Cargo.toml`** — never hardcode a version string in `src/`; read it
-  from `CARGO_PKG_VERSION` (the completion marker does, `crawl.rs`). All four `#[command(...)]`
+  from `CARGO_PKG_VERSION` (the completion marker does, `crawl.rs`). All six `#[command(...)]`
   blocks in `src/cli.rs` set `version`, so clap derives `-V`/`--version` from `Cargo.toml` for every
   user-facing binary.
 - **A CLI change updates its `doc/*.scd` man page source in the same commit.** Shell completions
@@ -283,11 +285,16 @@ presence check stays green.
 All of them are counted for that reason, and so are the `AWS_*` names on the pages that list them
 (`AWS_CA_BUNDLE` twice on each of `xdu.1`, `xdu-find.1` and `xdu-view.1`: the trust paragraph of the
 S3 section, then its `ENVIRONMENT` entry) and `xdu.1`'s two `s3://BUCKET/PREFIX` (under `-o` and in
-`S3 OUTPUT`). **Whether a literal is duplicated is a fact about the page,
+`S3 OUTPUT`). `xdu-cp.1` and `xdu-mv.1` add one more class, a **worked path**: each page's
+`--root`/`--into` mapping example names a destination path (`/cold/alice/logs/app.log`,
+`/archive/carol/runs/r1.h5`), counted once, so a mis-escaped layout example fails, and the two
+pages use different paths, so each literal also says which page it is on. Keep such a path free of
+`_`, `*` and `-`, and do not repeat it elsewhere on its page without re-counting.
+**Whether a literal is duplicated is a fact about the page,
 not about the literal** — adding one cross-reference to a `.scd` can duplicate a previously-unique
 literal — so re-count when you edit a `.scd` that carries an asserted literal; nothing re-derives it
-for you. A new page is not covered at all: the `check` list names four pages while the render step
-globs `doc/*.scd`, so a fifth man page ships entirely unasserted. Both gaps are recorded in
+for you. A new page is not covered at all: the `check` list names six pages while the render step
+globs `doc/*.scd`, so a seventh man page ships entirely unasserted. Both gaps are recorded in
 [`issues/manpage-gate-coverage-gaps.md`](issues/manpage-gate-coverage-gaps.md).
 A local presence check on a duplicated literal therefore *cannot* predict CI's verdict no matter how
 correctly it normalizes; use the counting form above. Counting is what makes stripping whitespace
@@ -303,8 +310,17 @@ src/
                  # SortMode, QueryFilters (DuckDB WHERE/ORDER BY builders), format_{count,bytes,speed},
                  # the index globs and parquet_source, and the readers' completion-marker read
                  # (local, and read_completion_marker_s3) with its version gate and warning
-  cli.rs         # the SINGLE clap CLI definition (XduArgs/XduFindArgs/XduViewArgs/XduRmArgs) —
-                 # gen-completions + man pages describe exactly this
+  cli.rs         # the SINGLE clap CLI definition (XduArgs/XduFindArgs/XduViewArgs/XduRmArgs, and
+                 # SelectArgs flattened into XduCpArgs/XduMvArgs) — gen-completions + man pages
+                 # describe exactly this
+  select.rs      # the select-act engine's selection: S3 refusal, marker gates, the glob-metachar
+                 # and partition refusals, ONE bound statement (read_parquet(?), ORDER BY path), and
+                 # holds_live, the --safe re-check of every filter against live metadata
+  atomic_fs.rs   # the filesystem primitives: O_NOFOLLOW component walks, open-only-regular-files,
+                 # rename_noreplace (renameat2/renameatx_np, else a re-checked linkat), copy_atomic
+                 # (.xdu-*.part temp, flush, no-replace publish), move_same_fs, the Faults seam
+  relocate.rs    # --root/--into mapping, whole-set refusals, prompt, the ordered executor on a
+                 # local pool, outcomes and summary; run_cp/run_mv
   crawl.rs       # index-build hot path lifted out of the bin so it is unit-testable: work-queue
                  # construction (incl. the __root__ collision rejection), per-file record building,
                  # PartitionBuffer + IndexSink/LocalSink (atomic finalize), the local completion
@@ -324,8 +340,11 @@ src/
   bin/xdu-find.rs   # DuckDB query CLI
   bin/xdu-view.rs   # ratatui/crossterm TUI (read-only); its queries live in view_query.rs
   bin/xdu-rm.rs     # destructive bulk delete (safe mode, confirm, dry-run, parallel)
+  bin/xdu-cp.rs     # bulk copy: thin, calls relocate::run_cp
+  bin/xdu-mv.rs     # bulk move: thin, calls relocate::run_mv
   bin/gen-completions.rs   # emits share/ completions from cli.rs
-tests/           # crawl_tests.rs, rm_tests.rs, offline_tests.rs (integration); common/ = shared helpers
+tests/           # crawl_tests.rs, rm_tests.rs, cp_tests.rs, mv_tests.rs, offline_tests.rs
+                 # (integration); common/ = shared helpers
                  # s3_tests.rs + s3-wire.sh: the S3 wire tier and its CI gate (see Testing);
                  # common/s3.rs = the loopback S3 endpoint, counting proxy, hermetic child env
 examples/extension-probe.rs   # release-time probe, never installed: `manifest` prints engine version,
@@ -386,12 +405,13 @@ xdu ──walk (jwalk + shared rayon pool)──▶ PartitionBuffer ──.parti
                                     │                                                         │
                         on success  └──▶ <index>/.xdu-complete  (run-level attestation)        │
                                                      │                                         │
-xdu-find / xdu-view / xdu-rm ◀── refuse/warn by marker ┘  ◀── DuckDB read_parquet('<index>/<part-or-*>/*.parquet') ◀┘
+xdu-{find,view,rm,cp,mv}     ◀── refuse/warn by marker ┘  ◀── DuckDB read_parquet('<index>/<part-or-*>/*.parquet') ◀┘
 ```
 
 An `s3://` index has the same layout under its prefix. `s3::S3Sink` PUTs each chunk at its final
 key with no `.partial` stage, and `xdu-find` and `xdu-view` read the index in place through the
-pinned `httpfs`, with the glob a bound parameter (`lib::parquet_source`); `xdu-rm` refuses one.
+pinned `httpfs`, with the glob a bound parameter (`lib::parquet_source`); `xdu-rm`, `xdu-cp` and
+`xdu-mv` refuse one.
 
 - **Index layout:** `<outdir>/<partition>/NNNNNN.parquet`, where `partition` is a top-level
   subdirectory name. Loose files directly under the indexed root go to the reserved partition
@@ -438,6 +458,9 @@ pinned `httpfs`, with the glob a bound parameter (`lib::parquet_source`); `xdu-r
   **per-file** atomic, **not** per-partition atomic — see invariants.
 - **Query:** `xdu-find`/`xdu-view`/`xdu-rm` open an in-memory DuckDB, glob the index, and apply a
   `QueryFilters` WHERE clause. `xdu-view` is a read-only TUI; `xdu-rm` unlinks the matched files.
+  `xdu-cp` and `xdu-mv` select through `select::select` (one statement, the glob bound, `ORDER BY
+  path`) and act through `relocate`: each file goes to `<--into>/<path relative to --root>`, by
+  `atomic_fs::copy_atomic` or a no-replace rename, never replacing an existing name.
   For an `s3://` index, `xdu-find` and `xdu-view` open the connection with
   `engine::open_s3_connection` (the pinned `httpfs` and one bound `CREATE SECRET`), pass the marker
   gates above, and take their `FROM` from `lib::parquet_source`.
@@ -457,6 +480,12 @@ pinned `httpfs`, with the glob a bound parameter (`lib::parquet_source`); `xdu-r
 - `xdu-rm -i/--index DIR [-p/--pattern PATTERN] [--regex] [-u/--partition] [--min/max-size]
   [--older/newer-than] [-l/--limit N] [-n/--dry-run] [--safe] [-f/--force] [-v/--verbose] [-j/--jobs (env XDU_JOBS)]`
   — `xdu-rm` takes a local index only and refuses an `s3://` one, from `-i` or `XDU_INDEX`.
+- `xdu-cp` / `xdu-mv` `-i/--index DIR (env XDU_INDEX) --into DIR [--root DIR (dflt /)] [-p/--pattern
+  PATTERN] [--regex] [-u/--partition NAME] [--min/max-size] [--older/newer-than] [--owner USER]
+  [--group GROUP] [--mode SPEC] [--mtime-older/newer-than] [-l/--limit N] [-n/--dry-run] [--safe]
+  [-f/--force] [-v/--verbose] [-j/--jobs (env XDU_JOBS)]` — every `xdu-find` filter plus `xdu-rm`'s
+  action flags (one `SelectArgs`); local index only, `s3://` refused. `-f` is `--force` here, not
+  `xdu-find`'s `--format`.
 - An `s3://` locator (lowercase scheme only) takes its credentials, region and endpoint from the
   `AWS_*` variables and the shared credentials and config files, through `s3::S3Settings::resolve`,
   the one resolver both directions use. The readers need the pinned `httpfs` from
@@ -502,13 +531,19 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
 4. **`xdu-rm` destructive safety.** Default requires interactive `y/N` (anything but `y`/`yes`
    aborts); `--dry-run` deletes nothing; `--force` skips the prompt; `--safe` re-stats each file
    immediately before unlink. **Any deletion combined with `--limit` MUST carry a deterministic
-   `ORDER BY`** so `--dry-run` and the real run select identical rows.
+   `ORDER BY`** so `--dry-run` and the real run select identical rows. `xdu-cp` and `xdu-mv` carry
+   the same gates through the engine, with `ORDER BY path` always and a `--safe` that re-checks
+   every filter; `xdu-mv` removes the source name, so it is destructive at the source.
 5. **DuckDB injection surface.** Every user value reaching `read_parquet(...)`/`WHERE` is an
    injection surface. Route it through one validated escaping/quoting helper (or bound parameters);
    never raw `format!` a partition name or index path into SQL. For an `s3://` index the readers
    go through `lib::parquet_source`, which binds the whole glob (bucket, prefix and any `-u`
    partition) as the statement's one parameter, and the marker read binds its URLs too; a local
-   index keeps the raw-`format!` glob, a known exception filed as a follow-up. Credentials reach
+   index keeps the raw-`format!` glob, a known exception filed as a follow-up. The select-act engine
+   (`select::selection_sql`, used by `xdu-cp` and `xdu-mv`) has no such exception: its one
+   statement binds the local glob (`read_parquet(?)`) and the regex, and `select::checked_glob`
+   refuses, before any SQL, an index path holding a glob metacharacter and a partition name that is
+   empty, `.` or `..`, or holds `/` or a metacharacter. Credentials reach
    DuckDB only as the bound values of `engine::open_s3_connection`'s one prepared `CREATE SECRET`,
    never as SQL text. The extension path is one too:
    `engine::load_extension_from` puts the extension file's absolute path, from `XDU_EXTENSION_DIR`
@@ -557,6 +592,12 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
 - **`src/bin/xdu-rm.rs`** — destructive. `--limit` needs a deterministic `ORDER BY`; `--safe` must
   re-verify the criteria it claims to (atime/size today; min-size/newer-than/pattern are gaps); the
   confirm/dry-run/force gates are load-bearing.
+- **`src/select.rs`, `src/atomic_fs.rs`, `src/relocate.rs`, `src/bin/xdu-mv.rs`** — the select-act
+  engine behind `xdu-cp` and `xdu-mv`. The selection is one bound statement with `ORDER BY path`;
+  `--safe` must re-check every filter (`select::holds_live`); a final name is only ever published by
+  `atomic_fs::rename_noreplace`, so a replacing rename or copy (`fs::rename`, `fs::copy`) or a
+  truncating open (`File::create`, `O_TRUNC`) there breaks the never-replace rule; and `xdu-mv`
+  removes source names, so it is destructive at the source.
 - **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
   `index_glob` and `index_glob_s3` (which share the one tail that writes the index layout),
   `parquet_source` (which puts that glob into `xdu-find`'s and `xdu-view`'s SQL, as text locally
@@ -655,7 +696,7 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   from `src/cli.rs`. The `.scd` sources carry **no version string**, so a pure version bump does not
   touch them — they change only when the CLI changes.
 - Release profile (`Cargo.toml`): `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
-- Release tarball layout is a contract: `bin/{xdu,xdu-find,xdu-view,xdu-rm}` +
+- Release tarball layout is a contract: `bin/{xdu,xdu-find,xdu-view,xdu-rm,xdu-cp,xdu-mv}` +
   `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}` +
   `lib/xdu/extensions/{name}.duckdb_extension` (the pinned DuckDB extensions, one per entry, built
   for that tarball's engine version and platform; flat, no version or platform directories).

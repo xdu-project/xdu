@@ -148,13 +148,13 @@ no longer matches, and counted.
 Size needs a measure. The indexed size is the disk usage of the file (its
 blocks times 512) by default, its length when the index was built with
 *--apparent-size*, or its length rounded up to a block with *--block-size*,
-and the index does not record which. So a size filter must hold for both live measures, the length and the disk
-usage, or the file is skipped. That fails closed: a file selected by
-*--min-size 2K* that has shrunk to 100 bytes is skipped whatever its block
-count. It also skips some unchanged files: a 100-byte file in a 4 KiB block
-holds *--max-size 1K* by its length but not by its disk usage, so give
-*--max-size* a bound no smaller than the filesystem's block size when you
-combine it with *--safe*.
+and the index does not record which. So a size filter must hold for both
+live measures, the length and the disk usage, or the file is skipped. That
+fails closed: a file selected by *--min-size 2K* that has shrunk to 100 bytes
+is skipped whatever its block count. It also skips some unchanged files: a
+100-byte file in a 4 KiB block holds *--max-size 1K* by its length but not by
+its disk usage, so give *--max-size* a bound no smaller than the filesystem's
+block size when you combine it with *--safe*.
 
 Without *--safe*, the regular-file rule still holds: a symlink, directory,
 FIFO, socket or device at a selected path is never copied. Either way, a
@@ -278,4 +278,4 @@ Copy large files, mirroring their absolute paths, listing each one:
 
 # SEE ALSO
 
-*xdu*(1), *xdu-find*(1), *xdu-rm*(1), *xdu-view*(1)
+*xdu*(1), *xdu-find*(1), *xdu-mv*(1), *xdu-rm*(1), *xdu-view*(1)

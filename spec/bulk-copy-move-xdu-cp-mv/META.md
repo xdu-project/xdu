@@ -41,3 +41,15 @@
 - **Recommended fix:** In `xdu-plan`, anchor ban patterns on a boundary (`(^|[^_[:alnum:]])fs::copy\(`)
   and dry-run each ban against the PLAN's named identifiers before storing the gate.
 - **Confidence:** high · **Effort:** small
+
+## F3 — `xdu-release` states the `#[command(...)]` count as a literal
+`origin=xdu-build:P4 severity=low category=instruction status=open target=.agents/skills/xdu-release/SKILL.md`
+- **What happened:** P4's sweep for the binary count found `.agents/skills/xdu-release/SKILL.md:96`
+  saying "all four `#[command(...)]` blocks in `src/cli.rs` set `version`". There are six now. The
+  sweep updated `AGENTS.md` and `invariants.md` §13, but a skill's own text is not a product sweep
+  site, so the line was left stale.
+- **Skill cause:** The skill restates a count that `AGENTS.md` and `invariants.md` §13 already own,
+  so every new binary must also edit a harness file, which a product branch must not do.
+- **Recommended fix:** Drop the number ("every `#[command(...)]` block in `src/cli.rs` sets
+  `version`") or point at `AGENTS.md` instead of restating it.
+- **Confidence:** high · **Effort:** small

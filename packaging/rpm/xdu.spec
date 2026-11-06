@@ -19,21 +19,25 @@ Extreme-scale parallel "du" command with search and TUI viewer.
 
 %build
 cargo build --release --locked \
-    --bin xdu --bin xdu-find --bin xdu-view --bin xdu-rm
+    --bin xdu --bin xdu-find --bin xdu-view --bin xdu-rm --bin xdu-cp --bin xdu-mv
 
 %install
 install -D -m 0755 target/release/xdu %{buildroot}%{_bindir}/xdu
 install -D -m 0755 target/release/xdu-find %{buildroot}%{_bindir}/xdu-find
 install -D -m 0755 target/release/xdu-view %{buildroot}%{_bindir}/xdu-view
 install -D -m 0755 target/release/xdu-rm %{buildroot}%{_bindir}/xdu-rm
+install -D -m 0755 target/release/xdu-cp %{buildroot}%{_bindir}/xdu-cp
+install -D -m 0755 target/release/xdu-mv %{buildroot}%{_bindir}/xdu-mv
 
 # Man pages and shell completions are generated in CI from doc/*.scd and
 # src/cli.rs; they are not part of the tag archive yet, so this package ships
-# the four binaries only until the release tarball becomes the source.
+# the six binaries only until the release tarball becomes the source.
 
 %files
 %{_bindir}/%{name}
+%{_bindir}/%{name}-cp
 %{_bindir}/%{name}-find
+%{_bindir}/%{name}-mv
 %{_bindir}/%{name}-rm
 %{_bindir}/%{name}-view
 

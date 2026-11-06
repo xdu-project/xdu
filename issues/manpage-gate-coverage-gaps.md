@@ -19,17 +19,23 @@ originally filed here as (c), turned out to be an unmet `R7` rather than a cover
 in that pass — it is kept below, struck through, because the rationale recorded for deferring it was
 disproven and a future shaping session must not inherit it.
 
-**(a) No page identity.** No literal names the binary it belongs to, so the gate cannot tell the four
-pages apart. Copying `xdu-find.1` over `xdu-view.1` and running the gate is **green** — both pages
-assert only `XDU_INDEX`. A build that shipped the same page four times would pass.
+**(a) No page identity.** No literal on the four original pages names the binary it belongs to, so
+the gate cannot tell them apart. Copying `xdu-find.1` over `xdu-view.1` and running the gate is
+**green** — both pages assert only `XDU_INDEX`. A build that shipped the same page four times would
+pass. `xdu-cp.1` and `xdu-mv.1`, added later, each count a worked destination path the other page
+does not carry (`/cold/alice/logs/app.log`, `/archive/carol/runs/r1.h5`), so those two cannot be
+swapped silently; the original four still can.
 
-**(b) The page list is hard-coded.** The gate names exactly four `check` targets, while the render
-step loops over `doc/*.scd`. A fifth page is therefore *entirely* unasserted. Measured: a new
+**(b) The page list is hard-coded.** The gate names exactly six `check` targets, while the render
+step loops over `doc/*.scd`. A seventh page is therefore *entirely* unasserted. Measured: a new
 `doc/xdu-new.1.scd` containing the un-escaped `_OUTDIR_/*/*.parquet` renders at `scdoc` exit 0,
 publishes the exact historical corruption `OUTDIR//.parquet`, and the gate is **green**. The
 source-side roff-control tripwire does glob `doc/*.scd`, but it only catches lines beginning with `.`
 or `'` — a different class. A new binary's man page joins the build with no literal coverage and
-nothing says so.
+nothing says so. The bulk copy/move cycle exercised exactly this: `doc/xdu-cp.1.scd` and
+`doc/xdu-mv.1.scd` were rendered by CI from the commits that added them, unasserted, until their
+`check` lines and produced-file entries were added by hand in a later phase of the same branch. The
+list went from four pages to six because someone remembered, which is the gap.
 
 **(c) ~~Four of the ten assertions are inert.~~ RESOLVED — and the rationale below was wrong.**
 The set is 6 literals on `xdu.1`, 1 on `xdu-find.1`, 1 on `xdu-view.1`, 2 on `xdu-rm.1`. The four
@@ -90,8 +96,8 @@ caller's locale.
 
 - **R1** — WHEN a `doc/*.scd` exists that the literal gate does not assert, the packaging job SHALL
   fail and name the unasserted page (closes (b) by construction rather than by remembering).
-- **R2** — Each of the four pages SHALL assert at least one literal unique to that page, so swapping
-  two rendered pages fails (closes (a)).
+- **R2** — Each page SHALL assert at least one literal unique to that page, so swapping two rendered
+  pages fails (closes (a); `xdu-cp.1` and `xdu-mv.1` already do).
 - **R3** — `xdu-rm.1` SHALL assert at least one literal with a real silent-corruption mode — a path,
   glob or escaped-`*` construct — rather than only env-var names (the residue of (c); the
   duplicate-occurrence half was an unmet R7 and is already fixed).
@@ -108,7 +114,7 @@ caller's locale.
   per page beats four env-var names — the counts now added stop single-occurrence corruption, but they
   do not make a thin literal thick.
 - Reproductions for (a) and (b): render `doc/*.scd`, then either `cp share/man/man1/xdu-find.1
-  share/man/man1/xdu-view.1`, or add a fifth `.scd` carrying `_OUTDIR_/*/*.parquet`; run the extracted
+  share/man/man1/xdu-view.1`, or add a seventh `.scd` carrying `_OUTDIR_/*/*.parquet`; run the extracted
   gate body in either case and observe `OK:`.
 - Related: [`manpage-groff-hyphenates-marker-path.md`](manpage-groff-hyphenates-marker-path.md) (the
   other deferral from the same pass — and the one (d) interferes with measuring);

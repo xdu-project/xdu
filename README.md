@@ -377,6 +377,30 @@ xdu-rm -i /var/lib/xdu/home --older-than 60 --min-size 1G --dry-run | tail -1
 # 847,231 file(s) would be deleted.
 ```
 
+### Bulk Copy and Move with xdu-cp and xdu-mv
+
+`xdu-cp` and `xdu-mv` select files with the same filters as `xdu-find` and copy or move exactly
+that set into a tree under `--into`. Each file lands at its path relative to `--root` (default `/`,
+which mirrors the absolute path), so `/home/alice/runs/r1.h5` with `--root /home --into /stage`
+lands at `/stage/alice/runs/r1.h5`. They keep `xdu-rm`'s gates: a `y/N` prompt (`--force` skips
+it), `--dry-run` listing each source and destination without writing anything, a deterministic
+`--limit`, and `--safe`, which re-checks every given filter against each file's live metadata
+just before acting on it.
+
+Neither tool replaces an existing file: a taken destination is skipped, counted, and makes the run
+exit non-zero. A copy appears at its final name only once it is complete, and carries the source's
+permission bits and times, and its owner and group where permitted. Only regular files are acted
+on, and no symlink is followed. The index is not updated; index the trees again to see the result.
+A move within one filesystem is a rename; `xdu-mv(1)` describes moves to another filesystem.
+
+```bash
+# Preview copying alice's year-old logs into a staging tree
+xdu-cp -i /var/lib/xdu/home -u alice -p '*.log' --older-than 365 --into /stage --root /home --dry-run
+
+# Move a departed user's files into an attic on the same filesystem, re-checking each first
+xdu-mv -i /var/lib/xdu/home -u bob --into /home/.attic --root /home --safe --force
+```
+
 ### Indexes in S3
 
 `xdu` builds an index straight into an S3 bucket, on AWS or on an S3-compatible store: give `-o`
