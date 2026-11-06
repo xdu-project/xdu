@@ -199,6 +199,23 @@ primitive that already exist, and `xdu-rm` can move onto the same engine in a la
   plan still finds the cycle oversized, THEN the first cut is R5's cross-filesystem path: `xdu-mv`
   refuses a cross-filesystem move with a clear error, and the path is seeded, before anything else
   is cut (*Notes*). Ruled by the foreman at the GOAL gate (resolved 2026-11-06).
+- **Q:** Which size does `--safe` re-check (R7)? — **A:** The measure the index recorded. The
+  crawler stores either disk usage (blocks × 512) or apparent length, chosen at crawl time. If the
+  index states its size mode, `--safe` checks that live measure. If it does not, a size filter
+  must hold under **both** live measures, or the file is skipped and counted. That fails closed.
+  Ruled by the foreman at the plan gate (resolved 2026-11-06).
+- **Q:** Phase order: docs and packaging before mv across filesystems? — **A:** Yes. P1–P4 (engine
+  and cp, metadata and `--safe`, mv on one filesystem, docs and packaging) form the publishable
+  core, and P5 (mv across filesystems) is last, where the recorded cut applies. This supersedes the
+  Notes' "docs last". Ruled by the foreman at the plan gate (resolved 2026-11-06).
+- **Q:** When does the cut apply? — **A:** At a checkpoint at the end of 2026-11-10. If P5's gate
+  and CI's cross-filesystem step are not green on both OSes by then, P5 is cut: mv refuses a
+  cross-filesystem move per file with a clear error, P3's per-file refusal stays, and the copy
+  path is seeded. The GOAL's R5 is then amended to match. Ruled by the foreman at the plan gate
+  (resolved 2026-11-06).
+- **Q:** May cp/mv refuse an index path or partition containing glob characters? — **A:** Yes,
+  fail closed. A bound glob still globs, and the plan's probe showed `idx[ab]` silently read a
+  sibling index. Ruled by the foreman at the plan gate (resolved 2026-11-06).
 
 ## Notes
 
