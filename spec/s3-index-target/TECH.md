@@ -3,7 +3,7 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_review
+status: blocked
 branch: feature/s3-index-target
 base: main
 current_phase: done
@@ -210,10 +210,12 @@ phases:
     cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
     -- --check; echo P6-GATE-GREEN'
 review:
-  last_reviewed_commit: fdc32709a5dbc8c2d2cf4b9c1eeba7bc9768347a
+  last_reviewed_commit: 9f0019d91d0a623c4950cf10d31ff024daf52391
   verdict: changes-requested
-  blocked_reason: ''
-  cycle: 3
+  blocked_reason: 'review cycle 4 (final approved): readers accept a CN-only host
+    match (CRITICAL, §5); intermediate-only bundle splits writer and readers; human
+    gate'
+  cycle: 4
 ---
 # TECH.md — Build an index into S3 and query it in place
 

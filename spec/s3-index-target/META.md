@@ -13,6 +13,13 @@
 
 - **slug:** s3-index-target
 
+## What worked well
+
+- `xdu-review` Step 2, the `debate` variant: in review cycle 4 the "block" reviewer found a
+  residual in the class the previous cycle fixed (the readers' CN fallback), which the "ship"
+  reviewer's own TLS drives did not reach; negative controls built from a `git archive` export
+  let the orchestrator confirm both findings through the project's own wire harness.
+
 ## Friction findings
 
 Zero or more findings, appended below — each a markdown **section** so appending is a low-corruption
@@ -178,7 +185,7 @@ is skipped by the parser):
 - **Recommended fix:** in Step 2, prefer a brief file assembled verbatim by `cat` from the
   committed files at the reviewed head, outside `spec/`, and have `REVIEW.md` record that it was
   used. Blindness is unchanged: the file holds only the three allowed texts.
-- **Confidence:** med · **Effort:** small · seen again (review cycle 3)
+- **Confidence:** med · **Effort:** small · seen again (review cycles 3 and 4)
 
 ## F10 — A command a remediation writes into the manual is never run in the form it was written
 `origin=xdu-build:remediation-cycle-2 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-build/SKILL.md`
@@ -233,4 +240,22 @@ is skipped by the parser):
   ref's tree; re-run the stored `verify:`; commit `[{kind}] Close {slug} {id} on CI evidence`.
   Say that a red-first which needs the pre-phase tree on another platform must run in run A
   (or a throwaway worktree), since run B sees only the fixed tree.
+- **Confidence:** high · **Effort:** small
+
+## F13 — temp_index.sh drives `target/release` whatever `CARGO_TARGET_DIR` says
+`origin=xdu-review:step-2 severity=medium category=tooling status=open target=.agents/factory/bin/temp_index.sh`
+- **What happened:** the `debate` variant runs two reviewers and the orchestrator at once, so in
+  review cycle 4 each built into its own `CARGO_TARGET_DIR`. `temp_index.sh` builds with
+  `cargo build --release --bins`, which follows that variable, but then runs
+  `$root/target/release/xdu` and puts `$root/target/release` on `PATH`
+  (`bindir="$root/target/release"`). That build dated from 11:57, before `fdc3270` (14:27) and
+  the code head `5711e9d` (20:39), so every drive through the script would have tested a pre-TLS
+  binary while looking current. The orchestrator told the reviewers to drive their own binaries
+  directly instead.
+- **Skill cause:** the skill and the rubric name `temp_index.sh` as the way to drive the CLI, and
+  the script's own comment says it exists so that a drive never measures a stale build. It
+  defeats that whenever the target directory moves, which concurrent reviewers need.
+- **Recommended fix:** set `bindir="${CARGO_TARGET_DIR:-$root/target}/release"`, or take the
+  executables' paths from `cargo build --message-format=json`. In Step 2, say that concurrent
+  reviewers each take their own `CARGO_TARGET_DIR`.
 - **Confidence:** high · **Effort:** small
