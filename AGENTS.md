@@ -31,7 +31,7 @@ Seven binaries (`Cargo.toml [[bin]]`), six user-facing plus one build helper:
 | **`xdu-view`** | ncdu-style interactive TUI (ratatui/crossterm); read-only list + tree views. |
 | **`xdu-rm`** | **Destructive** bulk deletion of files matching an index query, with `--safe` re-stat. |
 | **`xdu-cp`** | Bulk copy of the files matching an index query into a tree under `--into`, never replacing a file; `--safe` re-checks every filter. |
-| **`xdu-mv`** | **Destructive at the source**: bulk move of the matching files into a tree under `--into` by a no-replace rename; `--safe` re-checks every filter. |
+| **`xdu-mv`** | **Destructive at the source**: bulk move of the matching files into a tree under `--into` by a no-replace rename, or, to another filesystem, by a flushed copy and then the source's removal; `--safe` re-checks every filter. |
 | **`gen-completions`** | Dev helper — emits bash+zsh completions from the `src/cli.rs` clap structs. |
 
 The index schema is deliberately minimal: `path` (UTF-8), `size` (INT64 bytes), `uid`,
@@ -216,6 +216,7 @@ cargo build --release                                   # all bins (bundled Duck
 cargo test                                              # lib unit tests + tests/ integration
 cargo test --test rm_tests                              # one integration file
 XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 53   # S3 wire tier (see Testing)
+XDU_TEST_XFS_DIR=/dev/shm/xdu-xfs sh tests/xfs-wire.sh "" 3   # cross-filesystem tier (see Testing)
 cargo clippy --all-targets --all-features -- -D warnings   # lint gate (must be clean)
 cargo fmt --all -- --check                              # format gate
 
@@ -318,7 +319,8 @@ src/
                  # holds_live, the --safe re-check of every filter against live metadata
   atomic_fs.rs   # the filesystem primitives: O_NOFOLLOW component walks, open-only-regular-files,
                  # rename_noreplace (renameat2/renameatx_np, else a re-checked linkat), copy_atomic
-                 # (.xdu-*.part temp, flush, no-replace publish), move_same_fs, the Faults seam
+                 # (.xdu-*.part temp, flush, no-replace publish), move_same_fs, move_across (the
+                 # cross-filesystem copy, re-check, then unlink), the Faults/StepHook seam
   relocate.rs    # --root/--into mapping, whole-set refusals, prompt, the ordered executor on a
                  # local pool, outcomes and summary; run_cp/run_mv
   crawl.rs       # index-build hot path lifted out of the bin so it is unit-testable: work-queue
@@ -346,6 +348,7 @@ src/
 tests/           # crawl_tests.rs, rm_tests.rs, cp_tests.rs, mv_tests.rs, offline_tests.rs
                  # (integration); common/ = shared helpers
                  # s3_tests.rs + s3-wire.sh: the S3 wire tier and its CI gate (see Testing);
+                 # mv_xfs_tests.rs + xfs-wire.sh: the cross-filesystem tier and its CI gate;
                  # common/s3.rs = the loopback S3 endpoint, counting proxy, hermetic child env
 examples/extension-probe.rs   # release-time probe, never installed: `manifest` prints engine version,
                  # platform, source_id + pinned set; `load` loads that set from the extension
@@ -597,7 +600,11 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   `--safe` must re-check every filter (`select::holds_live`); a final name is only ever published by
   `atomic_fs::rename_noreplace`, so a replacing rename or copy (`fs::rename`, `fs::copy`) or a
   truncating open (`File::create`, `O_TRUNC`) there breaks the never-replace rule; and `xdu-mv`
-  removes source names, so it is destructive at the source.
+  removes source names, so it is destructive at the source. Across filesystems
+  (`atomic_fs::move_across`, taken only when the rename answers `EXDEV`) the source is removed
+  only after the copy and its directory are flushed and the source name re-checked against the
+  opened file (dev, ino, type, size, mtime, ctime); any earlier exit withdraws the copy, so a file
+  is never at neither name. Never write the source's times there: that moves its ctime.
 - **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
   `index_glob` and `index_glob_s3` (which share the one tail that writes the index layout),
   `parquet_source` (which puts that glob into `xdu-find`'s and `xdu-view`'s SQL, as text locally
@@ -672,6 +679,23 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   binaries run hermetic (`tests/common/s3.rs`'s `Hermetic`: no `AWS_*`, `DUCKDB_*`, `*_PROXY`,
   `SSL_CERT_FILE` or `SSL_CERT_DIR`, empty `HOME`, `TMPDIR` and working directory, checked empty
   afterwards).
+- **The cross-filesystem tier is a standing CI gate that plain `cargo test` skips.**
+  `xdu-mv` moves a file to another filesystem by copying it and removing the source, and only a
+  real second filesystem makes a rename answer `EXDEV`. `tests/mv_xfs_tests.rs` drives the binary
+  there; every test is `#[ignore]`d and needs `XDU_TEST_XFS_DIR`, a writable directory on a
+  filesystem other than the temp dirs'. The fixture panics with "XDU_TEST_XFS_DIR is not set"
+  when it is unset and with "XDU_TEST_XFS_DIR is not on another filesystem" unless a probe rename
+  from a temp dir into it fails with `EXDEV`, so the tier cannot pass on one filesystem. Run it
+  with `XDU_TEST_XFS_DIR=DIR sh tests/xfs-wire.sh "" N`, which passes only when every listed test
+  passed and that count is at least `N`. On Linux, `/dev/shm` is a tmpfs any user can write
+  (`mkdir -p /dev/shm/xdu-xfs`). On macOS, attach an APFS disk image:
+  `hdiutil create -size 256m -fs APFS -volname xdu-xfs IMG.dmg`, then
+  `hdiutil attach -nobrowse -mountpoint DIR IMG.dmg` (an agent sandbox refuses both). CI's
+  `Tests` workflow makes that directory on both test legs, checks its device differs from the
+  workspace's, and runs the script as the "XFS tests" step, with `N` the file's listed count:
+  **raise it in the commit that adds a test**. The fault-seam unit tests of
+  `atomic_fs::move_across` (fail and abandon at every step, the flush order, a changed or swapped
+  source, a refused unlink) run in every `cargo test` on every host.
 - **Verify by driving the CLI, not just tests.** Use `.agents/factory/bin/temp_index.sh` so a drive
   hits a throwaway index, never a real one. Exit 0 is necessary but not sufficient — assert a concrete
   post-condition (row count, a stdout token, files actually gone/kept).

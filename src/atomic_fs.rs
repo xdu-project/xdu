@@ -400,6 +400,12 @@ pub enum Step {
     Linked,
     Published,
     DirSynced,
+    /// A cross-filesystem move found the source name still holding the file it opened,
+    /// unchanged, after the copy and its directory were flushed, and has not yet removed it.
+    SourceRechecked,
+    /// A cross-filesystem move removed the source name; only the best-effort flush of the
+    /// source directory is left.
+    SourceUnlinked,
 }
 
 /// Every step `copy_atomic` passes on the native route, in order.
@@ -446,8 +452,12 @@ pub(crate) struct Faults {
     /// Refuse the group-only `fchown` retry with `EPERM` too.
     pub refuse_group: bool,
     /// Answer every no-replace rename with `EXDEV`, as a destination on another filesystem
-    /// does.
+    /// does. A cross-filesystem move's own publish, inside one destination directory, is
+    /// never forced.
     pub force_cross_device: bool,
+    /// Refuse a cross-filesystem move's removal of its source with `EPERM`, as a sticky
+    /// directory does for a file the caller does not own.
+    pub refuse_source_unlink: bool,
 }
 
 /// A placement stopped either by an error or, under a test hook, by a simulated crash.
@@ -840,8 +850,20 @@ pub(crate) fn copy_atomic_with(
     faults: Faults,
     hook: &mut dyn StepHook,
 ) -> Result<Placed, Stop<io::Error>> {
+    copy_placed(src, dest, name, faults, hook).map(|(placed, _)| placed)
+}
+
+/// `copy_atomic`, also returning the identity of the file it published, so a caller that has
+/// to withdraw it later removes that file and nothing put in its place.
+fn copy_placed(
+    src: &SourceFile,
+    dest: &DirHandle,
+    name: &OsStr,
+    faults: Faults,
+    hook: &mut dyn StepHook,
+) -> Result<(Placed, Option<Stat>), Stop<io::Error>> {
     match fstatat_nofollow(dest, name) {
-        Ok(_) => return Ok(Placed::Existing),
+        Ok(_) => return Ok((Placed::Existing, None)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(Stop::Err(e)),
     }
@@ -895,7 +917,7 @@ pub(crate) fn copy_atomic_with(
 
     match result {
         Err(Stop::Abandoned) => Err(Stop::Abandoned),
-        Ok(done @ Placed::Done { .. }) => Ok(done),
+        Ok(done @ Placed::Done { .. }) => Ok((done, published)),
         other => {
             if let (Err(_), Some(written)) = (&other, &published) {
                 let _ = unlink_if_same(dest, name, written);
@@ -906,7 +928,7 @@ pub(crate) fn copy_atomic_with(
                 Err(e) if other.is_ok() => return Err(Stop::Err(e)),
                 Err(_) => {}
             }
-            other
+            other.map(|placed| (placed, None))
         }
     }
 }
@@ -995,6 +1017,176 @@ pub(crate) fn move_same_fs_with<'d>(
         Err(Stop::Err(other)) => Err(other.into_io()),
         Err(Stop::Abandoned) => Err(io::Error::other("move abandoned")),
     }
+}
+
+/// What a cross-filesystem move did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Crossed {
+    /// Copied, flushed, published, and the source name removed. `owner_kept` is false when
+    /// the owner or the group could not be carried.
+    Done { owner_kept: bool },
+    /// Nothing at the source name.
+    Missing,
+    /// A symlink, directory, FIFO, socket or device holds the source name; it was not moved.
+    NotRegular,
+    /// The source name was replaced between its type check and its open; nothing was copied.
+    Swapped,
+    /// The caller's check turned the file down, for the reason given; nothing was copied.
+    Rejected(&'static str),
+    /// Something already holds the destination name; it was not touched and no byte was read.
+    Existing,
+    /// The source was written during the copy, or changed or replaced before its removal. Any
+    /// copy made was withdrawn and the source left in place.
+    SourceChanged,
+}
+
+/// Move the regular file `sn` in `sp` to `dn` in `dest`, a directory on another filesystem,
+/// by a copy and then the removal of the source.
+///
+/// The copy is `copy_atomic`'s: a temp file flushed, a source that moved during the read
+/// skipped, a no-replace publish, then a flush of the destination directory. Only after both
+/// flushes have returned is the source name checked again, and it must still hold the file
+/// that was opened, with the same type, size, mtime and ctime; the ctime catches a rewrite
+/// whose mtime was put back. Only then is the source name removed, relative to its held
+/// parent. So a crash between any two steps leaves the file whole at its source, its
+/// destination, or both, and never partial at a final name.
+///
+/// Anything that stops the move before the source is removed withdraws the copy (only while
+/// the destination name still holds the file this call published) and leaves the source:
+/// a failed flush, a changed or replaced source, and a refused removal alike, since a copy
+/// left beside its source would read as an existing destination on a re-run. The one
+/// exception is a source that vanished before its removal: the copy is then the file's only
+/// whole instance, so it is kept, and the move still fails. The source directory must be
+/// writable and searchable before anything is copied. The source's times are never written:
+/// that would move its ctime.
+pub fn move_across(
+    sp: &DirHandle,
+    sn: &OsStr,
+    dest: &DirHandle,
+    dn: &OsStr,
+    admit: impl FnOnce(&Stat) -> Result<(), &'static str>,
+) -> io::Result<Crossed> {
+    match move_across_with(sp, sn, dest, dn, admit, Faults::default(), &mut NoHook) {
+        Ok(crossed) => Ok(crossed),
+        Err(Stop::Err(e)) => Err(e),
+        Err(Stop::Abandoned) => Err(io::Error::other("move abandoned")),
+    }
+}
+
+pub(crate) fn move_across_with(
+    sp: &DirHandle,
+    sn: &OsStr,
+    dest: &DirHandle,
+    dn: &OsStr,
+    admit: impl FnOnce(&Stat) -> Result<(), &'static str>,
+    faults: Faults,
+    hook: &mut dyn StepHook,
+) -> Result<Crossed, Stop<io::Error>> {
+    let src = match open_source(sp, sn)? {
+        Source::Regular(file) => file,
+        Source::Missing => return Ok(Crossed::Missing),
+        Source::NotRegular => return Ok(Crossed::NotRegular),
+        Source::Changed => return Ok(Crossed::Swapped),
+    };
+    if let Err(reason) = admit(src.stat()) {
+        return Ok(Crossed::Rejected(reason));
+    }
+    source_removable(sp)?;
+
+    // A forced `EXDEV` stands for the rename that sent the file here. The copy's publish stays
+    // inside one destination directory and never crosses.
+    let copy_faults = Faults {
+        force_cross_device: false,
+        ..faults
+    };
+    let (owner_kept, written) = match copy_placed(&src, dest, dn, copy_faults, hook)? {
+        (Placed::Done { owner_kept }, Some(written)) => (owner_kept, written),
+        (Placed::Existing, _) => return Ok(Crossed::Existing),
+        (Placed::SourceChanged, _) => return Ok(Crossed::SourceChanged),
+        (Placed::Done { .. }, None) => {
+            return Err(Stop::Err(io::Error::other(
+                "the published copy was not identified",
+            )));
+        }
+    };
+
+    // A complete, flushed copy now holds the destination name. Until the source is removed,
+    // every way out withdraws it, so the file is left at its source alone.
+    let withdraw = || {
+        let _ = unlink_if_same(dest, dn, &written);
+    };
+    let now = match fstatat_nofollow(sp, sn) {
+        Ok(now) => now,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Stop::Err(vanished())),
+        Err(e) => {
+            withdraw();
+            return Err(Stop::Err(e));
+        }
+    };
+    if !now.is_regular() || !now.same_object(src.stat()) || source_changed(src.stat(), &now) {
+        withdraw();
+        return Ok(Crossed::SourceChanged);
+    }
+    match hook.at(Step::SourceRechecked) {
+        HookAction::Continue => {}
+        HookAction::Fail(e) => {
+            withdraw();
+            return Err(Stop::Err(e));
+        }
+        HookAction::Abandon => return Err(Stop::Abandoned),
+    }
+
+    let removed = if faults.refuse_source_unlink {
+        Err(io::Error::from_raw_os_error(libc::EPERM))
+    } else {
+        unlink_at(sp, sn)
+    };
+    match removed {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Stop::Err(vanished())),
+        Err(e) => {
+            withdraw();
+            return Err(Stop::Err(io::Error::new(
+                e.kind(),
+                format!("cannot remove the source ({e}); its copy was withdrawn"),
+            )));
+        }
+    }
+    // The move is done: a failure from here on cannot undo it, and a lost removal only
+    // leaves the file at both names after a crash.
+    if let HookAction::Abandon = hook.at(Step::SourceUnlinked) {
+        return Err(Stop::Abandoned);
+    }
+    let _ = sync_durable(sp.as_fd());
+    Ok(Crossed::Done { owner_kept })
+}
+
+/// The failure for a source that disappeared after it was copied and before it was removed.
+fn vanished() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        "the source disappeared before it was removed; its copy was kept",
+    )
+}
+
+/// Fail before copying when this user may not remove a name from the source directory, since
+/// the move's last step would then fail after the whole copy.
+fn source_removable(sp: &DirHandle) -> io::Result<()> {
+    // SAFETY: `sp` is open and the literal a valid C string for the call.
+    let ret = unsafe {
+        libc::faccessat(
+            sp.raw(),
+            c".".as_ptr(),
+            libc::W_OK | libc::X_OK,
+            libc::AT_EACCESS,
+        )
+    };
+    check(ret).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot remove files from the source directory ({e}); nothing was copied"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1845,5 +2037,485 @@ mod tests {
             assert_eq!(read(&src.join("target")), b"T");
             assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
         }
+    }
+
+    // ---- Cross-filesystem move ----
+    //
+    // `move_across` never asks whether the two directories share a filesystem: it is reached
+    // only after a rename answered `EXDEV`. So these tests drive it within one temp dir, and
+    // `tests/mv_xfs_tests.rs` drives the binary across a real second filesystem.
+
+    /// Every step a cross-filesystem move passes on the native publish route, in order.
+    const ACROSS_STEPS: [Step; 10] = [
+        Step::TempCreated,
+        Step::BytesWritten,
+        Step::Owned,
+        Step::Moded,
+        Step::Timed,
+        Step::TempSynced,
+        Step::Published,
+        Step::DirSynced,
+        Step::SourceRechecked,
+        Step::SourceUnlinked,
+    ];
+
+    /// The native publish and the link-route publish, each with the step list it passes.
+    fn across_routes() -> [(Faults, Vec<Step>); 2] {
+        let mut link = ACROSS_STEPS.to_vec();
+        link.insert(6, Step::Linked);
+        [
+            (Faults::default(), ACROSS_STEPS.to_vec()),
+            (link_route(), link),
+        ]
+    }
+
+    /// A source directory holding a 1 MiB `f`, and an empty destination directory.
+    struct Across {
+        _t: TempDir,
+        src: PathBuf,
+        out: PathBuf,
+        bytes: Vec<u8>,
+    }
+
+    impl Across {
+        fn new() -> Across {
+            let t = TempDir::new().unwrap();
+            let src = t.path().join("src");
+            let out = t.path().join("out");
+            fs::create_dir(&src).unwrap();
+            fs::create_dir(&out).unwrap();
+            let bytes = big_source(&src.join("f"));
+            Across {
+                _t: t,
+                src,
+                out,
+                bytes,
+            }
+        }
+
+        fn run(&self, faults: Faults, hook: &mut dyn StepHook) -> Result<Crossed, Stop<io::Error>> {
+            move_across_with(
+                &dir(&self.src),
+                OsStr::new("f"),
+                &dir(&self.out),
+                OsStr::new("f"),
+                admit_all,
+                faults,
+                hook,
+            )
+        }
+
+        fn source(&self) -> PathBuf {
+            self.src.join("f")
+        }
+
+        fn dest(&self) -> PathBuf {
+            self.out.join("f")
+        }
+
+        /// The file is at its source, unchanged, and nothing is at the destination name.
+        fn only_at_source(&self, context: &str) {
+            assert_eq!(
+                read(&self.source()),
+                self.bytes,
+                "{context}: source changed"
+            );
+            assert!(
+                fs::symlink_metadata(self.dest()).is_err(),
+                "{context}: a copy was left at the destination"
+            );
+            assert!(parts_in(&self.out).is_empty(), "{context}: temp left");
+        }
+    }
+
+    /// Records each step with whether the source and the final name exist at that moment.
+    struct Record {
+        source: PathBuf,
+        dest: PathBuf,
+        seen: Vec<(Step, bool, bool)>,
+    }
+
+    impl Record {
+        fn of(a: &Across) -> Record {
+            Record {
+                source: a.source(),
+                dest: a.dest(),
+                seen: Vec::new(),
+            }
+        }
+    }
+
+    impl StepHook for Record {
+        fn at(&mut self, step: Step) -> HookAction {
+            let source = fs::symlink_metadata(&self.source).is_ok();
+            let dest = fs::symlink_metadata(&self.dest).is_ok();
+            self.seen.push((step, source, dest));
+            HookAction::Continue
+        }
+    }
+
+    /// A move whose rename answers `EXDEV` touches nothing, and the copy path then places the
+    /// file as a new inode and removes the source, though the same fault still forces every
+    /// rename to cross: the copy's own publish never does.
+    #[test]
+    fn exdev_routes_to_the_copy_path() {
+        for (publish, _) in across_routes() {
+            let faults = Faults {
+                force_cross_device: true,
+                ..publish
+            };
+            let a = Across::new();
+            let before = fs::symlink_metadata(a.source()).unwrap();
+            let (s, d) = (dir(&a.src), dir(&a.out));
+            let got = move_same_fs_with(
+                &s,
+                OsStr::new("f"),
+                || Ok(&d),
+                OsStr::new("f"),
+                admit_all,
+                faults,
+                &mut NoHook,
+            )
+            .unwrap();
+            assert_eq!(got, Moved::CrossDevice, "{faults:?}");
+            a.only_at_source(&format!("{faults:?} after EXDEV"));
+
+            let got = move_across_with(
+                &s,
+                OsStr::new("f"),
+                &d,
+                OsStr::new("f"),
+                admit_all,
+                faults,
+                &mut NoHook,
+            );
+            assert!(
+                matches!(got, Ok(Crossed::Done { .. })),
+                "{faults:?}: {got:?}"
+            );
+            assert!(fs::symlink_metadata(a.source()).is_err(), "{faults:?}");
+            let after = fs::symlink_metadata(a.dest()).unwrap();
+            assert_ne!(after.ino(), before.ino(), "{faults:?}: renamed, not copied");
+            assert_eq!(after.nlink(), 1, "{faults:?}");
+            assert_eq!(read(&a.dest()), a.bytes, "{faults:?}");
+            assert!(parts_in(&a.out).is_empty(), "{faults:?}");
+        }
+    }
+
+    /// A failure injected at any step before the source is removed fails the move, leaves the
+    /// source as it was and nothing at the destination, not even a temp. A failure after the
+    /// removal cannot undo the move, which stands.
+    #[test]
+    fn move_across_fails_closed_at_every_step() {
+        for (faults, steps) in across_routes() {
+            for &at in &steps {
+                let a = Across::new();
+                let inode = fs::metadata(a.source()).unwrap().ino();
+                let got = a.run(
+                    faults,
+                    &mut At {
+                        step: at,
+                        action: fail,
+                    },
+                );
+                let context = format!("{at:?} {faults:?}");
+                if at == Step::SourceUnlinked {
+                    assert!(
+                        matches!(got, Ok(Crossed::Done { .. })),
+                        "{context}: {got:?}"
+                    );
+                    assert!(fs::symlink_metadata(a.source()).is_err(), "{context}");
+                    assert_eq!(read(&a.dest()), a.bytes, "{context}");
+                    continue;
+                }
+                assert!(matches!(got, Err(Stop::Err(_))), "{context}: {got:?}");
+                a.only_at_source(&context);
+                assert_eq!(fs::metadata(a.source()).unwrap().ino(), inode, "{context}");
+            }
+        }
+    }
+
+    /// A move abandoned at any step, as a crash would leave it, never leaves the file at
+    /// neither name, and never a partial file at either: before the publish it is at its
+    /// source only; from the publish to the removal at both; after the removal at its
+    /// destination only.
+    #[test]
+    fn move_across_abandoned_at_every_step_leaves_the_file_whole_somewhere() {
+        for (faults, steps) in across_routes() {
+            for &at in &steps {
+                let a = Across::new();
+                let got = a.run(
+                    faults,
+                    &mut At {
+                        step: at,
+                        action: abandon,
+                    },
+                );
+                let context = format!("{at:?} {faults:?}");
+                assert!(matches!(got, Err(Stop::Abandoned)), "{context}: {got:?}");
+                let at_source = fs::symlink_metadata(a.source()).is_ok();
+                let at_dest = fs::symlink_metadata(a.dest()).is_ok();
+                assert!(
+                    at_source || at_dest,
+                    "{context}: the file is at neither name"
+                );
+                if at_source {
+                    assert_eq!(read(&a.source()), a.bytes, "{context}: source not whole");
+                }
+                if at_dest {
+                    assert_eq!(read(&a.dest()), a.bytes, "{context}: partial destination");
+                }
+                let published = steps.iter().position(|s| *s == at)
+                    >= steps
+                        .iter()
+                        .position(|s| matches!(s, Step::Linked | Step::Published));
+                assert_eq!(at_dest, published, "{context}");
+                assert_eq!(at_source, at != Step::SourceUnlinked, "{context}");
+            }
+        }
+    }
+
+    /// The source is removed only after the copy and then its directory were flushed and the
+    /// source re-checked: it still exists at every earlier step, and at the step after the
+    /// removal it is gone and the copy is in place.
+    #[test]
+    fn move_across_flushes_file_and_directory_before_unlinking() {
+        for (faults, steps) in across_routes() {
+            let a = Across::new();
+            let mut record = Record::of(&a);
+            let got = a.run(faults, &mut record);
+            assert!(
+                matches!(got, Ok(Crossed::Done { .. })),
+                "{faults:?}: {got:?}"
+            );
+            let order: Vec<Step> = record.seen.iter().map(|s| s.0).collect();
+            assert_eq!(order, steps, "{faults:?}");
+            for &(step, source, dest) in &record.seen {
+                if step == Step::SourceUnlinked {
+                    assert!(!source && dest, "{faults:?}: {step:?}");
+                } else {
+                    assert!(source, "{faults:?}: the source was gone at {step:?}");
+                }
+            }
+            assert_eq!(read(&a.dest()), a.bytes);
+        }
+    }
+
+    /// Writes to the source at one step, then lets the move go on.
+    struct Mutate {
+        at: Step,
+        source: PathBuf,
+        /// The source's ctime when the move began; a same-size rewrite must move it.
+        ctime: (i64, i64),
+        same_size: bool,
+    }
+
+    impl StepHook for Mutate {
+        fn at(&mut self, step: Step) -> HookAction {
+            if step != self.at {
+                return HookAction::Continue;
+            }
+            let before = fs::metadata(&self.source).unwrap();
+            if !self.same_size {
+                let mut f = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.source)
+                    .unwrap();
+                f.write_all(b"APPENDED").unwrap();
+                return HookAction::Continue;
+            }
+            // Rewrite in place and put the times back, until the ctime has moved past the
+            // one the move saw at open: a coarse clock can stamp both in one tick.
+            loop {
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.source)
+                    .unwrap();
+                f.write_all(b"REWRITE").unwrap();
+                drop(f);
+                let atime = (before.atime(), before.atime_nsec());
+                let mtime = (before.mtime(), before.mtime_nsec());
+                set_times(&self.source, atime, mtime);
+                let after = fs::metadata(&self.source).unwrap();
+                assert_eq!(
+                    (after.len(), after.mtime(), after.mtime_nsec()),
+                    (before.len(), mtime.0, mtime.1)
+                );
+                if (after.ctime(), after.ctime_nsec()) != self.ctime {
+                    return HookAction::Continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    fn mutate(a: &Across, at: Step, same_size: bool) -> Mutate {
+        let m = fs::metadata(a.source()).unwrap();
+        Mutate {
+            at,
+            source: a.source(),
+            ctime: (m.ctime(), m.ctime_nsec()),
+            same_size,
+        }
+    }
+
+    /// A source appended to while it is read, or after its copy is published and before it
+    /// is removed, keeps its new bytes at its source, and no copy is left.
+    #[test]
+    fn move_across_keeps_a_source_that_grew_during_the_copy() {
+        for (faults, _) in across_routes() {
+            for at in [Step::BytesWritten, Step::DirSynced] {
+                let a = Across::new();
+                let got = a.run(faults, &mut mutate(&a, at, false));
+                let context = format!("{at:?} {faults:?}");
+                assert!(
+                    matches!(got, Ok(Crossed::SourceChanged)),
+                    "{context}: {got:?}"
+                );
+                let mut grown = a.bytes.clone();
+                grown.extend_from_slice(b"APPENDED");
+                assert_eq!(read(&a.source()), grown, "{context}");
+                assert!(fs::symlink_metadata(a.dest()).is_err(), "{context}");
+                assert!(parts_in(&a.out).is_empty(), "{context}");
+            }
+        }
+    }
+
+    /// A same-size rewrite with the mtime put back changes neither size nor mtime; only the
+    /// ctime shows it, during the copy or before the removal alike.
+    #[test]
+    fn move_across_keeps_a_source_whose_mtime_was_restored() {
+        for (faults, _) in across_routes() {
+            for at in [Step::BytesWritten, Step::DirSynced] {
+                let a = Across::new();
+                let got = a.run(faults, &mut mutate(&a, at, true));
+                let context = format!("{at:?} {faults:?}");
+                assert!(
+                    matches!(got, Ok(Crossed::SourceChanged)),
+                    "{context}: {got:?}"
+                );
+                let mut rewritten = a.bytes.clone();
+                rewritten[..7].copy_from_slice(b"REWRITE");
+                assert_eq!(read(&a.source()), rewritten, "{context}");
+                assert!(fs::symlink_metadata(a.dest()).is_err(), "{context}");
+                assert!(parts_in(&a.out).is_empty(), "{context}");
+            }
+        }
+    }
+
+    /// Another file put at the source name after the copy is published is not removed, and
+    /// neither is the copy of the original kept: the original, wherever it went, is untouched.
+    #[test]
+    fn move_across_keeps_a_source_swapped_before_the_unlink() {
+        struct Swap(PathBuf);
+        impl StepHook for Swap {
+            fn at(&mut self, step: Step) -> HookAction {
+                if step == Step::DirSynced {
+                    fs::hard_link(self.0.join("f"), self.0.join("aside")).unwrap();
+                    fs::remove_file(self.0.join("f")).unwrap();
+                    put(&self.0.join("f"), b"INTRUDER");
+                }
+                HookAction::Continue
+            }
+        }
+        for (faults, _) in across_routes() {
+            let a = Across::new();
+            let got = a.run(faults, &mut Swap(a.src.clone()));
+            assert!(
+                matches!(got, Ok(Crossed::SourceChanged)),
+                "{faults:?}: {got:?}"
+            );
+            assert_eq!(read(&a.source()), b"INTRUDER", "{faults:?}");
+            assert_eq!(read(&a.src.join("aside")), a.bytes, "{faults:?}");
+            assert!(fs::symlink_metadata(a.dest()).is_err(), "{faults:?}");
+            assert!(parts_in(&a.out).is_empty(), "{faults:?}");
+        }
+    }
+
+    /// A refused removal of the source, after a complete and flushed copy, withdraws the copy
+    /// and fails the file, which stays at its source; and a source directory this user cannot
+    /// remove from fails the file before any byte is copied.
+    #[test]
+    fn move_across_rolls_back_when_the_source_unlink_fails() {
+        for (publish, _) in across_routes() {
+            let faults = Faults {
+                refuse_source_unlink: true,
+                ..publish
+            };
+            let a = Across::new();
+            let got = a.run(faults, &mut NoHook);
+            match got {
+                Err(Stop::Err(e)) => assert!(
+                    e.to_string().contains("cannot remove the source"),
+                    "{faults:?}: {e}"
+                ),
+                other => panic!("{faults:?}: {other:?}"),
+            }
+            a.only_at_source(&format!("{faults:?}"));
+        }
+
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "running as root, which may remove from any directory; skipping the pre-check case"
+            );
+            return;
+        }
+        let a = Across::new();
+        chmod(&a.src, 0o555);
+        let mut record = Record::of(&a);
+        let got = a.run(Faults::default(), &mut record);
+        chmod(&a.src, 0o755);
+        match got {
+            Err(Stop::Err(e)) => assert!(e.to_string().contains("nothing was copied"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(record.seen.is_empty(), "{:?}", record.seen);
+        a.only_at_source("read-only source directory");
+    }
+
+    /// A taken destination name is counted before any byte is read, and neither name changes.
+    #[test]
+    fn move_across_counts_an_existing_destination_without_copying() {
+        let a = Across::new();
+        put(&a.dest(), b"KEEP");
+        let mut record = Record::of(&a);
+        let got = a.run(Faults::default(), &mut record);
+        assert!(matches!(got, Ok(Crossed::Existing)), "{got:?}");
+        assert!(record.seen.is_empty(), "{:?}", record.seen);
+        assert_eq!(read(&a.dest()), b"KEEP");
+        assert_eq!(read(&a.source()), a.bytes);
+        assert!(parts_in(&a.out).is_empty());
+    }
+
+    /// The copy carries the bytes, permission bits, atime and mtime to the nanosecond, and the
+    /// owner and group; the source is gone.
+    #[test]
+    fn move_across_carries_metadata() {
+        let a = Across::new();
+        chgrp(&a.source(), egid());
+        chmod(&a.source(), 0o640);
+        set_times(
+            &a.source(),
+            (1_400_000_000, 7),
+            (1_500_000_000, 123_456_789),
+        );
+        let before = fs::symlink_metadata(a.source()).unwrap();
+        let got = a.run(Faults::default(), &mut NoHook);
+        assert!(
+            matches!(got, Ok(Crossed::Done { owner_kept: true })),
+            "{got:?}"
+        );
+        assert!(fs::symlink_metadata(a.source()).is_err());
+        // Read the metadata before the bytes: reading can move the atime.
+        let after = fs::symlink_metadata(a.dest()).unwrap();
+        assert_eq!(after.mode() & 0o7777, 0o640);
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+        assert_eq!(
+            (after.mtime(), after.mtime_nsec()),
+            (1_500_000_000, 123_456_789)
+        );
+        assert_eq!((after.atime(), after.atime_nsec()), (1_400_000_000, 7));
+        assert_eq!(read(&a.dest()), a.bytes);
     }
 }

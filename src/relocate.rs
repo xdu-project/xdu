@@ -14,8 +14,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 
 use crate::atomic_fs::{
-    self, DirHandle, Faults, Moved, NoHook, ParentCache, Placed, Source, Stat, components,
-    copy_atomic, is_not_a_directory,
+    self, Crossed, DirHandle, Faults, Moved, NoHook, ParentCache, Placed, Source, Stat, Stop,
+    components, copy_atomic, is_not_a_directory,
 };
 use crate::cli::{SelectArgs, XduCpArgs, XduMvArgs};
 use crate::select::{Live, Row, Verdict, holds_live, select};
@@ -285,10 +285,13 @@ fn copy_one(
 pub enum CrossFs {
     /// Fail the file, naming the cause, and leave the source where it is.
     Refuse,
+    /// Copy the file there durably, check that the source did not change, then remove the
+    /// source (`atomic_fs::move_across`).
+    Copy,
 }
 
 /// The cross-filesystem policy this build ships.
-pub const CROSS_FS: CrossFs = CrossFs::Refuse;
+pub const CROSS_FS: CrossFs = CrossFs::Copy;
 
 /// The failure reported for a file the `Refuse` policy kept at its source.
 pub const CROSSING_REFUSED: &str = "crossing filesystems is not supported by this build";
@@ -296,7 +299,9 @@ pub const CROSSING_REFUSED: &str = "crossing filesystems is not supported by thi
 /// Move one planned file by a no-replace rename: walk to its source directory without
 /// following a symlink, and let `move_same_fs` judge the object at the name (only a regular
 /// file moves, with or without `--safe`), re-check it under `--safe` against that same
-/// `lstat`, create its destination directory, and rename it.
+/// `lstat`, create its destination directory, and rename it. A rename the kernel answers
+/// with `EXDEV` goes where `cross` says: under `Copy`, to `move_across`, which re-checks
+/// `--safe` against the `fstat` of the descriptor it copies from.
 fn move_one(
     anchors: &Anchors,
     worker: &mut Worker,
@@ -341,6 +346,35 @@ fn move_one(
         Ok(Moved::Existing) => Outcome::Existing,
         Ok(Moved::CrossDevice) => match cross {
             CrossFs::Refuse => Outcome::Failed(CROSSING_REFUSED.to_string()),
+            CrossFs::Copy => {
+                let walked = worker.dest_parent.get(rel_parent, || {
+                    atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent))
+                });
+                let dest_dir = match walked {
+                    Ok(dir) => dir,
+                    Err(e) => return Outcome::Failed(e.to_string()),
+                };
+                let crossed = atomic_fs::move_across_with(
+                    source_dir,
+                    name,
+                    dest_dir,
+                    name,
+                    admit,
+                    faults,
+                    &mut NoHook,
+                );
+                match crossed {
+                    Ok(Crossed::Done { owner_kept }) => Outcome::Done { owner_kept },
+                    Ok(Crossed::Missing) => Outcome::Missing,
+                    Ok(Crossed::NotRegular) => Outcome::Skipped("not a regular file"),
+                    Ok(Crossed::Swapped) => Outcome::Skipped("changed while being opened"),
+                    Ok(Crossed::Rejected(reason)) => Outcome::Skipped(reason),
+                    Ok(Crossed::Existing) => Outcome::Existing,
+                    Ok(Crossed::SourceChanged) => Outcome::Skipped("changed during the copy"),
+                    Err(Stop::Err(e)) => Outcome::Failed(e.to_string()),
+                    Err(Stop::Abandoned) => Outcome::Failed("move abandoned".to_string()),
+                }
+            }
         },
         Err(e) => Outcome::Failed(e.to_string()),
     }
@@ -711,7 +745,67 @@ mod tests {
         assert_eq!(got, Outcome::Done { owner_kept: true });
         assert_eq!(fs::metadata(into.join("u/f.dat")).unwrap().ino(), inode);
         assert!(fs::symlink_metadata(&source).is_err());
-        assert_eq!(CROSS_FS, CrossFs::Refuse);
+    }
+
+    /// The policy the binary ships takes a rename answered with `EXDEV` to the copy path: the
+    /// file lands as a new inode with its bytes, and the source is gone.
+    #[test]
+    fn the_production_policy_routes_exdev_to_the_copy_path() {
+        use std::os::unix::fs::MetadataExt;
+
+        assert_eq!(CROSS_FS, CrossFs::Copy);
+        for link_route in [false, true] {
+            let t = tempfile::TempDir::new().unwrap();
+            let base = t.path().canonicalize().unwrap();
+            let source = base.join("src/u/f.dat");
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&source)
+                .unwrap();
+            file.write_all(b"TRAVELS").unwrap();
+            drop(file);
+            let inode = fs::metadata(&source).unwrap().ino();
+            let into = base.join("into");
+            fs::create_dir(&into).unwrap();
+
+            let anchors = Anchors {
+                root: DirHandle::open(Path::new("/")).unwrap(),
+                into: DirHandle::open(&into).unwrap(),
+            };
+            let item = Planned {
+                source: source.clone(),
+                rel: PathBuf::from("u/f.dat"),
+            };
+            let faults = Faults {
+                force_cross_device: true,
+                force_link_route: link_route,
+                ..Faults::default()
+            };
+            let got = move_one(
+                &anchors,
+                &mut Worker::default(),
+                &item,
+                None,
+                CROSS_FS,
+                faults,
+            );
+            assert!(
+                matches!(got, Outcome::Done { .. }),
+                "link route: {link_route}: {got:?}"
+            );
+            let landed = into.join("u/f.dat");
+            assert_eq!(fs::read(&landed).unwrap(), b"TRAVELS");
+            assert_ne!(
+                fs::metadata(&landed).unwrap().ino(),
+                inode,
+                "renamed, not copied"
+            );
+            assert!(fs::symlink_metadata(&source).is_err(), "the source stayed");
+            let leftovers = fs::read_dir(into.join("u")).unwrap().count();
+            assert_eq!(leftovers, 1, "a temp was left beside the copy");
+        }
     }
 
     #[test]

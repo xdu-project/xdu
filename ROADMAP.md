@@ -264,6 +264,16 @@ serves.
 *Horizon: near-term, at the release that ships the tools · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P4)*
 **Seed:** [`issues/www-cp-mv-at-release.md`](issues/www-cp-mv-at-release.md)
 
+## Bulk operations: `xdu-mv` removes only the file it copied
+
+A cross-filesystem `xdu-mv` re-checks the source name against the file it copied and then removes
+the name, two system calls apart. A file renamed onto that name in between is removed in its
+place. Renaming the source to a private name first, checking that name's inode, and removing only
+it closes the window; the man page lists the race until then.
+
+*Horizon: near-term · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P5)*
+**Seed:** [`issues/xdu-mv-quarantine-unlink.md`](issues/xdu-mv-quarantine-unlink.md)
+
 ## Permission-aware, access-scoped queries
 
 Once ownership and permissions are indexed, the index itself becomes a way to leak information: a

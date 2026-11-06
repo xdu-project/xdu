@@ -85,8 +85,53 @@ jobs:
       - name: Build
         run: cargo build --locked --all-features
 
+      # The cross-filesystem move tests need a writable directory on a filesystem other than the
+      # one the temp dirs live on. Linux: /dev/shm, the tmpfs systemd always mounts, writable
+      # without sudo. macOS: an APFS disk image the runner user attaches (APFS keeps nanosecond
+      # times, which HFS+ does not; `hdiutil create` can flake with "Resource busy", so it is
+      # retried). Each step fails if the directory shares the workspace's device, and the test
+      # fixture then proves the real condition, a rename into it answering EXDEV.
+      - name: Second filesystem for the cross-filesystem move tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          d=/dev/shm/xdu-xfs
+          mkdir -p "$d"
+          test "$(stat -c %d "$d")" != "$(stat -c %d "$GITHUB_WORKSPACE")"
+          echo "XDU_TEST_XFS_DIR=$d" >> "$GITHUB_ENV"
+
+      - name: Second filesystem for the cross-filesystem move tests (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          img="$RUNNER_TEMP/xdu-xfs.dmg"
+          d="$RUNNER_TEMP/xdu-xfs"
+          mkdir -p "$d"
+          made=
+          for i in 1 2 3; do
+            if hdiutil create -ov -size 256m -fs APFS -volname xdu-xfs "$img"; then made=1; break; fi
+            sleep 5
+          done
+          test -n "$made"
+          attached=
+          for i in 1 2 3; do
+            if hdiutil attach -nobrowse -mountpoint "$d" "$img"; then attached=1; break; fi
+            sleep 5
+          done
+          test -n "$attached"
+          test "$(stat -f %d "$d")" != "$(stat -f %d "$GITHUB_WORKSPACE")"
+          echo "XDU_TEST_XFS_DIR=$d" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --locked --all-features
+
+      # tests/xfs-wire.sh runs tests/mv_xfs_tests.rs with --include-ignored and fails unless the
+      # passed count equals the listed count and reaches the minimum, the file's listed count;
+      # raise it in the commit that adds a test (AGENTS.md, Testing). The fixture panics unless a
+      # rename into XDU_TEST_XFS_DIR answers EXDEV, so the step cannot pass on one filesystem.
+      # The last line, `xfs-wire: '' N of N passed with XDU_TEST_XFS_DIR=…`, is the record.
+      - name: XFS tests
+        run: sh tests/xfs-wire.sh "" 3
 
       # The S3 wire tests need the pinned httpfs, which nothing in the repository carries. Fetch
       # it the way a release leg does, with the probe from this build naming engine and platform,

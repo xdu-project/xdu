@@ -3,10 +3,10 @@ slug: bulk-copy-move-xdu-cp-mv
 title: 'Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine'
 kind: feature
 appetite: big
-status: in_progress
+status: in_review
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
-current_phase: P5
+current_phase: done
 last_updated: '2026-11-06'
 phases:
 - id: P1
@@ -181,14 +181,14 @@ phases:
     -- --check; echo P4-GATE-GREEN'
 - id: P5
   name: 'xdu-mv crosses filesystems: durable copy, unchanged check, then unlink'
-  status: pending
+  status: done
   satisfies:
   - R5
   depends_on:
   - P4
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: downhill
   verify: 'set -eu; mkdir -p target target/p5-tmp target/p5-samefs; cargo test --locked
     --lib >target/p5-lib.log 2>&1; for t in atomic_fs::tests::exdev_routes_to_the_copy_path
     atomic_fs::tests::move_across_fails_closed_at_every_step atomic_fs::tests::move_across_abandoned_at_every_step_leaves_the_file_whole_somewhere
@@ -522,43 +522,43 @@ and its directory are durable and the source is unchanged, and leaves every file
 somewhere at every step. Proven by fault-seam unit tests on every OS and by a real second
 filesystem in CI. This is the last phase and the GOAL's first cut.
 
-- [ ] `atomic_fs::move_across` (PLAN §2.5): S0 at open; the source-parent `faccessat` pre-check;
+- [x] `atomic_fs::move_across` (PLAN §2.5): S0 at open; the source-parent `faccessat` pre-check;
   `copy_atomic` steps 1–6 (S1 included); publish; directory flush; S2 check (dev, ino, type,
   size, mtime, ctime) immediately before `unlinkat(src_parent, name)`; inode-checked rollback of
   our destination on a failed flush, an S2 mismatch or a failed unlink (counted failed or
   skipped as PLAN says); best-effort source-directory flush. Never writes the source's times.
-- [ ] `relocate`: the binary's policy becomes `CrossFs::Copy`; `CrossDevice` routes to
+- [x] `relocate`: the binary's policy becomes `CrossFs::Copy`; `CrossDevice` routes to
   `move_across`. `Refuse` stays and keeps its unit test.
-- [ ] Unit tests named in the `verify:`: a `StepHook` that fails at each `Step`, one that
+- [x] Unit tests named in the `verify:`: a `StepHook` that fails at each `Step`, one that
   abandons at each `Step` without cleanup (simulated crash; then assert source whole or final
   name whole, never a partial final name), a recording hook asserting no unlink precedes both
   flushes, mutation cases (append; same-size rewrite with the mtime restored, which only ctime
   catches; a swap of the source name before the unlink), a forced unlink failure, and a
   `relocate` test that drives the **production** policy through a forced `EXDEV`.
-- [ ] `tests/mv_xfs_tests.rs`: at least three `#[ignore = "needs XDU_TEST_XFS_DIR on a second
+- [x] `tests/mv_xfs_tests.rs`: at least three `#[ignore = "needs XDU_TEST_XFS_DIR on a second
   filesystem"]` tests (a move across carrying bytes, mode and times; an existing destination
   skipped and counted; the source gone and the destination's `st_dev` different). The shared
   fixture **panics** with "XDU_TEST_XFS_DIR is not set" when the variable is unset, and with
   "XDU_TEST_XFS_DIR is not on another filesystem" when a probe rename from a `TempDir` into it
   does not return `EXDEV`, so the tier can never pass vacuously.
-- [ ] `tests/xfs-wire.sh PREFIX MIN`, modelled on `tests/s3-wire.sh`: runs `mv_xfs_tests` with
+- [x] `tests/xfs-wire.sh PREFIX MIN`, modelled on `tests/s3-wire.sh`: runs `mv_xfs_tests` with
   `--include-ignored` and fails unless the passed count equals the listed count and is at least
   MIN.
-- [ ] `.github/workflows/test.yaml`, test matrix, before `Test`: the Linux step mkdirs
+- [x] `.github/workflows/test.yaml`, test matrix, before `Test`: the Linux step mkdirs
   `/dev/shm/xdu-xfs`, asserts its `stat -c %d` differs from `$GITHUB_WORKSPACE`'s and exports
   `XDU_TEST_XFS_DIR`; the macOS step creates and attaches an APFS image with `hdiutil create -ov
   -size 256m -fs APFS` in a three-try retry loop, asserts the device differs and exports the
   mount. Then an `XFS tests` step: `sh tests/xfs-wire.sh "" N`, N the file's listed count. No
   step runs anything under `spec/`.
-- [ ] `AGENTS.md` Testing: the `XDU_TEST_XFS_DIR` tier and how to run it on a host with a second
+- [x] `AGENTS.md` Testing: the `XDU_TEST_XFS_DIR` tier and how to run it on a host with a second
   filesystem.
-- [ ] `doc/xdu-mv.1.scd`: the cross-filesystem sequence ("another filesystem"), the flush cost,
+- [x] `doc/xdu-mv.1.scd`: the cross-filesystem sequence ("another filesystem"), the flush cost,
   the remaining races (PLAN §2.5), destinations without a no-replace rename or hard links. Do not
   repeat the page's worked destination path or add an `XDU_*` mention: P4's counted literals
   must stay true; if they change, re-count and update `test.yaml` in the same commit.
-- [ ] File `issues/xdu-mv-quarantine-unlink.md` (from `templates/ISSUE.md`) with a `ROADMAP.md`
+- [x] File `issues/xdu-mv-quarantine-unlink.md` (from `templates/ISSUE.md`) with a `ROADMAP.md`
   entry: the quarantine rename that would close the final-name swap race (PLAN §5).
-- [ ] **Deferral ledger (this is the last phase):** walk P1–P5's bodies and commit messages for
+- [x] **Deferral ledger (this is the last phase):** walk P1–P5's bodies and commit messages for
   "do not fix here", "known limitation", "follow-up", "deferred", "later"; each must have an
   `issues/` file and a `ROADMAP.md` entry. Expected set: `xdu-mv-quarantine-unlink` (P5),
   `www-cp-mv-at-release` (P4), the `xdu-rm.1` SEE ALSO line in
@@ -569,6 +569,45 @@ filesystem in CI. This is the last phase and the GOAL's first cut.
   with no second filesystem and on the same filesystem, and that CI wires both OS steps. **The
   real-`EXDEV` run is proven only by CI's `XFS tests` step**; the sandbox on the planning host
   refused every disk-image route (research 02). That CI result is part of the checkpoint.
+- **Build notes (2026-11-06).** Red first: the stored gate, run before any edit, stopped at
+  `atomic_fs::tests::exdev_routes_to_the_copy_path did not pass`. After the work it ran green as
+  stored. Three mutants, each built from a fresh-mtime copy of the tree in its own
+  `CARGO_TARGET_DIR` under `target/`, each turned it red: dropping the S2 re-check failed the
+  grew, mtime-restored and swapped tests; shipping `CrossFs::Refuse` failed
+  `the_production_policy_routes_exdev_to_the_copy_path`; a no-op withdrawal failed those three
+  plus `move_across_rolls_back_when_the_source_unlink_fails` and
+  `move_across_fails_closed_at_every_step`. The real tree was checked unmutated afterwards. The
+  tier's bodies were also run once locally against a same-filesystem directory with the probe
+  disabled (a throwaway copy, moved aside): the two content tests passed and the device test
+  failed, as it must. Deviations from PLAN, none touching a GOAL R-ID: a source that vanished
+  after its copy was published (at S2 or at the `unlinkat`) keeps its copy, the only whole
+  instance left, and counts as failed, since withdrawing it would leave the file at neither name;
+  a failure after the unlink (the best-effort source-directory flush, or a hook failing there)
+  cannot undo the move, which counts as moved; `move_across` re-runs `--safe` on the `fstat` of
+  the opened source; a source replaced between its type check and its open counts as skipped
+  ("changed while being opened"); `Faults` gains `refuse_source_unlink`, and `move_across`
+  clears `force_cross_device` for its own publish, so a forced `EXDEV` stands for the rename
+  that sent the file there; `Step` gains `SourceRechecked` and `SourceUnlinked`; the mutation
+  tests mutate at `DirSynced` (after the publish, before S2), the window S2 closes, while the
+  swap between S2 and the unlink is the race the man page lists and the new issue covers; the
+  macOS step retries `hdiutil attach` as well as `create`; the `XFS tests` step sits right after
+  `Test`; `xfs-wire.sh` does not check the variable itself, so a failure is the fixture's own;
+  the tier asserts no owner or group (user-attached macOS images ignore ownership), which
+  `move_across_carries_metadata` proves on every host; a move to another filesystem can count
+  "Ownership not preserved", and `xdu-mv(1)` now says so. `AGENTS.md`'s tool table, repository
+  map and high-risk paragraph describe the cross-filesystem path. Deferral ledger: no new hit in
+  P1–P5's bodies or commit messages; the expected set is filed (`xdu-mv-quarantine-unlink`,
+  `www-cp-mv-at-release`, the `xdu-rm.1` SEE ALSO line). The P4 literal counts were re-run by
+  the P4 emulation (62 specs, 0 mismatches). `scdoc` is not installed on the build host, so
+  `doc/xdu-mv.1.scd` was not rendered locally. Nothing ran on a real second filesystem here: the
+  sandbox refuses `hdiutil`.
+- **CI must show (not provable on this host):** on both `Test` legs, the step "Second filesystem
+  for the cross-filesystem move tests (Linux)" or "(macOS)" green, then the `XFS tests` step
+  ending in `xfs-wire: '' 3 of 3 passed with XDU_TEST_XFS_DIR=/dev/shm/xdu-xfs` (ubuntu-24.04)
+  and `xfs-wire: '' 3 of 3 passed with XDU_TEST_XFS_DIR=…/xdu-xfs` under `$RUNNER_TEMP`
+  (macos-15), each preceded by `test result: ok. 3 passed; 0 failed`; the Linux leg compiling
+  `move_across` (`AT_EACCESS`, `faccessat`) and passing every named `atomic_fs` and `relocate`
+  test with clippy clean; and the man-page step's `xdu-mv.1` literal counts unchanged.
 - **Touches:** `src/atomic_fs.rs`, `src/relocate.rs`, `tests/mv_xfs_tests.rs`,
   `tests/xfs-wire.sh`, `.github/workflows/test.yaml`, `AGENTS.md`, `doc/xdu-mv.1.scd`,
   `issues/xdu-mv-quarantine-unlink.md`, `ROADMAP.md`.

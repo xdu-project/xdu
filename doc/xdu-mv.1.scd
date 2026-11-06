@@ -28,7 +28,9 @@ it its bytes, owner, group, permission bits and times. An existing file at a
 destination is never replaced or truncated: it is skipped, counted, left
 untouched, and makes the run exit non-zero; the source stays where it was.
 
-This build moves files within one filesystem only; see _CROSSING FILESYSTEMS_.
+A file whose destination is on another filesystem cannot be renamed there.
+It is copied instead, flushed to stable storage, checked against its source,
+and only then removed from its source; see _CROSSING FILESYSTEMS_.
 
 *xdu-mv* moves only a regular file at the indexed path, on every run, with or
 without *--safe*. It follows no symlink, neither at the path nor in any
@@ -157,24 +159,70 @@ block size when you combine it with *--safe*.
 The check and the rename are two steps. An object put in place of the file
 at the same name between them is renamed as itself: a rename never follows a
 symlink, so nothing outside the selected path is reached, but whatever holds
-the name at that instant is what moves.
+the name at that instant is what moves. A file that has to be copied to
+another filesystem is checked again against the metadata of the very file
+opened for the copy.
 
 # CROSSING FILESYSTEMS
 
-A rename cannot cross filesystems. This build does not copy a file to
-another filesystem: a file whose destination is on a different filesystem
-from its source is not moved, is reported on standard error as "crossing
-filesystems is not supported by this build", is counted as failed, and stays
-at its source untouched. Directories already created for it under *--into*
-remain. Use *xdu-cp*(1) to copy such files.
+A rename cannot cross filesystems. When the kernel answers a rename by
+saying the destination is on another filesystem, *xdu-mv* moves that file by
+copying it there and then removing its source. The rename's answer decides,
+not a comparison of device numbers, which agree across a bind mount and can
+differ within one filesystem. For each such file, *xdu-mv*:
+
+- opens the source, refusing anything but a regular file, and checks that
+  this user may remove names from its directory, failing the file before
+  anything is copied if not;
+- copies its bytes to a temporary file in the destination directory, under
+  a name of the form .xdu-PID-SEQ-RANDOM.part, and gives the copy the
+  source's owner and group where permitted, its permission bits, and its
+  access and modification times;
+- flushes the copy to stable storage, checks that the source's size,
+  modification time and change time did not move while it was read, and
+  gives the copy its final name with a rename that refuses to replace
+  anything;
+- flushes the destination directory;
+- checks that the source name still holds the file it opened, with the same
+  size, modification time and change time;
+- removes the source name, and flushes the source directory.
+
+The source is removed only after both flushes have returned, so an
+interruption at any point (a crash, a power loss, a kill) leaves each file
+whole at its source, at its destination, or at both, never at neither and
+never partial at a final name. Each move to another filesystem waits for two
+flushes, a few milliseconds each on a local disk, so many small files move
+markedly slower across filesystems than within one.
+
+A source written while it was copied, or changed or replaced before its
+removal, is skipped and counted, its copy is removed, and it stays at its
+source. A source that cannot be removed (a read-only filesystem, or a sticky
+directory and a file this user does not own) is counted as failed with the
+cause on standard error; its copy is removed and it stays at its source,
+since a copy left beside its source would read as an existing destination
+on a re-run. A source that disappears after it was copied and before it was
+removed is counted as failed and its copy is kept, the only whole instance
+left. A rename carries ownership with the inode; a copy carries it only where
+permitted, and a refusal is counted as *Ownership not preserved*, as in
+*xdu-cp*(1), not as a failure.
+
+The checks narrow some races but cannot close them. A write between the last
+check and the removal is lost with the source. A process holding the source
+open for writing keeps writing to the removed file. A writer through a shared
+memory map may not move the modification time, and a same-size rewrite
+within one tick of the filesystem clock moves neither time. A different file
+renamed onto the source name, inside its directory, between the last check
+and the removal is removed in its place. Do not move files that are still
+being written.
 
 On a filesystem without a rename that refuses to replace (NFS and some FUSE
 filesystems), *xdu-mv* links the file at its destination, flushes the
 destination directory, checks that the source name still holds the same
-file, and only then removes the source name. An interruption between the
-link and the removal leaves the file under both names, one inode. A
-destination that supports neither that rename nor hard links fails each file
-with a message.
+file, and only then removes the source name; a copy to another filesystem
+publishes its temporary file the same way. An interruption between the link
+and the removal leaves the file under both names, one inode. A destination
+that supports neither that rename nor hard links fails each file with a
+message.
 
 # INDEX AND ACCESS TIMES
 
@@ -187,7 +235,8 @@ Reading a source may update its atime under the mount's options (*relatime*,
 *--older-than* selection made from a new index, or fail a later *--safe*
 re-check of *--older-than* against an older index. A move within one
 filesystem is a rename and reads no file, so it leaves each file's access time
-as it was.
+as it was. A move to another filesystem reads the source, and gives the copy
+the access time the source had before that read.
 
 # DESTINATION LAYOUT
 
@@ -226,18 +275,22 @@ other outcome that occurred, each counted separately:
 - *Missing*: nothing at the indexed path, or a directory above it is gone;
 - *Existing at destination*: something already held the destination name,
   and both it and the source were left untouched;
-- *Skipped*: not a regular file, or no longer matching a filter under
-  *--safe*; the source stays;
+- *Skipped*: not a regular file, no longer matching a filter under
+  *--safe*, or changed while it was copied to another filesystem; the
+  source stays;
 - *Failed*: an error, reported on standard error with the path and cause;
   the source stays.
 
-A move carries the file's owner and group with its inode, so the
-*Ownership not preserved* count of *xdu-cp*(1) does not occur here.
+- *Ownership not preserved*: moved to another filesystem, where the copy
+  could not be given the source's owner or group; not a failure.
+
+A rename carries the file's owner and group with its inode, so only a move
+to another filesystem can be counted as *Ownership not preserved*.
 
 The *-v* listing prints one line per file in path order: "moved: SOURCE ->
-DESTINATION", "existing: DESTINATION", "missing: SOURCE" or "skipped
-(REASON): SOURCE". The confirmation prompt, warnings and every failure go to
-standard error.
+DESTINATION", "moved (ownership not preserved): SOURCE -> DESTINATION",
+"existing: DESTINATION", "missing: SOURCE" or "skipped (REASON): SOURCE".
+The confirmation prompt, warnings and every failure go to standard error.
 
 # EXIT STATUS
 
@@ -250,6 +303,15 @@ standard error.
 	refused before anything was written. A re-run after an interrupted
 	move therefore reports the files already moved as missing, and exits
 	non-zero for any whose destination is taken.
+
+# FILES
+
+A copy to another filesystem lives in its destination directory under a name
+of the form .xdu-PID-SEQ-RANDOM.part until it is complete. A failed copy
+removes it; an interrupted run can leave one behind, never a partial file at
+a final name. Find leftovers with
+
+	find INTO -name '.xdu-\*.part'
 
 # ENVIRONMENT
 
