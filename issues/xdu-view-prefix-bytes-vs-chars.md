@@ -1,5 +1,5 @@
 ---
-status: unshaped
+status: shaped on fix/xdu-view-prefix-bytes-vs-chars (2026-11-06) — see spec/xdu-view-prefix-bytes-vs-chars/GOAL.md
 kind: fix
 appetite: small
 ---
