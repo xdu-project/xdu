@@ -3,7 +3,7 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: blocked
+status: done
 branch: feature/s3-index-target
 base: main
 current_phase: done
