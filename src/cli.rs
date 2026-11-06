@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser};
 
 /// Arguments for `xdu` — the filesystem indexer.
 #[derive(Parser, Debug)]
@@ -263,4 +263,114 @@ pub struct XduRmArgs {
     /// Number of parallel threads for deletion
     #[arg(short, long, default_value = "4", env = "XDU_JOBS")]
     pub jobs: usize,
+}
+
+/// The selection every select-then-act tool shares: `xdu-find`'s filters, in its order and
+/// wording, then `xdu-rm`'s action flags.
+///
+/// Flattened into each tool's own arguments, so the flags are declared once and clap renders
+/// them exactly as if written inline. `-f` is `--force` here, as in `xdu-rm`, not `xdu-find`'s
+/// `--format`.
+#[derive(Args, Debug, Clone)]
+pub struct SelectArgs {
+    /// Path to the Parquet index directory
+    #[arg(short, long, value_name = "DIR", env = "XDU_INDEX")]
+    pub index: PathBuf,
+
+    /// Glob pattern to match paths (e.g., '*.py'); see --regex for regular expressions
+    #[arg(short, long, value_name = "PATTERN")]
+    pub pattern: Option<String>,
+
+    /// Interpret --pattern as a regular expression instead of a glob
+    #[arg(long)]
+    pub regex: bool,
+
+    /// Filter by partition (user directory name)
+    #[arg(short = 'u', long, value_name = "NAME")]
+    pub partition: Option<String>,
+
+    /// Minimum file size (e.g., 1K, 10M, 1G)
+    #[arg(long, value_name = "SIZE")]
+    pub min_size: Option<String>,
+
+    /// Maximum file size (e.g., 1K, 10M, 1G)
+    #[arg(long, value_name = "SIZE")]
+    pub max_size: Option<String>,
+
+    /// Files not accessed in N days
+    #[arg(long, value_name = "DAYS")]
+    pub older_than: Option<u64>,
+
+    /// Files accessed within N days
+    #[arg(long, value_name = "DAYS")]
+    pub newer_than: Option<u64>,
+
+    /// Files owned by this user (name or numeric uid)
+    #[arg(long, value_name = "USER")]
+    pub owner: Option<String>,
+
+    /// Files owned by this group (name or numeric gid)
+    #[arg(long, value_name = "GROUP")]
+    pub group: Option<String>,
+
+    /// Permission filter: bare octal matches exactly (644), /OCTAL matches when
+    /// any listed bit is set (/002), &OCTAL when all are (&4000)
+    #[arg(long, value_name = "SPEC")]
+    pub mode: Option<String>,
+
+    /// Files not modified in N days
+    #[arg(long, value_name = "DAYS")]
+    pub mtime_older_than: Option<u64>,
+
+    /// Files modified within N days
+    #[arg(long, value_name = "DAYS")]
+    pub mtime_newer_than: Option<u64>,
+
+    /// Act on at most N files, the N whose paths sort first
+    #[arg(short, long)]
+    pub limit: Option<usize>,
+
+    /// Show each source and its destination without writing anything
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+
+    /// Re-check every given filter against each file's live metadata before acting on it
+    #[arg(long)]
+    pub safe: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub force: bool,
+
+    /// List each file and its outcome
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// Number of parallel threads
+    #[arg(short, long, default_value = "4", env = "XDU_JOBS")]
+    pub jobs: usize,
+}
+
+/// Arguments for `xdu-cp` — the bulk copy tool.
+#[derive(Parser, Debug)]
+#[command(
+    name = "xdu-cp",
+    version,
+    about = "Copy files matching index query criteria into a directory tree",
+    after_help = "Examples:
+  xdu-cp -i /index/scratch -u alice --older-than 365 --into /stage --root /scratch -n
+  xdu-cp -i /index/scratch -p '*.log' --into /stage --root /scratch --force
+  xdu-cp -i /index/scratch --min-size 1G --into /stage -v"
+)]
+pub struct XduCpArgs {
+    #[command(flatten)]
+    pub select: SelectArgs,
+
+    /// Existing directory to copy into; each file lands at DIR/<its path relative to --root>
+    #[arg(long, value_name = "DIR")]
+    pub into: PathBuf,
+
+    /// Prefix stripped from each indexed path to form its place under --into
+    #[arg(long, value_name = "DIR", default_value = "/")]
+    pub root: PathBuf,
 }

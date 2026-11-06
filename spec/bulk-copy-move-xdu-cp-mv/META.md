@@ -29,3 +29,15 @@
   to `allowed-tools`; keep `git switch -c` as the single-checkout fallback, and fold in F2's
   pre-flight change.
 - **Confidence:** high · **Effort:** small
+
+## F2 — The plan's rename ban `fs::copy` matches the plan's own `atomic_fs::copy_atomic`
+`origin=xdu-build:P1 severity=low category=tooling status=open target=.agents/skills/xdu-plan/SKILL.md`
+- **What happened:** Every code phase's gate greps the new files for `fs::copy` to ban
+  `std::fs::copy`. PLAN names the primitive `copy_atomic` in the module `atomic_fs`, so the
+  natural call `atomic_fs::copy_atomic(...)` in `relocate.rs` turned the ban red with no
+  replacing copy anywhere. The build renamed the call site (an unqualified import) to pass.
+- **Skill cause:** `xdu-plan` writes text bans without a word boundary and without checking them
+  against the identifiers its own design introduces, so a gate can fail on a name it chose.
+- **Recommended fix:** In `xdu-plan`, anchor ban patterns on a boundary (`(^|[^_[:alnum:]])fs::copy\(`)
+  and dry-run each ban against the PLAN's named identifiers before storing the gate.
+- **Confidence:** high · **Effort:** small

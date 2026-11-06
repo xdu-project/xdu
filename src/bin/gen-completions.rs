@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use clap::CommandFactory;
 use clap_complete::aot::{Bash, Zsh, generate_to};
 
-use xdu::cli::{XduArgs, XduFindArgs, XduRmArgs, XduViewArgs};
+use xdu::cli::{XduArgs, XduCpArgs, XduFindArgs, XduRmArgs, XduViewArgs};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -31,6 +31,7 @@ fn main() {
         ("xdu-find", XduFindArgs::command),
         ("xdu-view", XduViewArgs::command),
         ("xdu-rm", XduRmArgs::command),
+        ("xdu-cp", XduCpArgs::command),
     ];
 
     for (name, command_fn) in &binaries {
