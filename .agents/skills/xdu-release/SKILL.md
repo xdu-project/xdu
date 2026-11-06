@@ -162,8 +162,13 @@ at the intended commit; the Step 4 bump commit and the Step 6 tag land here. (Th
 3. **HPCCM recipe tracks the release.** Bump `VERSION` in `hpccm/xdu.py` to `X.Y.Z` (strip
    the leading `v`; the recipe re-adds it), regenerate from `hpccm/` with `make -B`
    (requires `hpccm` on `PATH` — `pipx install 'hpccm==26.5.0'`), and confirm the spec diff
-   shows only version lines. Unlike `share/`, the specs are committed artifacts, so they ride
-   the bump commit; CI (`make check` in the packaging job) asserts freshness.
+   shows only version lines. **Extension guard:** from 0.6.0 (`FIRST_WITH_LIB` in `xdu.py`) the
+   recipe's smoke step also runs `test -f {prefix}/lib/xdu/extensions/httpfs.duckdb_extension`;
+   confirm both regenerated specs still carry that line. A release that drops it ships an image
+   that builds green and fails at its first S3 query. The guard checks `httpfs` alone; if
+   `xdu::engine::PINNED_EXTENSIONS` grows, extend it to every pinned name. Unlike `share/`, the
+   specs are committed artifacts, so they ride the bump commit; CI (`make check` in the packaging
+   job) asserts freshness.
 4. **Man pages + completions rebuild only if the CLI changed.** The `doc/*.scd` sources carry no
    version string and completions derive from `src/cli.rs`, so a pure version bump touches neither —
    and `share/` is generated in CI (`release.yaml`) regardless and is git-ignored (do not commit it).
@@ -172,7 +177,8 @@ at the intended commit; the Step 4 bump commit and the Step 6 tag land here. (Th
    doc/NAME.1.scd > share/man/man1/NAME.1` and `cargo run --release --bin gen-completions …`.
 5. **Verify** `git diff` shows ONLY the version bump: `Cargo.toml` (the version line),
    `Cargo.lock` (the `xdu` version), `hpccm/xdu.py` (the `VERSION` line), and the regenerated
-   `hpccm/xdu.def` + `hpccm/xdu.docker` (version lines only).
+   `hpccm/xdu.def` + `hpccm/xdu.docker` (version lines only; the extension guard's `test -f`
+   stays in both).
 6. Commit `[release] Bump version to vX.Y.Z`, staging **exactly** these files: `Cargo.toml`,
    `Cargo.lock`, `hpccm/xdu.py`, `hpccm/xdu.def`, `hpccm/xdu.docker`.
    **No `Co-Authored-By` trailer.**
