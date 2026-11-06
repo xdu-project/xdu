@@ -9,7 +9,8 @@
 Installs the four xdu binaries, plus man pages and shell completions, from
 the upstream release tarball. The tarball is extracted whole into the prefix,
 so a release that ships DuckDB extensions puts its lib/xdu/extensions/ beside
-bin/, where the binaries look for them. The download runs in a throwaway
+bin/, where the binaries look for them; from 0.6.0 on, the build fails if the
+extensions are not there. The download runs in a throwaway
 first stage, checked against the published SHA256SUMS, so curl stays out of
 the finished image. Both stages use the same Debian or Ubuntu base image,
 which must have apt.
@@ -38,7 +39,11 @@ PROJECT = 'https://github.com/xdu-project/xdu'
 DIST = '/xdu-dist.tar.gz'      # the one file stage 0 hands to stage 1
 
 # Release tag to install; override with --userarg version=1.2.3
-VERSION = '0.5.2'
+VERSION = '0.6.0'
+
+# First release whose tarball carries lib/xdu/extensions/. Older releases
+# build without the extension check, so version= can still point at them.
+FIRST_WITH_LIB = (0, 6, 0)
 
 # hpccm cannot infer a debian: image's distro and warns; ubuntu selects apt.
 DISTRO = 'ubuntu'
@@ -95,10 +100,17 @@ Stage1 += shell(commands=[
 
 # Running each binary fails the build on a base image whose glibc is too old,
 # instead of shipping an image that dies at first exec.
-Stage1 += shell(commands=['{}/xdu --version'.format(bindir),
-                          '{}/xdu-find --version'.format(bindir),
-                          '{}/xdu-view --version'.format(bindir),
-                          '{}/xdu-rm --version'.format(bindir)])
+smoke = ['{}/xdu --version'.format(bindir),
+         '{}/xdu-find --version'.format(bindir),
+         '{}/xdu-view --version'.format(bindir),
+         '{}/xdu-rm --version'.format(bindir)]
+# The binaries load the pinned extensions from beside bin/ with no download
+# fallback, so a tarball without lib/ would build an image whose first S3
+# query fails. .release drops any -rc suffix, so 0.6.0-rc.N is checked too.
+if Version(version[1:]).release >= FIRST_WITH_LIB:
+    smoke.append('test -f {}/lib/xdu/extensions/httpfs.duckdb_extension'
+                 .format(prefix))
+Stage1 += shell(commands=smoke)
 Stage1 += environment(variables={
     'PATH': '{}:$PATH'.format(bindir),
     'MANPATH': '{}:$MANPATH'.format(mandir),

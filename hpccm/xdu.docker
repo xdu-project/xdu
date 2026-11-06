@@ -6,14 +6,14 @@ RUN apt-get update -y && \
         curl && \
     rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL -o /xdu-dist.tar.gz "https://github.com/xdu-project/xdu/releases/download/v0.5.2/xdu-v0.5.2-$(uname -m)-unknown-linux-gnu.tar.gz" && \
-    curl -fsSL -o /xdu-SHA256SUMS "https://github.com/xdu-project/xdu/releases/download/v0.5.2/SHA256SUMS" && \
-    expected=$(grep -F "xdu-v0.5.2-$(uname -m)-unknown-linux-gnu.tar.gz" /xdu-SHA256SUMS | cut -d" " -f1) && [ -n "$expected" ] && echo "$expected  /xdu-dist.tar.gz" | sha256sum -c - && rm -f /xdu-SHA256SUMS
+RUN curl -fsSL -o /xdu-dist.tar.gz "https://github.com/xdu-project/xdu/releases/download/v0.6.0/xdu-v0.6.0-$(uname -m)-unknown-linux-gnu.tar.gz" && \
+    curl -fsSL -o /xdu-SHA256SUMS "https://github.com/xdu-project/xdu/releases/download/v0.6.0/SHA256SUMS" && \
+    expected=$(grep -F "xdu-v0.6.0-$(uname -m)-unknown-linux-gnu.tar.gz" /xdu-SHA256SUMS | cut -d" " -f1) && [ -n "$expected" ] && echo "$expected  /xdu-dist.tar.gz" | sha256sum -c - && rm -f /xdu-SHA256SUMS
 
 FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source=https://github.com/xdu-project/xdu \
-    org.opencontainers.image.version=v0.5.2
+    org.opencontainers.image.version=v0.6.0
 
 RUN apt-get update -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -30,7 +30,8 @@ RUN mkdir -p /opt/xdu && \
 RUN /opt/xdu/bin/xdu --version && \
     /opt/xdu/bin/xdu-find --version && \
     /opt/xdu/bin/xdu-view --version && \
-    /opt/xdu/bin/xdu-rm --version
+    /opt/xdu/bin/xdu-rm --version && \
+    test -f /opt/xdu/lib/xdu/extensions/httpfs.duckdb_extension
 
 ENV MANPATH=/opt/xdu/share/man:$MANPATH \
     PATH=/opt/xdu/bin:$PATH
