@@ -126,6 +126,17 @@ wider than it found it.
   above the crawled root, reaches the S3 arm. The existing wire harness (`tests/s3_tests.rs`,
   `view_quotes_in_the_prefix_and_a_directory_match_local` and siblings) is the place (resolved at
   shaping 2026-11-06).
+- **Q:** Does the fix bind the directory prefix, or count it in code points? — **A:** Count it in
+  code points: the prefix length passed to SQL is the number of Unicode scalar values DuckDB's
+  `substr` counts, still a Rust integer. Binding the local prefix is out of scope for this small
+  fix: it would move the recorded §5 exception, which belongs to
+  `local-reader-bound-parameters`. Ruled by the foreman at the GOAL gate (resolved 2026-11-06).
+- **Q:** Do `substr` and `length` count code points on the bundled DuckDB? — **A:** The plan
+  SHALL confirm it on the pinned 1.4.4 by execution, not by documentation or a newer DuckDB, before
+  the design relies on it. Ruled by the foreman at the GOAL gate (resolved 2026-11-06).
+- **Q:** Is `LIKE` `_`/`%` over-matching in the directory filter in scope? — **A:** No. The plan
+  checks it on 1.4.4; if it reproduces, it is filed as a seed with a `ROADMAP.md` entry, not fixed
+  here. Ruled by the foreman at the GOAL gate (resolved 2026-11-06).
 
 ## Related materials
 
