@@ -66,10 +66,10 @@ phases:
     cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
     -- --check; echo P2-GATE-GREEN'
 review:
-  last_reviewed_commit: ''
-  verdict: none
+  last_reviewed_commit: 30b7f6981876df835391b17aad1f0b88dcdb33dd
+  verdict: approved
   blocked_reason: ''
-  cycle: 0
+  cycle: 1
 ---
 # TECH.md — `xdu-view` lists full child names under a non-ASCII directory
 

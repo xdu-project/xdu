@@ -47,7 +47,7 @@ is skipped by the parser):
 - **Recommended fix:** promote a generic `red_on_base.sh BASE TEST TOKEN -- CARGO_ARGS` into `.agents/factory/bin/` and name it in Step 6 for `kind: fix`.
 - **Confidence:** med · **Effort:** small
 
-## F3 — A red gate that shares one target dir can test the wrong tree
+## F3 — A red gate that shares one target dir can test the wrong tree · seen again (xdu-review:step2)
 `origin=xdu-build:P2 severity=high category=tooling status=open target=.agents/factory/bin/ (the F2 helper)`
 - **What happened:** `verify/red.sh` builds every red tree into one `target/red-target`. Cargo
   keys a path package by paths relative to its root, so every tree gets the same hashes. `git
@@ -60,4 +60,37 @@ is skipped by the parser):
 - **Recommended fix:** the promoted `red_on_base.sh` (F2) stamps every extracted file before
   building and requires a `Compiling <crate> v` line in its log. Its report names the directory
   the test failed under, so a reviewer can tell base from mutant.
+- **Confidence:** high · **Effort:** small
+
+## F4 — The red gate's `Compiling xdu v` guard cannot see a reused library
+`origin=xdu-review:3 severity=medium category=tooling status=open target=.agents/factory/bin/ (the F2 helper)`
+- **What happened:** to check F3's hardening, review removed only the `touch` line from a
+  scratch copy of `verify/red.sh` and ran `mutant-nofffd` then `base` into one target dir. The
+  `base` run reused the mutant's library: the `libxdu` rlib's mtime did not move, and the test
+  failed under `…/bad�name`, the mutant's signature, not under `…/données`. The gate still
+  printed `red: … fails on base`. Its log carried `Compiling xdu v0.6.0 (…/base.*/src)`, because
+  the `tests/` overlay is copied with fresh mtimes, so the test targets always recompile and
+  cargo prints the package's line whether or not the library did. With the `touch` in place the
+  gate is sound: the rlib was restamped and `base` failed under `…/données`.
+- **Skill cause:** F3's recommended fix names this guard as the backstop the promoted helper
+  carries, so promoting it as written ships a check that cannot fail in the case it exists for.
+  The script also accepts any directory holding `Cargo.toml` and `tests/` as the root, and
+  `git archive` run from a subdirectory archives only that subdirectory.
+- **Recommended fix:** in the F2 helper, keep the stamp and replace the guard with one that
+  sees the library: `cargo clean -p <crate>` in the shared target dir before each tree, or
+  require the library artifact's mtime to move. Take the root from
+  `git rev-parse --show-toplevel`. Amend F3's recommended fix to match.
+- **Confidence:** high · **Effort:** small
+
+## F5 — A repo-wide search walks the blind reviewer into `spec/`
+`origin=xdu-review:step2 severity=low category=steering status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** the blind reviewer ran a recursive search from the repository root, and its
+  output carried a few lines of `PLAN.md` and `TECH.md`: file and test names from `verify:`
+  commands, no rationale. It reported this itself, and no verdict depended on it.
+- **Skill cause:** Step 2 strips `spec/` from the diff and forbids reading the plan, but says
+  nothing about searches. On a committed branch, a bare `grep -r` or `rg` over the root reads
+  `spec/` as readily as `src/`.
+- **Recommended fix:** add to Step 2's conduct rule and the rubric's *Reviewer conduct*: search
+  with `git grep … -- . ':(exclude)spec/'` or `--exclude-dir=spec`, never a bare recursive search
+  of the root. This tightens blind-review integrity and weakens no gate.
 - **Confidence:** high · **Effort:** small
