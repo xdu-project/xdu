@@ -7,7 +7,7 @@
 mod common;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -650,4 +650,582 @@ fn cp_reports_failures_on_stderr_and_exits_non_zero() {
     assert!(out.contains("Failed: 1"), "{out}");
     assert_eq!(fs::read(fx.dest("alice")).unwrap().len(), 1);
     assert_eq!(fs::read(fx.dest("bob/b.txt")).unwrap().len(), 10);
+}
+
+// ---- Metadata, --safe and the counted summary ----
+
+fn meta(path: &Path) -> fs::Metadata {
+    fs::symlink_metadata(path).unwrap()
+}
+
+/// Set a path's atime and mtime to the given (seconds, nanoseconds), not following a symlink.
+#[allow(clippy::unnecessary_cast)]
+fn set_times(path: &Path, atime: (i64, i64), mtime: (i64, i64)) {
+    let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    let times = [
+        libc::timespec {
+            tv_sec: atime.0 as libc::time_t,
+            tv_nsec: atime.1 as _,
+        },
+        libc::timespec {
+            tv_sec: mtime.0 as libc::time_t,
+            tv_nsec: mtime.1 as _,
+        },
+    ];
+    // SAFETY: a valid C string and a two-element timespec array for the call.
+    let ret = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            c.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    assert_eq!(ret, 0, "utimensat {}", path.display());
+}
+
+fn chmod(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+fn chgrp(path: &Path, gid: u32) -> std::io::Result<()> {
+    std::os::unix::fs::lchown(path, None, Some(gid))
+}
+
+/// Every group the caller may give its own files: the effective group, then the
+/// supplementary ones, without repeats.
+fn my_groups() -> Vec<u32> {
+    // SAFETY: getegid cannot fail; getgroups with a zero size only counts.
+    let mut all = vec![unsafe { libc::getegid() }];
+    let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if n > 0 {
+        let mut buf = vec![0 as libc::gid_t; n as usize];
+        // SAFETY: `buf` holds `n` entries.
+        let got = unsafe { libc::getgroups(n, buf.as_mut_ptr()) };
+        for g in buf.into_iter().take(got.max(0) as usize) {
+            if !all.contains(&g) {
+                all.push(g);
+            }
+        }
+    }
+    all
+}
+
+/// The group a file newly created in `dir` gets (the directory's on BSD, the creator's on
+/// Linux), so a test can pick a different one and prove the copy carried it.
+fn default_group_in(dir: &Path) -> u32 {
+    let probe = dir.join(".group-probe");
+    create_test_file(&probe, 0).unwrap();
+    let gid = meta(&probe).gid();
+    fs::remove_file(&probe).unwrap();
+    gid
+}
+
+/// A group the caller belongs to other than `not`, if it has one.
+fn another_group(not: u32) -> Option<u32> {
+    my_groups().into_iter().find(|g| *g != not)
+}
+
+/// Give every source file the caller's own effective group, so carrying it cannot be refused
+/// (a temp directory's group can be one the caller is not in).
+fn own_group(fx: &Fixture) {
+    // SAFETY: getegid cannot fail.
+    let gid = unsafe { libc::getegid() };
+    for path in list_files_recursive(&fx.source) {
+        chgrp(&path, gid).unwrap();
+    }
+}
+
+/// The lines after the blank line that opens the summary.
+fn summary(stdout: &str) -> Vec<String> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let start = lines
+        .iter()
+        .rposition(|l| l.is_empty())
+        .map_or(0, |i| i + 1);
+    lines[start..].iter().map(|l| l.to_string()).collect()
+}
+
+#[test]
+fn cp_carries_bytes_mode_atime_and_mtime() {
+    let fx = Fixture::new(&[("u/a.bin", 5000), ("u/ro.txt", 10), ("u/x.sh", 7)]);
+    let cases = [
+        (
+            "u/a.bin",
+            0o640,
+            (1_600_000_000, 123_456_789),
+            (1_650_000_000, 987_654_321),
+        ),
+        (
+            "u/ro.txt",
+            0o444,
+            (1_500_000_000, 1),
+            (1_400_000_000, 999_999_999),
+        ),
+        (
+            "u/x.sh",
+            0o750,
+            (1_700_000_000, 0),
+            (1_700_000_100, 500_000_000),
+        ),
+    ];
+    for (rel, mode, atime, mtime) in cases {
+        chmod(&fx.src(rel), mode);
+        set_times(&fx.src(rel), atime, mtime);
+    }
+    own_group(&fx);
+    let fx = fx.build();
+    let (out, err, ok) = run_cp(&fx.args(&["--force"]));
+    assert!(ok, "{err}");
+    assert_eq!(summary(&out), ["Copied: 3"], "{out}");
+    for (rel, mode, atime, mtime) in cases {
+        // Metadata first: reading the copy's bytes may move its atime.
+        let d = meta(&fx.dest(rel));
+        assert!(d.file_type().is_file(), "{rel}");
+        assert_eq!(d.mode() & 0o7777, mode, "{rel}: mode");
+        assert_eq!((d.atime(), d.atime_nsec()), atime, "{rel}: atime");
+        assert_eq!((d.mtime(), d.mtime_nsec()), mtime, "{rel}: mtime");
+        assert_eq!(
+            fs::read(fx.dest(rel)).unwrap(),
+            fs::read(fx.src(rel)).unwrap(),
+            "{rel}: bytes"
+        );
+    }
+}
+
+#[test]
+fn cp_carries_owner_and_group_when_permitted() {
+    let fx = Fixture::new(&[("u/a.txt", 10), ("u/setid.bin", 12)]);
+    // Prefer a group a new file under --into would not get by itself, so a carried group is
+    // visible; fall back to the caller's own.
+    // SAFETY: getegid cannot fail.
+    let fallback = unsafe { libc::getegid() };
+    let gid = another_group(default_group_in(&fx.into)).unwrap_or(fallback);
+    for rel in ["u/a.txt", "u/setid.bin"] {
+        chgrp(&fx.src(rel), gid).unwrap();
+    }
+    chmod(&fx.src("u/setid.bin"), 0o6755);
+    let fx = fx.build();
+    let (out, err, ok) = run_cp(&fx.args(&["--force"]));
+    assert!(ok, "{err}");
+    assert_eq!(summary(&out), ["Copied: 2"], "{out}");
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    for rel in ["u/a.txt", "u/setid.bin"] {
+        let d = meta(&fx.dest(rel));
+        assert_eq!(d.uid(), uid, "{rel}: owner");
+        assert_eq!(d.gid(), gid, "{rel}: group");
+    }
+    // A sandbox can strip set-id bits on chmod; the source's own mode is what to carry.
+    let source_mode = meta(&fx.src("u/setid.bin")).mode() & 0o7777;
+    if source_mode & 0o6000 == 0 {
+        eprintln!("this host strips set-id bits on chmod; the set-id check runs on CI");
+    }
+    assert_eq!(
+        meta(&fx.dest("u/setid.bin")).mode() & 0o7777,
+        source_mode,
+        "set-id bits are kept when both ids were carried"
+    );
+}
+
+/// One filter's case: the flag, how to make the file match before indexing, and how to make
+/// it stop matching afterwards.
+struct SafeCase {
+    args: Vec<String>,
+    flag: &'static str,
+    before: Box<dyn Fn(&Path)>,
+    after: Box<dyn Fn(&Path)>,
+}
+
+fn safe_cases() -> Vec<SafeCase> {
+    let resize = |len: u64| {
+        move |p: &Path| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_len(len)
+                .unwrap()
+        }
+    };
+    let mode = |m: u32| move |p: &Path| chmod(p, m);
+    let atime = |d: u64| move |p: &Path| set_atime_days_ago(p, d).unwrap();
+    let mtime = |d: u64| move |p: &Path| set_mtime_days_ago(p, d).unwrap();
+    let case =
+        |args: &[&str], flag, before: Box<dyn Fn(&Path)>, after: Box<dyn Fn(&Path)>| SafeCase {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            flag,
+            before,
+            after,
+        };
+    let mut cases = vec![
+        case(
+            &["--min-size", "2K"],
+            "--min-size",
+            Box::new(resize(4096)),
+            Box::new(resize(100)),
+        ),
+        case(
+            &["--max-size", "64K"],
+            "--max-size",
+            Box::new(resize(100)),
+            Box::new(resize(200_000)),
+        ),
+        case(
+            &["--older-than", "30"],
+            "--older-than",
+            Box::new(atime(100)),
+            Box::new(atime(0)),
+        ),
+        case(
+            &["--newer-than", "30"],
+            "--newer-than",
+            Box::new(atime(0)),
+            Box::new(atime(100)),
+        ),
+        case(
+            &["--mtime-older-than", "30"],
+            "--mtime-older-than",
+            Box::new(mtime(100)),
+            Box::new(mtime(0)),
+        ),
+        case(
+            &["--mtime-newer-than", "30"],
+            "--mtime-newer-than",
+            Box::new(mtime(0)),
+            Box::new(mtime(100)),
+        ),
+        case(
+            &["--mode", "644"],
+            "--mode",
+            Box::new(mode(0o644)),
+            Box::new(mode(0o640)),
+        ),
+        case(
+            &["--mode", "/004"],
+            "--mode",
+            Box::new(mode(0o644)),
+            Box::new(mode(0o640)),
+        ),
+        case(
+            &["--mode", "&640"],
+            "--mode",
+            Box::new(mode(0o640)),
+            Box::new(mode(0o600)),
+        ),
+    ];
+    // A group change needs a second group the caller belongs to; `--owner` would need root to
+    // change a file's owner, so its live check is proven by the library's boundary grid.
+    let groups = my_groups();
+    if groups.len() >= 2 {
+        let (first, second) = (groups[0], groups[1]);
+        cases.push(case(
+            &["--group", &first.to_string()],
+            "--group",
+            Box::new(move |p: &Path| chgrp(p, first).unwrap()),
+            Box::new(move |p: &Path| chgrp(p, second).unwrap()),
+        ));
+    } else {
+        eprintln!("cp_safe: the caller has one group; the --group case runs where it has two");
+    }
+    cases
+}
+
+#[test]
+fn cp_safe_skips_a_file_that_no_longer_matches_each_filter() {
+    let cases = safe_cases();
+    assert!(cases.len() >= 9);
+    for case in cases {
+        let fx = Fixture::new(&[("u/changed.dat", 10), ("u/kept.dat", 10)]);
+        own_group(&fx);
+        for rel in ["u/changed.dat", "u/kept.dat"] {
+            (case.before)(&fx.src(rel));
+        }
+        let fx = fx.build();
+        let mut args: Vec<&str> = case.args.iter().map(String::as_str).collect();
+        args.push("-n");
+        let (out, _, ok) = run_cp(&fx.args(&args));
+        assert!(ok);
+        assert_eq!(
+            dry_run_sources(&out).len(),
+            2,
+            "{:?} selects both",
+            case.args
+        );
+
+        (case.after)(&fx.src("u/changed.dat"));
+        let mut args: Vec<&str> = case.args.iter().map(String::as_str).collect();
+        args.extend(["--safe", "--force", "-v"]);
+        let (out, err, ok) = run_cp(&fx.args(&args));
+        assert!(ok, "{:?}: {err}", case.args);
+        let line = format!(
+            "skipped (no longer matches {}): {}",
+            case.flag,
+            fx.src("u/changed.dat").display()
+        );
+        assert!(out.contains(&line), "{:?}: {out}", case.args);
+        assert_eq!(
+            summary(&out),
+            ["Copied: 1", "Skipped: 1"],
+            "{:?}: {out}",
+            case.args
+        );
+        assert_eq!(fx.copied(), ["u/kept.dat"], "{:?}", case.args);
+
+        // Without --safe the stale index row still selects it, so the skip was the re-check's.
+        args.retain(|a| *a != "--safe");
+        let (out, _, _) = run_cp(&fx.args(&args));
+        assert!(out.contains("Copied: 1"), "{:?}: {out}", case.args);
+        assert_eq!(
+            fx.copied(),
+            ["u/changed.dat", "u/kept.dat"],
+            "{:?}",
+            case.args
+        );
+    }
+}
+
+#[test]
+fn cp_safe_keeps_a_file_that_still_matches() {
+    let fx = Fixture::new(&[
+        ("alice/a.log", 4096),
+        ("alice/b.log", 6000),
+        ("bob/c.txt", 3000),
+    ]);
+    for path in list_files_recursive(&fx.source) {
+        chmod(&path, 0o644);
+        set_atime_days_ago(&path, 100).unwrap();
+        set_mtime_days_ago(&path, 100).unwrap();
+    }
+    own_group(&fx);
+    let fx = fx.build();
+    // SAFETY: getuid and getegid cannot fail.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let gid = unsafe { libc::getegid() }.to_string();
+
+    let every = [
+        "-p",
+        "*.log",
+        "--min-size",
+        "2K",
+        "--max-size",
+        "64K",
+        "--older-than",
+        "30",
+        "--newer-than",
+        "400",
+        "--owner",
+        &uid,
+        "--group",
+        &gid,
+        "--mode",
+        "644",
+        "--mtime-older-than",
+        "30",
+        "--mtime-newer-than",
+        "400",
+        "--safe",
+        "--force",
+    ];
+    let (out, err, ok) = run_cp(&fx.args(&every));
+    assert!(ok, "{err}");
+    assert_eq!(summary(&out), ["Copied: 2"], "{out}");
+    assert_eq!(fx.copied(), ["alice/a.log", "alice/b.log"]);
+
+    // With no filter, --safe still copies every regular file.
+    let (out, err, ok) = run_cp(&fx.args(&["--safe", "--force"]));
+    assert!(!ok, "the two copies above now exist: {err}");
+    assert_eq!(
+        summary(&out),
+        ["Copied: 1", "Existing at destination: 2"],
+        "{out}"
+    );
+    assert_eq!(fx.copied(), ["alice/a.log", "alice/b.log", "bob/c.txt"]);
+}
+
+#[test]
+fn cp_safe_skips_a_file_replaced_by_a_symlink() {
+    let fx = Fixture::new(&[("u/a.txt", 3000), ("u/b.txt", 3000)]).build();
+    let lookalike = fx.source.with_file_name("lookalike.txt");
+    create_test_file(&lookalike, 3000).unwrap();
+    fs::remove_file(fx.src("u/b.txt")).unwrap();
+    std::os::unix::fs::symlink(&lookalike, fx.src("u/b.txt")).unwrap();
+
+    let (out, err, ok) = run_cp(&fx.args(&["--min-size", "2K", "--safe", "--force", "-v"]));
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!(
+            "skipped (not a regular file): {}",
+            fx.src("u/b.txt").display()
+        )),
+        "{out}"
+    );
+    assert_eq!(summary(&out), ["Copied: 1", "Skipped: 1"], "{out}");
+    assert_eq!(fx.copied(), ["u/a.txt"]);
+    assert!(fs::symlink_metadata(fx.dest("u/b.txt")).is_err());
+}
+
+#[test]
+fn cp_summary_counts_each_outcome_separately() {
+    let fx = Fixture::new(&[
+        ("u/ok1", 10),
+        ("u/ok2", 10),
+        ("u/gone", 10),
+        ("u/exists", 10),
+        ("u/fifo", 10),
+        ("u/touched", 10),
+        ("v/blocked", 10),
+    ]);
+    for path in list_files_recursive(&fx.source) {
+        set_mtime_days_ago(&path, 100).unwrap();
+    }
+    own_group(&fx);
+    let fx = fx.build();
+    fs::remove_file(fx.src("u/gone")).unwrap();
+    fs::create_dir_all(fx.dest("u")).unwrap();
+    create_test_file(&fx.dest("u/exists"), 1).unwrap();
+    fs::remove_file(fx.src("u/fifo")).unwrap();
+    mkfifo(&fx.src("u/fifo"));
+    set_mtime_days_ago(&fx.src("u/touched"), 0).unwrap();
+    create_test_file(&fx.dest("v"), 1).unwrap();
+
+    let (out, err, ok) = run_cp(&fx.args(&["--mtime-older-than", "30", "--safe", "--force"]));
+    assert!(!ok, "a failure and an existing destination exit non-zero");
+    assert_eq!(
+        summary(&out),
+        [
+            "Copied: 2",
+            "Missing: 1",
+            "Existing at destination: 1",
+            "Skipped: 2",
+            "Failed: 1"
+        ],
+        "{out}"
+    );
+    assert!(
+        err.contains(&format!("xdu-cp: {}:", fx.src("v/blocked").display())),
+        "{err}"
+    );
+    assert_eq!(
+        err.lines().filter(|l| l.starts_with("xdu-cp: ")).count(),
+        1,
+        "{err}"
+    );
+
+    // Missing and skipped files alone are not failures.
+    let quiet = Fixture::new(&[("u/a", 10), ("u/b", 10)]).build();
+    fs::remove_file(quiet.src("u/a")).unwrap();
+    fs::remove_file(quiet.src("u/b")).unwrap();
+    mkfifo(&quiet.src("u/b"));
+    let (out, err, ok) = run_cp(&quiet.args(&["--force"]));
+    assert!(ok, "{err}");
+    assert_eq!(
+        summary(&out),
+        ["Copied: 0", "Missing: 1", "Skipped: 1"],
+        "{out}"
+    );
+}
+
+#[test]
+fn cp_never_modifies_a_source() {
+    let fx = Fixture::new(&[("u/a.bin", 70_000), ("u/b.txt", 10), ("v/c.txt", 10)]);
+    chmod(&fx.src("u/a.bin"), 0o4750);
+    set_times(&fx.src("u/b.txt"), (1_600_000_000, 5), (1_600_000_000, 7));
+    own_group(&fx);
+    let fx = fx.build();
+    fs::create_dir_all(fx.dest("u")).unwrap();
+    create_test_file(&fx.dest("u/b.txt"), 1).unwrap();
+    create_test_file(&fx.dest("v"), 1).unwrap();
+
+    let snapshot = |rel: &str| {
+        let m = meta(&fx.src(rel));
+        (
+            (m.ino(), m.nlink(), m.len(), m.mode(), m.uid(), m.gid()),
+            (m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()),
+            fs::read(fx.src(rel)).unwrap(),
+        )
+    };
+    let rels = ["u/a.bin", "u/b.txt", "v/c.txt"];
+    let before: Vec<_> = rels.iter().map(|r| snapshot(r)).collect();
+    for extra in [vec!["--force"], vec!["--safe", "--force", "-v"]] {
+        let (out, _, ok) = run_cp(&fx.args(&extra));
+        assert!(!ok, "an existing destination and a failure: {out}");
+        let after: Vec<_> = rels.iter().map(|r| snapshot(r)).collect();
+        assert_eq!(after, before, "{extra:?}: a source changed");
+    }
+    assert_eq!(fs::read(fx.dest("u/a.bin")).unwrap(), before[0].2);
+    assert_eq!(fs::read(fx.dest("u/b.txt")).unwrap().len(), 1);
+}
+
+#[test]
+fn cp_keeps_diagnostics_off_stdout() {
+    let fx = Fixture::new(&[("u/a.txt", 10), ("u/fifo", 10), ("v/blocked", 10)]);
+    own_group(&fx);
+    let fx = fx.build();
+    // A marker recording tolerated errors: the index is read, with a warning.
+    let marker = fx.index.join(".xdu-complete");
+    let body = fs::read_to_string(&marker).unwrap();
+    assert!(body.contains("errors=0\n"), "{body}");
+    fs::write(&marker, body.replace("errors=0\n", "errors=2\n")).unwrap();
+    fs::remove_file(fx.src("u/fifo")).unwrap();
+    mkfifo(&fx.src("u/fifo"));
+    create_test_file(&fx.dest("v"), 1).unwrap();
+
+    let (out, err, ok) = run_cp(&fx.args(&["--force", "--safe"]));
+    assert!(!ok);
+    assert_eq!(
+        out, "\nCopied: 1\nSkipped: 1\nFailed: 1\n",
+        "stdout holds the summary alone; stderr: {err}"
+    );
+    assert!(err.contains("2 tolerated error(s)"), "{err}");
+    assert!(
+        err.contains(&format!("xdu-cp: {}: ", fx.src("v/blocked").display())),
+        "{err}"
+    );
+
+    let (out, err, _) = run_with_stdin("xdu-cp", &fx.args(&["-v"]), Some("y\n"));
+    assert!(err.contains("[y/N] "), "{err}");
+    for line in out.lines().filter(|l| !l.is_empty()) {
+        let listing = ["copied", "existing:", "missing:", "skipped"]
+            .iter()
+            .any(|p| line.starts_with(p));
+        let counted =
+            line.contains(": ") && line.split(": ").nth(1).unwrap().parse::<u64>().is_ok();
+        assert!(listing || counted, "unexpected stdout line {line:?}");
+    }
+    assert!(!out.contains("not a directory"), "{out}");
+    assert!(!out.contains("warning"), "{out}");
+}
+
+#[test]
+fn cp_verbose_lists_in_path_order() {
+    let mut names = Vec::new();
+    for p in ["c", "a", "b"] {
+        for f in ["z", "m", "a", "q", "k", "b", "y", "d", "x", "e"] {
+            names.push(format!("{p}/{f}.txt"));
+        }
+    }
+    let files: Vec<(&str, usize)> = names.iter().map(|n| (n.as_str(), 16)).collect();
+    let fx = Fixture::new(&files);
+    own_group(&fx);
+    let fx = fx.build();
+    let (out, err, ok) = run_cp(&fx.args(&["--force", "-v", "-j", "8"]));
+    assert!(ok, "{err}");
+    let listed: Vec<String> = out
+        .lines()
+        .filter_map(|l| l.strip_prefix("copied: "))
+        .map(|l| l.split_once(" -> ").unwrap().0.to_string())
+        .collect();
+    let mut expected: Vec<String> = names
+        .iter()
+        .map(|n| fx.src(n).display().to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(listed, expected);
+    for line in out.lines().filter(|l| l.starts_with("copied: ")) {
+        let (src, dest) = line["copied: ".len()..].split_once(" -> ").unwrap();
+        let rel = Path::new(src).strip_prefix(&fx.source).unwrap();
+        assert_eq!(Path::new(dest), fx.into.join(rel));
+    }
+    assert_eq!(summary(&out), ["Copied: 30"]);
 }

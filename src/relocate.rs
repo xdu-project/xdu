@@ -14,10 +14,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 
 use crate::atomic_fs::{
-    self, DirHandle, ParentCache, Placed, Source, components, copy_atomic, is_not_a_directory,
+    self, DirHandle, ParentCache, Placed, Source, Stat, components, copy_atomic, is_not_a_directory,
 };
 use crate::cli::XduCpArgs;
-use crate::select::{Row, select};
+use crate::select::{Live, Row, Verdict, holds_live, select};
+use crate::{QueryFilters, SizeMode};
 
 /// Rows handed to the pool at a time. Each chunk's outcomes come back in index order, so
 /// output streams and stays deterministic while the pool works.
@@ -204,9 +205,37 @@ struct Anchors {
     into: DirHandle,
 }
 
+/// What `--safe` re-checks each file against: the filters the rows were selected by, and the
+/// size measure the index records, if it records one.
+#[derive(Clone, Copy, Debug)]
+pub struct SafeCheck<'a> {
+    pub filters: &'a QueryFilters,
+    pub size_mode: Option<SizeMode>,
+}
+
+/// The `--safe` view of an object's `lstat`-semantics metadata.
+fn live(stat: &Stat) -> Live {
+    Live {
+        regular: stat.is_regular(),
+        length: stat.size,
+        disk_usage: stat.blocks.saturating_mul(512),
+        uid: stat.uid,
+        gid: stat.gid,
+        mode: stat.mode & 0o7777,
+        atime: stat.atime,
+        mtime: stat.mtime,
+    }
+}
+
 /// Copy one planned file: walk to its source without following a symlink, open it only if it
-/// is a regular file, walk to (creating) its destination directory, and place it atomically.
-fn copy_one(anchors: &Anchors, worker: &mut Worker, item: &Planned) -> Outcome {
+/// is a regular file, re-check it under `--safe` against the `fstat` of the very descriptor
+/// the copy reads, walk to (creating) its destination directory, and place it atomically.
+fn copy_one(
+    anchors: &Anchors,
+    worker: &mut Worker,
+    item: &Planned,
+    safe: Option<SafeCheck<'_>>,
+) -> Outcome {
     let (Some(parent), Some(name)) = (item.source.parent(), item.source.file_name()) else {
         return Outcome::Failed("not a file path".to_string());
     };
@@ -226,6 +255,13 @@ fn copy_one(anchors: &Anchors, worker: &mut Worker, item: &Planned) -> Outcome {
         Ok(Source::Changed) => return Outcome::Skipped("changed while being opened"),
         Err(e) => return Outcome::Failed(e.to_string()),
     };
+    if let Some(check) = safe {
+        match holds_live(check.filters, check.size_mode, &live(source.stat())) {
+            Verdict::Holds => {}
+            Verdict::NotRegular => return Outcome::Skipped("not a regular file"),
+            Verdict::Changed(reason) => return Outcome::Skipped(reason),
+        }
+    }
     let rel_parent = item.rel.parent().unwrap_or(Path::new(""));
     let walked = worker.dest_parent.get(rel_parent, || {
         atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent))
@@ -235,8 +271,9 @@ fn copy_one(anchors: &Anchors, worker: &mut Worker, item: &Planned) -> Outcome {
         Err(e) => return Outcome::Failed(e.to_string()),
     };
     match copy_atomic(&source, dest_dir, name) {
-        Ok(Placed::Done) => Outcome::Done { owner_kept: true },
+        Ok(Placed::Done { owner_kept }) => Outcome::Done { owner_kept },
         Ok(Placed::Existing) => Outcome::Existing,
+        Ok(Placed::SourceChanged) => Outcome::Skipped("changed during the copy"),
         Err(e) => Outcome::Failed(e.to_string()),
     }
 }
@@ -282,7 +319,14 @@ fn execute(
                     eprintln!("{tool}: {source}: {message}");
                 }
                 _ if !verbose => {}
-                Outcome::Done { .. } => writeln!(out, "copied: {source} -> {}", dest.display())?,
+                Outcome::Done { owner_kept: true } => {
+                    writeln!(out, "copied: {source} -> {}", dest.display())?
+                }
+                Outcome::Done { owner_kept: false } => writeln!(
+                    out,
+                    "copied (ownership not preserved): {source} -> {}",
+                    dest.display()
+                )?,
                 Outcome::Missing => writeln!(out, "missing: {source}")?,
                 Outcome::Existing => writeln!(out, "existing: {}", dest.display())?,
                 Outcome::Skipped(reason) => writeln!(out, "skipped ({reason}): {source}")?,
@@ -312,9 +356,6 @@ fn checked_into(into: &Path) -> Result<PathBuf> {
 pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
     let tool = "xdu-cp";
     let select_args = &args.select;
-    if select_args.safe {
-        bail!("--safe is not available in this build of {tool}; nothing was copied");
-    }
     let into = checked_into(&args.into)?;
     let root = args
         .root
@@ -365,13 +406,17 @@ pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
         }
     }
 
+    let safe = select_args.safe.then_some(SafeCheck {
+        filters: &selection.filters,
+        size_mode: selection.size_mode,
+    });
     let summary = execute(
         tool,
         &map,
         &planned,
         select_args.jobs,
         select_args.verbose,
-        copy_one,
+        |anchors, worker, item| copy_one(anchors, worker, item, safe),
     )?;
     let stdout = io::stdout();
     let mut out = stdout.lock();

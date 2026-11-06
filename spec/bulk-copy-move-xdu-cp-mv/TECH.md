@@ -6,7 +6,7 @@ appetite: big
 status: in_progress
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
-current_phase: P2
+current_phase: P3
 last_updated: '2026-11-06'
 phases:
 - id: P1
@@ -63,7 +63,7 @@ phases:
     --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
 - id: P2
   name: xdu-cp carries metadata, re-checks with --safe and counts every outcome
-  status: pending
+  status: done
   satisfies:
   - R1
   - R2
@@ -352,22 +352,42 @@ Metadata carriage beyond bytes, the S1 torn-copy check and `--safe` arrive in P2
 owner and group where permitted (a refusal counted, never silent); `--safe` re-checks every given
 filter against the live object; the summary counts every outcome separately.
 
-- [ ] `copy_atomic` step 4 (PLAN §2.5): `fchown` from S0 (any error a refusal; group-only
+- [x] `copy_atomic` step 4 (PLAN §2.5): `fchown` from S0 (any error a refusal; group-only
   retry; set-id bits dropped when an id was not carried), `fchmod(mode & 0o7777)`, `futimens`
   with nanoseconds, in that order. Step 6: the S1 check for both tools.
-- [ ] `select.rs`: `Live`, `Verdict`, `holds_live` (PLAN §2.2) against the stored thresholds;
+- [x] `select.rs`: `Live`, `Verdict`, `holds_live` (PLAN §2.2) against the stored thresholds;
   size by the measure that matches the row's indexed size, both when neither does. A DuckDB
   boundary-grid test evaluates `to_where_clause()` over one-row `VALUES` and asserts the same
   boolean as `holds_live` at `t-1`, `t`, `t+1` for every clock and every mode operator.
-- [ ] Wire `--safe` in `relocate` on the `fstat` of the opened source; remove P1's refusal.
-- [ ] `Summary` and `-v` listing complete (R9 taxonomy); failures always on stderr.
-- [ ] `doc/xdu-cp.1.scd`: `--safe` semantics (every filter; the size rule, naming the "indexed
+- [x] Wire `--safe` in `relocate` on the `fstat` of the opened source; remove P1's refusal.
+- [x] `Summary` and `-v` listing complete (R9 taxonomy); failures always on stderr.
+- [x] `doc/xdu-cp.1.scd`: `--safe` semantics (every filter; the size rule, naming the "indexed
   size"; the regular-file rule), ownership best-effort, the R10 sentences ("The index is not
   updated." and "Reading a source may update its atime …", each kept on one source line).
-- [ ] Tests named in the `verify:`. `cp_carries_owner_and_group_when_permitted` sets the source's
+- [x] Tests named in the `verify:`. `cp_carries_owner_and_group_when_permitted` sets the source's
   gid to `getgid()` and chowns to the caller's own ids (the only success path CI can take
   without root); the refusal paths go through the `Faults` seam.
 - **Verify:** see frontmatter.
+- **Build notes (2026-11-06).** Deviations from PLAN, none touching a GOAL R-ID:
+  the `--safe` size rule follows the foreman's plan-gate ruling (GOAL Clarifications), not
+  PLAN §2.2's per-row match: `holds_live` takes the size measure the index records
+  (`Selection.size_mode`) and tests that live measure, and when the index records none, which
+  is every index today (the marker has no size key), a size filter must hold for both the
+  length and `blocks*512`. `Live` therefore does not carry the row's indexed size, and an
+  unchanged small file can fail a tight `--max-size` under `--safe`; `xdu-cp(1)` says so.
+  `Step` gains `Owned`, `Moded` and `Timed` (after each metadata call), so the abandon and
+  fail sweeps cover them and the order test observes the temp between calls. `Placed` gains
+  `Done { owner_kept }` and `SourceChanged`, counted as skipped ("changed during the copy").
+  The summary keeps one `Skipped` count, as R9 lists it; `-v` names each reason, and a copy
+  whose ownership was refused lists as `copied (ownership not preserved): …`. `Faults` gains
+  `refuse_owner` and `refuse_group`. `--owner`'s live check is proven only by the unit
+  boundary grid: changing a file's owner needs root, so `cp_safe_skips_a_file_that_no_longer_matches_each_filter`
+  covers every other filter, and its `--group` case runs only where the caller has two groups.
+  This host's sandbox strips set-id bits on `chmod`, so the set-id assertions in
+  `a_refused_chown_is_counted_and_drops_the_set_id_bits`, `metadata_is_set_owner_then_mode_then_times`
+  and `cp_carries_owner_and_group_when_permitted` hold trivially here (each prints a note) and
+  bite on the CI legs. `scdoc` is not installed on the build host, so `doc/xdu-cp.1.scd` was
+  not rendered locally.
 - **Touches:** `src/select.rs`, `src/atomic_fs.rs`, `src/relocate.rs`, `tests/cp_tests.rs`,
   `doc/xdu-cp.1.scd`.
 

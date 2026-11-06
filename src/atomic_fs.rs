@@ -386,6 +386,12 @@ impl NoReplace {
 pub enum Step {
     TempCreated,
     BytesWritten,
+    /// The copy carries the source's owner and group, or as much of them as was permitted.
+    Owned,
+    /// The copy carries the source's permission bits.
+    Moded,
+    /// The copy carries the source's atime and mtime.
+    Timed,
     TempSynced,
     /// The link route made the new name and has not yet removed the old one.
     Linked,
@@ -395,9 +401,12 @@ pub enum Step {
 
 /// Every step `copy_atomic` passes on the native route, in order.
 #[cfg(test)]
-pub(crate) const COPY_STEPS: [Step; 5] = [
+pub(crate) const COPY_STEPS: [Step; 8] = [
     Step::TempCreated,
     Step::BytesWritten,
+    Step::Owned,
+    Step::Moded,
+    Step::Timed,
     Step::TempSynced,
     Step::Published,
     Step::DirSynced,
@@ -429,6 +438,10 @@ impl StepHook for NoHook {
 pub(crate) struct Faults {
     /// Skip the native no-replace rename and publish through `linkat`, as on NFS.
     pub force_link_route: bool,
+    /// Refuse the owner-and-group `fchown` with `EPERM`, as for a caller who is not root.
+    pub refuse_owner: bool,
+    /// Refuse the group-only `fchown` retry with `EPERM` too.
+    pub refuse_group: bool,
 }
 
 /// A placement stopped either by an error or, under a test hook, by a simulated crash.
@@ -676,9 +689,101 @@ pub fn sync_durable(fd: BorrowedFd<'_>) -> io::Result<()> {
 /// Where a copy landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placed {
-    Done,
+    /// Published. `owner_kept` is false when the owner or the group could not be carried.
+    Done { owner_kept: bool },
     /// Something already held the destination name; it was not touched and no byte was read.
     Existing,
+    /// The source was written while it was read, so the bytes may be torn; nothing was
+    /// published.
+    SourceChanged,
+}
+
+/// Which of the source's ids the copy carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Carried {
+    owner: bool,
+    group: bool,
+}
+
+// `uid_t` and `gid_t` are `u32` on every supported platform, so these casts only name the
+// C types.
+#[allow(clippy::unnecessary_cast)]
+fn fchown_with(fd: BorrowedFd<'_>, uid: u32, gid: u32, refuse: bool) -> io::Result<()> {
+    if refuse {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
+    // SAFETY: `fd` is open for the duration of the call.
+    check(unsafe { libc::fchown(fd.as_raw_fd(), uid as libc::uid_t, gid as libc::gid_t) })
+}
+
+/// Give the copy the source's owner and group, as far as the caller is permitted.
+///
+/// Any error is a refusal, not a failure: `EPERM` for a caller who is not root, `EINVAL` for
+/// an id an NFSv4 server cannot map, `EACCES` or `ENOTSUP` elsewhere. A refused owner retries
+/// with the group alone, which a caller who belongs to the group may set.
+fn carry_ids(fd: BorrowedFd<'_>, src: &Stat, faults: Faults) -> Carried {
+    if fchown_with(fd, src.uid, src.gid, faults.refuse_owner).is_ok() {
+        return Carried {
+            owner: true,
+            group: true,
+        };
+    }
+    // An id of -1 leaves the owner as it is.
+    let group = fchown_with(fd, u32::MAX, src.gid, faults.refuse_group).is_ok();
+    Carried {
+        owner: false,
+        group,
+    }
+}
+
+/// The permission bits the copy takes: the source's, less the set-id bits when either id was
+/// not carried, as `cp -p` does, so a refused `chown` never yields a set-id file owned by the
+/// caller.
+// `mode_t` is `u16` on macOS and `u32` on Linux, so a cast that converts on one is a no-op on
+// the other.
+#[allow(clippy::unnecessary_cast)]
+fn carried_mode(src: &Stat, carried: Carried) -> libc::mode_t {
+    let mut mode = src.mode & 0o7777;
+    if !(carried.owner && carried.group) {
+        mode &= !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+    }
+    mode as libc::mode_t
+}
+
+/// Stamp the copy with the source's atime and mtime, nanoseconds included.
+// `time_t` and the nanosecond field are `i64` on the 64-bit targets and narrower elsewhere.
+#[allow(clippy::unnecessary_cast)]
+fn carry_times(fd: BorrowedFd<'_>, src: &Stat) -> io::Result<()> {
+    let times = [
+        libc::timespec {
+            tv_sec: src.atime as libc::time_t,
+            tv_nsec: src.atime_nsec as _,
+        },
+        libc::timespec {
+            tv_sec: src.mtime as libc::time_t,
+            tv_nsec: src.mtime_nsec as _,
+        },
+    ];
+    // SAFETY: `fd` is open and `times` a two-element array for the duration of the call.
+    check(unsafe { libc::futimens(fd.as_raw_fd(), times.as_ptr()) })
+}
+
+/// True when the source's size, mtime or ctime moved since `before` was taken: something
+/// wrote it, or rewrote it and restored its mtime, which only the ctime shows.
+fn source_changed(before: &Stat, now: &Stat) -> bool {
+    (
+        before.size,
+        before.mtime,
+        before.mtime_nsec,
+        before.ctime,
+        before.ctime_nsec,
+    ) != (
+        now.size,
+        now.mtime,
+        now.mtime_nsec,
+        now.ctime,
+        now.ctime_nsec,
+    )
 }
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -700,11 +805,17 @@ fn temp_name() -> OsString {
 
 /// Copy `src` to `name` in `dest`, atomically and without replacing anything.
 ///
-/// The bytes go to a temp file created `O_EXCL` in the destination directory, the temp is
-/// flushed, and it is published by `rename_noreplace`; then the directory is flushed. Without
-/// the file flush, XFS or ext4 can expose a zero-length final name after power loss. On any
-/// error the temp is removed, and a final name this call published is withdrawn, so a failed
-/// copy leaves nothing at its name; a crash leaves at most a `.xdu-*.part` file.
+/// The bytes go to a temp file created `O_EXCL` in the destination directory. The temp then
+/// takes the source's owner and group where permitted, its permission bits, and its atime and
+/// mtime, all from the `fstat` taken when the source was opened, in that order: `chown` clears
+/// the set-id bits, so the mode follows it, and the times come last so nothing moves them. The
+/// temp is flushed, the source is re-checked, and the temp is published by
+/// `rename_noreplace`; then the directory is flushed. Without the file flush, XFS or ext4 can
+/// expose a zero-length final name after power loss. A source whose size, mtime or ctime moved
+/// during the copy was written while it was read, so its temp is removed and nothing is
+/// published. On any error the temp is removed, and a final name this call published is
+/// withdrawn, so a failed copy leaves nothing at its name; a crash leaves at most a
+/// `.xdu-*.part` file.
 pub fn copy_atomic(src: &SourceFile, dest: &DirHandle, name: &OsStr) -> io::Result<Placed> {
     match copy_atomic_with(src, dest, name, Faults::default(), &mut NoHook) {
         Ok(placed) => Ok(placed),
@@ -745,8 +856,18 @@ pub(crate) fn copy_atomic_with(
         step::<io::Error>(hook, Step::TempCreated)?;
         io::copy(&mut &src.file, &mut out)?;
         step::<io::Error>(hook, Step::BytesWritten)?;
+        let carried = carry_ids(out.as_fd(), &src.stat, faults);
+        step::<io::Error>(hook, Step::Owned)?;
+        // SAFETY: `out` is open for the duration of the call.
+        check(unsafe { libc::fchmod(out.as_raw_fd(), carried_mode(&src.stat, carried)) })?;
+        step::<io::Error>(hook, Step::Moded)?;
+        carry_times(out.as_fd(), &src.stat)?;
+        step::<io::Error>(hook, Step::Timed)?;
         sync_durable(out.as_fd())?;
         step::<io::Error>(hook, Step::TempSynced)?;
+        if source_changed(&src.stat, &fstat(src.file.as_fd())?) {
+            return Ok(Placed::SourceChanged);
+        }
         let written = fstat(out.as_fd())?;
         match rename_noreplace_with(dest, &temp, dest, name, faults, hook) {
             Ok(()) => {}
@@ -758,12 +879,14 @@ pub(crate) fn copy_atomic_with(
         step::<io::Error>(hook, Step::Published)?;
         sync_durable(dest.as_fd())?;
         step::<io::Error>(hook, Step::DirSynced)?;
-        Ok(Placed::Done)
+        Ok(Placed::Done {
+            owner_kept: carried.owner && carried.group,
+        })
     })();
 
     match result {
         Err(Stop::Abandoned) => Err(Stop::Abandoned),
-        Ok(Placed::Done) => Ok(Placed::Done),
+        Ok(done @ Placed::Done { .. }) => Ok(done),
         other => {
             if let (Err(_), Some(written)) = (&other, &published) {
                 let _ = unlink_if_same(dest, name, written);
@@ -807,6 +930,24 @@ mod tests {
 
     fn dir(path: &Path) -> DirHandle {
         DirHandle::open(path).unwrap()
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    fn set_times(path: &Path, atime: (i64, i64), mtime: (i64, i64)) {
+        let c = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: atime.0 as libc::time_t,
+                tv_nsec: atime.1 as _,
+            },
+            libc::timespec {
+                tv_sec: mtime.0 as libc::time_t,
+                tv_nsec: mtime.1 as _,
+            },
+        ];
+        // SAFETY: a valid C string and a two-element array for the call.
+        let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(ret, 0);
     }
 
     fn parts_in(path: &Path) -> Vec<String> {
@@ -861,9 +1002,12 @@ mod tests {
     }
 
     fn routes() -> [(Faults, &'static [Step]); 2] {
-        const LINK: [Step; 6] = [
+        const LINK: [Step; 9] = [
             Step::TempCreated,
             Step::BytesWritten,
+            Step::Owned,
+            Step::Moded,
+            Step::Timed,
             Step::TempSynced,
             Step::Linked,
             Step::Published,
@@ -874,6 +1018,7 @@ mod tests {
             (
                 Faults {
                     force_link_route: true,
+                    ..Faults::default()
                 },
                 &LINK,
             ),
@@ -915,6 +1060,7 @@ mod tests {
         let d = dir(t.path());
         let link = Faults {
             force_link_route: true,
+            ..Faults::default()
         };
         let got =
             rename_noreplace_with(&d, OsStr::new("a"), &d, OsStr::new("b"), link, &mut NoHook);
@@ -942,7 +1088,7 @@ mod tests {
             link,
             &mut NoHook,
         );
-        assert!(matches!(placed, Ok(Placed::Done)), "{placed:?}");
+        assert!(matches!(placed, Ok(Placed::Done { .. })), "{placed:?}");
         assert_eq!(read(&out.join("f")), b"SOURCE");
         assert!(parts_in(&out).is_empty());
     }
@@ -971,6 +1117,7 @@ mod tests {
         let d = dir(&root);
         let link = Faults {
             force_link_route: true,
+            ..Faults::default()
         };
         let got = rename_noreplace_with(
             &d,
@@ -1054,6 +1201,267 @@ mod tests {
                 assert_eq!(read(&src.join("f")), bytes);
             }
         }
+    }
+
+    fn chgrp(path: &Path, gid: u32) {
+        std::os::unix::fs::lchown(path, None, Some(gid)).unwrap();
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn egid() -> u32 {
+        // SAFETY: getegid cannot fail.
+        unsafe { libc::getegid() }
+    }
+
+    /// A group the caller belongs to other than `not`, if it has one.
+    fn another_group(not: u32) -> Option<u32> {
+        // SAFETY: a zero size only counts.
+        let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        let mut groups = vec![0 as libc::gid_t; n.max(0) as usize];
+        // SAFETY: `groups` holds `n` entries.
+        let got = unsafe { libc::getgroups(n, groups.as_mut_ptr()) };
+        groups.truncate(got.max(0) as usize);
+        std::iter::once(egid()).chain(groups).find(|g| *g != not)
+    }
+
+    /// A source directory and an output directory under one temp dir, and a source file in
+    /// the caller's own group with `mode`.
+    fn setid_fixture(mode: u32) -> (TempDir, PathBuf, PathBuf) {
+        let t = TempDir::new().unwrap();
+        let src = t.path().join("src");
+        let out = t.path().join("out");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&out).unwrap();
+        put(&src.join("f"), b"SETID");
+        chgrp(&src.join("f"), egid());
+        chmod(&src.join("f"), mode);
+        (t, src, out)
+    }
+
+    /// The set-id bits the host let the fixture's source keep. A sandbox can strip them on
+    /// `chmod`; where it does, the set-id assertions hold trivially and the CI legs, which keep
+    /// them, are where they bite.
+    fn setid_kept(src: &Path) -> u32 {
+        let kept = fs::metadata(src.join("f")).unwrap().mode() & 0o6000;
+        if kept == 0 {
+            eprintln!("this host strips set-id bits on chmod; the set-id check runs on CI");
+        }
+        kept
+    }
+
+    fn refusing(owner: bool, group: bool) -> Faults {
+        Faults {
+            refuse_owner: owner,
+            refuse_group: group,
+            ..Faults::default()
+        }
+    }
+
+    /// Between reading the source and publishing the copy, the source is appended to, or
+    /// rewritten at the same size with its mtime put back. Either way the copy may hold torn
+    /// bytes, so nothing is published.
+    #[test]
+    fn a_source_written_during_the_copy_is_skipped_and_nothing_published() {
+        struct Scribble(PathBuf, bool);
+        impl StepHook for Scribble {
+            fn at(&mut self, step: Step) -> HookAction {
+                if step == Step::BytesWritten {
+                    let path = self.0.join("f");
+                    let before = fs::metadata(&path).unwrap();
+                    let mut f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+                    if self.1 {
+                        f.write_all(b"REWRITE").unwrap();
+                        drop(f);
+                        let mtime = (before.mtime(), before.mtime_nsec());
+                        let atime = (before.atime(), before.atime_nsec());
+                        set_times(&path, atime, mtime);
+                        let after = fs::metadata(&path).unwrap();
+                        assert_eq!(
+                            (after.len(), after.mtime(), after.mtime_nsec()),
+                            (before.len(), mtime.0, mtime.1)
+                        );
+                    } else {
+                        use std::io::Seek;
+                        f.seek(io::SeekFrom::End(0)).unwrap();
+                        f.write_all(b"APPENDED").unwrap();
+                    }
+                }
+                HookAction::Continue
+            }
+        }
+        for (faults, _) in routes() {
+            for same_size in [false, true] {
+                let t = TempDir::new().unwrap();
+                let src = t.path().join("src");
+                let out = t.path().join("out");
+                fs::create_dir(&src).unwrap();
+                fs::create_dir(&out).unwrap();
+                big_source(&src.join("f"));
+                let got = copy_atomic_with(
+                    &open_regular(&src, "f"),
+                    &dir(&out),
+                    OsStr::new("f"),
+                    faults,
+                    &mut Scribble(src.clone(), same_size),
+                );
+                assert!(
+                    matches!(got, Ok(Placed::SourceChanged)),
+                    "{faults:?} same_size={same_size}: {got:?}"
+                );
+                assert!(!out.join("f").exists(), "{faults:?}: published torn bytes");
+                assert!(parts_in(&out).is_empty(), "{faults:?}: temp left");
+            }
+        }
+        // Unwritten, the same source is published.
+        let t = TempDir::new().unwrap();
+        big_source(&t.path().join("f"));
+        let out = t.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let got = copy_atomic(&open_regular(t.path(), "f"), &dir(&out), OsStr::new("f"));
+        assert!(matches!(got, Ok(Placed::Done { .. })), "{got:?}");
+    }
+
+    #[test]
+    fn a_refused_chown_is_counted_and_drops_the_set_id_bits() {
+        for (faults, kept, dropped) in [
+            (refusing(false, false), true, false),
+            (refusing(true, false), false, true),
+            (refusing(true, true), false, true),
+        ] {
+            let (_t, src, out) = setid_fixture(0o6755);
+            let setid = setid_kept(&src);
+            let mode = if dropped { 0o755 } else { 0o755 | setid };
+            let got = copy_atomic_with(
+                &open_regular(&src, "f"),
+                &dir(&out),
+                OsStr::new("f"),
+                faults,
+                &mut NoHook,
+            );
+            let placed = match got {
+                Ok(placed) => placed,
+                Err(Stop::Err(e)) => panic!("{faults:?}: {e}"),
+                Err(Stop::Abandoned) => panic!("{faults:?}: abandoned"),
+            };
+            assert_eq!(placed, Placed::Done { owner_kept: kept }, "{faults:?}");
+            let copy = fs::metadata(out.join("f")).unwrap();
+            assert_eq!(copy.mode() & 0o7777, mode, "{faults:?}");
+            assert_eq!(read(&out.join("f")), b"SETID", "{faults:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_owner_still_carries_the_group() {
+        let (_t, src, out) = setid_fixture(0o640);
+        let default_group = {
+            put(&out.join("probe"), b"");
+            let gid = fs::metadata(out.join("probe")).unwrap().gid();
+            fs::remove_file(out.join("probe")).unwrap();
+            gid
+        };
+        let Some(group) = another_group(default_group) else {
+            eprintln!("the caller has one group; the carried group is visible where it has two");
+            return;
+        };
+        chgrp(&src.join("f"), group);
+
+        let got = copy_atomic_with(
+            &open_regular(&src, "f"),
+            &dir(&out),
+            OsStr::new("f"),
+            refusing(true, false),
+            &mut NoHook,
+        );
+        assert!(
+            matches!(got, Ok(Placed::Done { owner_kept: false })),
+            "{got:?}"
+        );
+        assert_eq!(fs::metadata(out.join("f")).unwrap().gid(), group);
+
+        // Refused as well, the group stays whatever the new file was given.
+        let again = t_out(&out, "g");
+        let got = copy_atomic_with(
+            &open_regular(&src, "f"),
+            &dir(&again),
+            OsStr::new("f"),
+            refusing(true, true),
+            &mut NoHook,
+        );
+        assert!(
+            matches!(got, Ok(Placed::Done { owner_kept: false })),
+            "{got:?}"
+        );
+        assert_eq!(fs::metadata(again.join("f")).unwrap().gid(), default_group);
+    }
+
+    fn t_out(base: &Path, name: &str) -> PathBuf {
+        let path = base.join(name);
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    /// The temp is observed at each metadata step: the owner first (mode still the temp's
+    /// own), then the mode (set-id bits intact, mtime still the copy's), then the times.
+    #[test]
+    fn metadata_is_set_owner_then_mode_then_times() {
+        struct Watch {
+            out: PathBuf,
+            seen: Vec<(Step, u32, (i64, i64))>,
+        }
+        impl StepHook for Watch {
+            fn at(&mut self, step: Step) -> HookAction {
+                if matches!(
+                    step,
+                    Step::Owned | Step::Moded | Step::Timed | Step::TempSynced
+                ) {
+                    let temp = parts_in(&self.out).pop().expect("the temp exists");
+                    let m = fs::symlink_metadata(self.out.join(temp)).unwrap();
+                    self.seen
+                        .push((step, m.mode() & 0o7777, (m.mtime(), m.mtime_nsec())));
+                }
+                HookAction::Continue
+            }
+        }
+        let (_t, src, out) = setid_fixture(0o4755);
+        let full = 0o755 | setid_kept(&src);
+        let mtime = (1_500_000_000, 123_456_789);
+        set_times(&src.join("f"), (1_400_000_000, 7), mtime);
+        let mut watch = Watch {
+            out: out.clone(),
+            seen: Vec::new(),
+        };
+        let got = copy_atomic_with(
+            &open_regular(&src, "f"),
+            &dir(&out),
+            OsStr::new("f"),
+            Faults::default(),
+            &mut watch,
+        );
+        assert!(
+            matches!(got, Ok(Placed::Done { owner_kept: true })),
+            "{got:?}"
+        );
+        let steps: Vec<Step> = watch.seen.iter().map(|s| s.0).collect();
+        assert_eq!(
+            steps,
+            [Step::Owned, Step::Moded, Step::Timed, Step::TempSynced]
+        );
+        let (_, owned_mode, owned_mtime) = watch.seen[0];
+        assert_eq!(owned_mode, 0o600, "the mode is set after the owner");
+        assert_ne!(owned_mtime, mtime);
+        let (_, moded_mode, moded_mtime) = watch.seen[1];
+        assert_eq!(moded_mode, full, "chown cleared nothing the mode then set");
+        assert_ne!(moded_mtime, mtime, "the times are set after the mode");
+        let (_, timed_mode, timed_mtime) = watch.seen[2];
+        assert_eq!((timed_mode, timed_mtime), (full, mtime));
+        let copy = fs::metadata(out.join("f")).unwrap();
+        assert_eq!(copy.mode() & 0o7777, full);
+        assert_eq!((copy.mtime(), copy.mtime_nsec()), mtime);
+        assert_eq!((copy.atime(), copy.atime_nsec()), (1_400_000_000, 7));
     }
 
     #[test]

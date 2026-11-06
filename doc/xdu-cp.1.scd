@@ -10,7 +10,8 @@ xdu-cp - copy files matching index query criteria into a directory tree
 	\[*--regex*] \[*--min-size* _SIZE_] \[*--max-size* _SIZE_]
 	\[*--older-than* _DAYS_] \[*--newer-than* _DAYS_] \[*--owner* _USER_]
 	\[*--group* _GROUP_] \[*--mode* _SPEC_] \[*--mtime-older-than* _DAYS_]
-	\[*--mtime-newer-than* _DAYS_] \[*-l* _N_] \[*-n*] \[*-f*] \[*-v*] \[*-j* _N_]
+	\[*--mtime-newer-than* _DAYS_] \[*-l* _N_] \[*-n*] \[*--safe*] \[*-f*] \[*-v*]
+	\[*-j* _N_]
 
 # DESCRIPTION
 
@@ -26,6 +27,11 @@ storage, and then given its final name by a rename that refuses to replace
 anything, so a destination name only ever holds a complete copy. An existing
 file at a destination is never replaced or truncated: it is skipped, counted,
 and makes the run exit non-zero.
+
+Each copy carries the source's bytes, permission bits, access time and
+modification time, to the nanosecond where the filesystem keeps them. It also
+takes the source's owner and group where the caller is permitted to set them;
+see _OWNERSHIP_.
 
 *xdu-cp* never modifies or removes a source file. It copies only a regular
 file at the indexed path and follows no symlink, neither at the path nor in
@@ -104,7 +110,9 @@ Before copying, *xdu-cp* asks for confirmation unless *--force* is given. Use
 	directory, no file.
 
 *--safe*
-	Not available yet: passing it refuses the run, and nothing is copied.
+	Re-check each file against its live metadata immediately before copying
+	it, and skip it, counted, unless it is still a regular file and every
+	filter given still holds. See _SAFE MODE_.
 
 *-f*, *--force*
 	Skip the interactive confirmation prompt. Here *-f* is *--force*, as in
@@ -122,6 +130,57 @@ Before copying, *xdu-cp* asks for confirmation unless *--force* is given. Use
 
 *-V*, *--version*
 	Print version information.
+
+# SAFE MODE
+
+The index is a snapshot, so a file can change between the crawl and the copy.
+With *--safe*, *xdu-cp* reads the metadata of each file as it opens it, without
+following a symlink, and skips the file unless it is still a regular file and
+every filter given still holds against that live metadata: *--min-size* and
+*--max-size* against its size, *--older-than* and *--newer-than* against its
+access time, *--mtime-older-than* and *--mtime-newer-than* against its
+modification time, *--owner* against its uid, *--group* against its gid, and
+*--mode* against its permission bits. The time thresholds are the ones the
+query used, fixed when the run started. The path pattern and the partition
+hold by construction. A skipped file is listed under *-v* with the filter it
+no longer matches, and counted.
+
+Size needs a measure. The indexed size is the disk usage of the file (its
+blocks times 512) by default, its length when the index was built with
+*--apparent-size*, or its length rounded up to a block with *--block-size*,
+and the index does not record which. So a size filter must hold for both live measures, the length and the disk
+usage, or the file is skipped. That fails closed: a file selected by
+*--min-size 2K* that has shrunk to 100 bytes is skipped whatever its block
+count. It also skips some unchanged files: a 100-byte file in a 4 KiB block
+holds *--max-size 1K* by its length but not by its disk usage, so give
+*--max-size* a bound no smaller than the filesystem's block size when you
+combine it with *--safe*.
+
+Without *--safe*, the regular-file rule still holds: a symlink, directory,
+FIFO, socket or device at a selected path is never copied. Either way, a
+source that is written while it is being read is detected after the copy,
+and the copy is discarded and the file counted as skipped.
+
+# OWNERSHIP
+
+*xdu-cp* attempts to give each copy the source's owner and group. Only root
+may give a file to another user, and any other caller may give its own file
+only to a group it belongs to, so copying another user's files without root
+is refused; a refused owner is retried with the group alone. A refusal is not
+a failure: the copy is kept, owned by the caller, and counted as ownership not
+preserved. When either id was not carried, the copy drops the set-user-ID and
+set-group-ID bits, as *cp -p* does.
+
+# INDEX AND ACCESS TIMES
+
+The index is not updated. A copied file keeps its row, and the copy has none,
+until the tree is indexed again.
+
+Reading a source may update its atime under the mount's options (*relatime*,
+*strictatime* or *noatime*). The copy carries the access time the source had
+before it was read, but the source itself may then look recently accessed, so
+it can drop out of a later *--older-than* selection made from a new index, or
+fail a later *--safe* re-check of *--older-than* against an older index.
 
 # DESTINATION LAYOUT
 
@@ -154,15 +213,29 @@ copied, dry-run included, and name the first offending path in path order.
 
 Standard output carries the *--dry-run* listing, the *-v* listing, the message
 for an empty match, and the summary: the number of files copied, then each
-other outcome that occurred (missing, existing at destination, skipped,
-failed), each counted separately. The confirmation prompt, warnings and every
-failure, with its path and cause, go to standard error.
+other outcome that occurred, each counted separately:
+
+- *Missing*: nothing at the indexed path, or a directory above it is gone;
+- *Existing at destination*: something already held the destination name,
+  and it was left untouched;
+- *Skipped*: not a regular file, no longer matching a filter under *--safe*,
+  or written while it was being copied;
+- *Ownership not preserved*: copied, but owned by the caller or its group
+  (these files are also counted as copied);
+- *Failed*: an error, reported on standard error with the path and cause.
+
+The *-v* listing prints one line per file in path order: "copied: SOURCE ->
+DESTINATION" (with "(ownership not preserved)" after "copied" when it
+applies), "existing: DESTINATION", "missing: SOURCE" or "skipped (REASON):
+SOURCE". The confirmation prompt, warnings and every failure go to standard
+error.
 
 # EXIT STATUS
 
 *0*
-	Every selected file was copied, missing or skipped; or nothing matched;
-	or the prompt was declined.
+	Every selected file was copied, missing or skipped, including copies
+	whose ownership was not preserved; or nothing matched; or the prompt was
+	declined.
 
 *1*
 	A file failed or already existed at its destination, or the run was
@@ -194,6 +267,10 @@ Preview copying a user's year-old files into a staging tree:
 Copy every log file, skipping confirmation:
 
 	xdu-cp -i /index/scratch -p '\*.log' --into /stage --root /scratch --force
+
+Copy year-old files, re-checking each against its live metadata first:
+
+	xdu-cp -i /index/scratch --older-than 365 --into /stage --root /scratch --safe
 
 Copy large files, mirroring their absolute paths, listing each one:
 
