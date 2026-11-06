@@ -6,12 +6,12 @@ appetite: small
 status: in_progress
 branch: fix/xdu-view-prefix-bytes-vs-chars
 base: main
-current_phase: P1
+current_phase: P2
 last_updated: '2026-11-06'
 phases:
 - id: P1
   name: Count the prefix in code points; prove it locally, red on 7689a92
-  status: pending
+  status: done
   satisfies:
   - R1
   - R2
@@ -23,7 +23,7 @@ phases:
   depends_on: []
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: downhill
   verify: 'set -eu; mkdir -p target; cargo test --locked --lib view_query:: >target/p1-lib.log
     2>&1; for t in local_view_sql_is_byte_for_byte_what_xdu_view_sent s3_view_sql_binds_the_glob_and_the_directory_prefix
     directory_offset_counts_code_points; do grep -qF "test view_query::tests::$t ...
@@ -120,29 +120,29 @@ As in [the template](../../.agents/factory/templates/TECH.md): `status`, `appeti
 **Goal:** both views list full names under a non-ASCII local directory at every depth, the local
 statement text stays pinned exactly, and the regression test is shown to fail on `main`.
 
-- [ ] `src/view_query.rs`, `DirectoryQuery::new`: exactly `let prefix_len = prefix.chars().count();`
+- [x] `src/view_query.rs`, `DirectoryQuery::new`: exactly `let prefix_len = prefix.chars().count();`
       in place of the `prefix.len()` line (`scope.sh` allows that one changed line), with a
       one-line comment naming the unit (Unicode scalar values, what DuckDB's `substr` and
       `position` count). Say what the field counts in the struct's doc. No other statement change.
-- [ ] `mod tests`: leave `old_directory_parts` byte-identical to `main` (`scope.sh` checks it). In
+- [x] `mod tests`: leave `old_directory_parts` byte-identical to `main` (`scope.sh` checks it). In
       the pin, add the fourth directory case
       `("données", "/data/scratch/données/e\u{301}t\u{e9}/\u{FFFD}")`; compare each statement with
       `assert_eq!` against the frozen text with `substr(path, {bytes} + 1` replaced by
       `substr(path, {code points} + 1` (counts of `"{dir}/"`), asserting for the ASCII cases that
       the two counts are equal. Make the final line exactly `assert_eq!(checked, 3 * 7 * 4);`. Do
       not loosen the comparison.
-- [ ] `mod tests`: add `directory_offset_counts_code_points` (PLAN §2.2): `dir =
+- [x] `mod tests`: add `directory_offset_counts_code_points` (PLAN §2.2): `dir =
       "/d/é𝄞\u{FFFD}e\u{301}"`, assert `dir.len() + 1 == 16` and `dir.chars().count() + 1 == 9`
       as a guard on the fixture itself, then for both builders, both arms and every `SortMode` the
       text contains `substr(path, 9 + 1)` and not `16 + 1`; the S3 parameters are exactly
       `[glob, "<dir>/%"]`.
-- [ ] `tests/common/mod.rs`: the shared fixture (PLAN §2.3) — one partition's subtree with
+- [x] `tests/common/mod.rs`: the shared fixture (PLAN §2.3) — one partition's subtree with
       `alpha/résumé.txt`, `alpha/z`, `beta/f`, `top`, `e\u{301}t\u{e9}/a/deep.txt`,
       `bad\u{FFFD}name/b`, `clef\u{1D11E}/c`, distinct sizes, and the ASCII twin with the same
       shape, sizes and ages. Ages are absolute: add `set_atime_at(path, secs)` and set every file
       of both trees from one epoch taken once, never from two `now()` calls. Return the files (relative path, size) so
       the tests compare against data, never a re-derived cut.
-- [ ] `tests/view_tests.rs` (new, `mod common;`): `non_ascii_directories_list_full_names_in_both_views`
+- [x] `tests/view_tests.rs` (new, `mod common;`): `non_ascii_directories_list_full_names_in_both_views`
       per PLAN §2.3 — non-ASCII crawled root `hôme-ü` (spelled literally in the file; the gate
       greps it), partitions `données` and `p`; assert the
       canonical root and every listed directory are not ASCII; walk list and tree views from
