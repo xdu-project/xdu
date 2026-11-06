@@ -10,11 +10,16 @@
 
 pub mod s3;
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use duckdb::Connection;
+use xdu::view_query::{self, DirEntry};
+use xdu::{IndexLocator, QueryFilters, SortMode};
 
 /// Path to a binary built for *this* test invocation.
 ///
@@ -79,6 +84,149 @@ pub fn set_atime_days_ago(path: &Path, days: u64) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Set the access time of a file to `secs` since the epoch, preserving its mtime.
+///
+/// The absolute form of `set_atime_days_ago`: two trees stamped from one epoch carry equal
+/// atimes, where two `now()` calls could straddle a second boundary.
+pub fn set_atime_at(path: &Path, secs: u64) -> std::io::Result<()> {
+    let mtime = fs::metadata(path)?
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    let times = [
+        libc::timespec {
+            tv_sec: secs as i64,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: mtime as i64,
+            tv_nsec: 0,
+        },
+    ];
+    unsafe {
+        if libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// One partition's subtree for the `xdu-view` listing tests: each file's path inside the
+/// partition, its ASCII twin's path, its size, and its age in days.
+///
+/// The non-ASCII names cover a non-ASCII leaf, a decomposed and a composed accent in one
+/// directory name two levels up from a file, U+FFFD as a lossy crawl stores it, and a 4-byte
+/// code point. `alpha/z` is shorter than any miscounted offset, so a wrong cut drops it. No name
+/// holds `_` or `%`, which `LIKE` reads as wildcards.
+pub const VIEW_TREE: &[(&str, &str, usize, u64)] = &[
+    ("alpha/r\u{e9}sum\u{e9}.txt", "alpha/resume.txt", 101, 1),
+    ("alpha/z", "alpha/z", 202, 2),
+    ("beta/f", "beta/f", 303, 3),
+    ("top", "top", 404, 4),
+    ("e\u{301}t\u{e9}/a/deep.txt", "ete/a/deep.txt", 505, 5),
+    ("bad\u{FFFD}name/b", "badxname/b", 606, 6),
+    ("clef\u{1D11E}/c", "clefg/c", 707, 7),
+];
+
+/// Create `VIEW_TREE` (or its ASCII twin) under `root/partition`, every file's atime set from
+/// `epoch`; returns each file's path relative to `root` with its size.
+pub fn view_tree(root: &Path, partition: &str, ascii: bool, epoch: u64) -> Vec<(String, usize)> {
+    VIEW_TREE
+        .iter()
+        .map(|&(name, twin, size, days)| {
+            let rel = format!("{partition}/{}", if ascii { twin } else { name });
+            let file = root.join(&rel);
+            create_test_file(&file, size).unwrap();
+            set_atime_at(&file, epoch - days * 86400).unwrap();
+            (rel, size)
+        })
+        .collect()
+}
+
+/// The names directly under each directory holding `files`, keyed by the directory's path
+/// under `base`; `files` are relative to `base`, as `view_tree` returns them. Read from the
+/// fixture's own paths, so an expectation never repeats the cut under test.
+pub fn view_tree_children(
+    base: &str,
+    files: &[(String, usize)],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (rel, _) in files {
+        let parts: Vec<&str> = rel.split('/').collect();
+        for depth in 1..parts.len() {
+            let dir = format!("{base}/{}", parts[..depth].join("/"));
+            children
+                .entry(dir)
+                .or_default()
+                .insert(parts[depth].to_string());
+        }
+    }
+    children
+}
+
+/// What one walk of a view saw: every listing in the order made, and every file reached
+/// with its size.
+pub struct ViewWalk {
+    pub listings: Vec<(String, Vec<DirEntry>)>,
+    pub files: BTreeMap<String, i64>,
+}
+
+/// Walk `view` ("list" or "tree") of `partition` from its root down, entering every listed
+/// directory by its `path`, and assert each listing's names equal `expected`'s for that
+/// directory, with the message `"{arm} {view} full names under {dir}"`. Every directory
+/// walked must be non-ASCII, so the walk cannot quietly degrade to an ASCII tree.
+pub fn walk_view(
+    conn: &Connection,
+    index: &IndexLocator,
+    partition: &str,
+    arm: &str,
+    view: &str,
+    expected: &BTreeMap<String, BTreeSet<String>>,
+) -> ViewWalk {
+    let root = view_query::partition_root(conn, index, partition)
+        .unwrap_or_else(|e| panic!("{arm} root of {partition}: {e:#}"));
+    let mut walk = ViewWalk {
+        listings: Vec::new(),
+        files: BTreeMap::new(),
+    };
+    let mut pending = VecDeque::from([root]);
+    while let Some(dir) = pending.pop_front() {
+        assert!(
+            !dir.is_ascii(),
+            "{arm} {view} walked an ASCII directory {dir}"
+        );
+        let filters = QueryFilters::new();
+        let entries = match view {
+            "list" => {
+                view_query::list_directory(conn, index, partition, &dir, &filters, SortMode::Name)
+            }
+            "tree" => {
+                view_query::tree_directory(conn, index, partition, &dir, &filters, SortMode::Name)
+            }
+            other => panic!("unknown view {other}"),
+        }
+        .unwrap_or_else(|e| panic!("{arm} {view} of {dir}: {e:#}"));
+        let mut names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        let want: Vec<String> = expected
+            .get(&dir)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default();
+        assert_eq!(names, want, "{arm} {view} full names under {dir}");
+        for entry in &entries {
+            if entry.is_dir {
+                pending.push_back(entry.path.clone());
+            } else {
+                walk.files.insert(entry.path.clone(), entry.total_size);
+            }
+        }
+        walk.listings.push((dir, entries));
+    }
+    walk
 }
 
 /// Set the modification time of a file to a specific number of days ago.

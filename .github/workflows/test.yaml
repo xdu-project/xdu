@@ -107,7 +107,7 @@ jobs:
       - name: S3 tests
         env:
           XDU_TEST_EXTENSION_DIR: ${{ runner.temp }}/xdu-ext
-        run: sh tests/s3-wire.sh "" 53
+        run: sh tests/s3-wire.sh "" 54
 
       # A platform smoke check, not acceptance: the built tools find this runner's CA bundle and
       # verify AWS's real certificate chain with it, in both TLS stacks, using AWS's documented

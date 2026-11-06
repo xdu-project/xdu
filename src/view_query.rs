@@ -210,6 +210,8 @@ struct DirectoryQuery {
     source: String,
     params: Vec<String>,
     file_filter: String,
+    /// The directory prefix's length in Unicode scalar values, the unit DuckDB's `substr` and
+    /// `position` count, so the cut lands exactly after the prefix the `LIKE` matched.
     prefix_len: usize,
     order_by: &'static str,
 }
@@ -231,8 +233,8 @@ impl DirectoryQuery {
         // Build the path prefix we're looking at (with trailing slash for LIKE)
         let prefix = format!("{}/", dir);
 
-        // We extract the next path component after the current path prefix
-        let prefix_len = prefix.len();
+        // Unicode scalar values, the unit DuckDB's substr and position count (not bytes).
+        let prefix_len = prefix.chars().count();
 
         let prefix_match = match index {
             IndexLocator::Local(_) => format!("path LIKE '{}%'", prefix),
@@ -677,30 +679,45 @@ mod tests {
                     ("alice", "/data/scratch/alice"),
                     ("alice", "/data/scratch/alice/b/c"),
                     ("o'brien", "/data/scratch/o'brien/it's"),
+                    ("données", "/data/scratch/données/e\u{301}t\u{e9}/\u{FFFD}"),
                 ] {
+                    // The offset is the one number that may differ from what xdu-view sent: it
+                    // counts the prefix in code points, which for an ASCII prefix are its bytes.
+                    let prefix = format!("{dir}/");
+                    let (bytes, points) = (prefix.len(), prefix.chars().count());
+                    if dir.is_ascii() {
+                        assert_eq!(bytes, points, "{dir}");
+                    } else {
+                        assert_ne!(bytes, points, "{dir}");
+                    }
+                    let offset = |old: String| {
+                        let from = format!("substr(path, {bytes} + 1");
+                        assert_eq!(old.matches(&from).count(), 5, "{old}");
+                        old.replace(&from, &format!("substr(path, {points} + 1"))
+                    };
                     assert_eq!(
                         list_directory_sql(&index, partition, dir, &filters, sort_mode),
                         (
-                            old_list_directory_sql(
+                            offset(old_list_directory_sql(
                                 &index_path,
                                 partition,
                                 dir,
                                 &filters,
                                 sort_mode
-                            ),
+                            )),
                             vec![]
                         )
                     );
                     assert_eq!(
                         tree_directory_sql(&index, partition, dir, &filters, sort_mode),
                         (
-                            old_tree_directory_sql(
+                            offset(old_tree_directory_sql(
                                 &index_path,
                                 partition,
                                 dir,
                                 &filters,
                                 sort_mode
-                            ),
+                            )),
                             vec![]
                         )
                     );
@@ -708,7 +725,39 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 3 * 7 * 3);
+        assert_eq!(checked, 3 * 7 * 4);
+    }
+
+    #[test]
+    fn directory_offset_counts_code_points() {
+        // Two-, four- and three-byte scalars and a combining mark: 9 code points, 16 bytes.
+        let dir = "/d/é𝄞\u{FFFD}e\u{301}";
+        assert_eq!(dir.len() + 1, 16);
+        assert_eq!(dir.chars().count() + 1, 9);
+        let local = IndexLocator::Local(PathBuf::from("/index/scratch"));
+        let s3 = IndexLocator::S3(S3Locator::parse(OsStr::new("s3://bucket/idx")).unwrap());
+        for filters in filter_sets() {
+            for sort_mode in SortMode::ALL {
+                for build in [list_directory_sql, tree_directory_sql] {
+                    for index in [&local, &s3] {
+                        let (sql, params) = build(index, "p", dir, &filters, sort_mode);
+                        assert!(sql.contains("substr(path, 9 + 1)"), "{sql}");
+                        assert!(!sql.contains("16 + 1"), "{sql}");
+                        if let IndexLocator::S3(_) = index {
+                            assert_eq!(
+                                params,
+                                vec![
+                                    "s3://bucket/idx/p/*.parquet".to_string(),
+                                    format!("{dir}/%")
+                                ]
+                            );
+                        } else {
+                            assert!(params.is_empty(), "{params:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
