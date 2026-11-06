@@ -132,6 +132,18 @@ downloaded at run time, and a missing extension or a missing credential says wha
   S3-compatible endpoint on loopback, needing no cloud account, no container runtime, and no network
   beyond loopback. CI SHALL provide that endpoint so the tests run there; where a developer machine
   lacks it, the tests SHALL report themselves skipped, never pass silently.
+- **R11** — Every connection to an `https` S3 endpoint (every AWS endpoint, and any `https://`
+  endpoint override), whether the writer's under `xdu -o s3://` or the readers' under `xdu-find`
+  and `xdu-view` through DuckDB's `httpfs`, SHALL authenticate the server's TLS certificate against
+  one trust source, chosen once by R5's resolver and used by both directions: the CA file named
+  by `AWS_CA_BUNDLE` when set, else the platform's trust roots. IF no trust roots can be found,
+  or `AWS_CA_BUNDLE` names a file that is unreadable or holds no certificate, THEN the tool SHALL
+  exit non-zero before any request, with an error naming `AWS_CA_BUNDLE`. WHEN the endpoint
+  presents a self-signed certificate, or one issued by a CA outside the trust source, all three
+  tools SHALL refuse it as R4 refuses an unreachable endpoint, with a cause on stderr that names
+  the certificate. No option or variable SHALL turn verification off. A plain `http://` endpoint
+  override stays as it is: TLS does not apply to it. Tests on R10's loopback endpoint, with TLS
+  in front of it, SHALL exercise each of these cases.
 
 ## Non-goals (no-gos)
 
@@ -217,6 +229,15 @@ downloaded at run time, and a missing extension or a missing credential says wha
   credentials fail, but an absent or empty prefix is how a new index starts and is not a failure.
   R4 is reworded to say so. Ruled by the foreman as gate judge at the PLAN gate (resolved
   2026-11-05).
+- **Q:** Must the S3 tools authenticate the server's TLS certificate, and against which roots?
+  — **A:** Yes, all three, against one trust source the resolver chooses for both directions:
+  the CA file `AWS_CA_BUNDLE` names, else the platform's trust roots. Missing roots, or an
+  unusable `AWS_CA_BUNDLE`, refuse before any request; a self-signed or unknown-CA endpoint is
+  refused; plain `http://` overrides are unchanged (R11). Source: review cycle 3 finding 1
+  (`REVIEW.md`, "Review cycle 3"): the readers accepted any server certificate while the writer
+  verified, so one resolved endpoint got two levels of trust. Human ruling via the foreman: option
+  1 of the TLS blocker, a fourth build cycle that fixes it under a GOAL amendment. Amended
+  2026-11-05.
 
 ## Notes
 
