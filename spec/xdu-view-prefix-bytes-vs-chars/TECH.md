@@ -3,7 +3,7 @@ slug: xdu-view-prefix-bytes-vs-chars
 title: xdu-view lists full child names under a non-ASCII directory
 kind: fix
 appetite: small
-status: in_review
+status: done
 branch: fix/xdu-view-prefix-bytes-vs-chars
 base: main
 current_phase: done
