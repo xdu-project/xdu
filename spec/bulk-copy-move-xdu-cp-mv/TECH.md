@@ -1,0 +1,536 @@
+---
+slug: bulk-copy-move-xdu-cp-mv
+title: "Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine"
+kind: feature
+appetite: big
+status: in_progress
+branch: feature/bulk-copy-move-xdu-cp-mv
+base: main
+current_phase: P1
+last_updated: "2026-11-06"
+phases:
+  - id: P1
+    name: "Selection engine and xdu-cp's atomic, no-replace copy"
+    status: pending
+    satisfies: [R1, R3, R4, R6, R8, R9]
+    depends_on: []
+    parallel: false
+    hammerable: false
+    hill: uphill
+    verify: 'set -eu; mkdir -p target;
+      cargo test --locked --lib >target/p1-lib.log 2>&1;
+      for t in select::tests::the_selection_sql_binds_the_glob_and_the_pattern
+      select::tests::the_selection_always_orders_by_path_once
+      select::tests::the_selection_reuses_query_filters_predicates
+      select::tests::an_index_path_with_glob_metacharacters_is_refused
+      select::tests::a_partition_name_that_could_leave_the_index_is_refused
+      atomic_fs::tests::publish_never_replaces_an_existing_name
+      atomic_fs::tests::the_link_fallback_never_replaces_an_existing_name
+      atomic_fs::tests::the_link_fallback_rechecks_the_source_before_unlinking
+      atomic_fs::tests::a_failed_copy_leaves_nothing_at_the_final_name
+      atomic_fs::tests::copy_atomic_abandoned_at_every_step_never_leaves_a_partial_final_name
+      atomic_fs::tests::a_non_regular_source_is_never_opened
+      atomic_fs::tests::a_symlink_in_the_destination_tree_is_not_followed
+      atomic_fs::tests::a_symlinked_source_parent_is_not_followed
+      relocate::tests::a_row_outside_root_or_with_a_dot_dot_component_is_refused;
+      do grep -qF "test $t ... ok" target/p1-lib.log || { echo "P1: $t did not pass" >&2; exit 1; }; done;
+      cargo test --locked --test cp_tests >target/p1-cp.log 2>&1;
+      for t in cp_copies_exactly_the_selected_set_under_root cp_dry_run_writes_nothing
+      cp_dry_run_and_the_real_run_select_identical_rows_under_limit
+      cp_refuses_an_s3_index_before_anything cp_refuses_a_missing_or_non_directory_into
+      cp_refuses_a_path_outside_root_naming_the_first cp_refuses_a_destination_equal_to_its_source
+      cp_selects_the_right_rows_with_a_quote_in_the_index_and_partition
+      cp_refuses_a_glob_metacharacter_in_the_index_path cp_refuses_a_partition_that_does_not_exist
+      cp_counts_an_existing_destination_and_exits_non_zero cp_declined_prompt_writes_nothing
+      cp_accepted_prompt_copies cp_empty_match_exits_zero cp_skips_a_symlink_at_the_source_path
+      cp_skips_a_fifo_and_a_directory_at_the_source_path cp_accepts_every_xdu_find_filter
+      cp_reports_failures_on_stderr_and_exits_non_zero;
+      do grep -qF "test $t ... ok" target/p1-cp.log || { echo "P1: $t did not pass" >&2; exit 1; }; done;
+      if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
+      src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//";
+      then echo "P1: a replacing rename, copy or truncating open is in the new code" >&2; exit 1; fi;
+      if grep -nE "read_parquet\([^?]|rayon::|crate::(atomic_fs|relocate)" src/select.rs | grep -vE "^[0-9]+:[[:space:]]*//";
+      then echo "P1: select.rs interpolates the glob or reaches past the selection" >&2; exit 1; fi;
+      test -f doc/xdu-cp.1.scd;
+      if grep -nE "^[[:space:]]*[.'']" doc/xdu-cp.1.scd; then echo "P1: roff control line" >&2; exit 1; fi;
+      .agents/factory/bin/temp_index.sh sh -c "set -eu; mkdir dest; r=\$(cd tree && pwd -P);
+      xdu-cp --into dest --root \"\$r\" -u alice --force >/dev/null; test -f dest/alice/logs/app.log;
+      test -f dest/alice/data.bin; test ! -e dest/bob; test -f tree/alice/data.bin;
+      if xdu-cp --into dest --root \"\$r\" -u alice --force >/dev/null; then echo existing must exit non-zero >&2; exit 1; fi;
+      test \"\$(xdu-cp --into dest --root \"\$r\" -n | grep -c -- \" -> \")\" -eq 4";
+      cargo test --locked --test rm_tests >target/p1-rm.log 2>&1;
+      git diff --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs;
+      cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+      echo P1-GATE-GREEN'
+  - id: P2
+    name: "xdu-cp carries metadata, re-checks with --safe and counts every outcome"
+    status: pending
+    satisfies: [R1, R2, R7, R9]
+    depends_on: [P1]
+    parallel: false
+    hammerable: false
+    hill: uphill
+    verify: 'set -eu; mkdir -p target;
+      cargo test --locked --lib >target/p2-lib.log 2>&1;
+      for t in select::tests::the_live_check_agrees_with_the_sql_on_every_boundary
+      select::tests::size_uses_the_measure_that_matches_the_indexed_size
+      select::tests::a_file_that_shrank_below_min_size_fails_the_live_check
+      select::tests::a_non_regular_file_never_holds
+      atomic_fs::tests::a_source_written_during_the_copy_is_skipped_and_nothing_published
+      atomic_fs::tests::a_refused_chown_is_counted_and_drops_the_set_id_bits
+      atomic_fs::tests::a_refused_owner_still_carries_the_group
+      atomic_fs::tests::metadata_is_set_owner_then_mode_then_times;
+      do grep -qF "test $t ... ok" target/p2-lib.log || { echo "P2: $t did not pass" >&2; exit 1; }; done;
+      cargo test --locked --test cp_tests >target/p2-cp.log 2>&1;
+      for t in cp_carries_bytes_mode_atime_and_mtime cp_carries_owner_and_group_when_permitted
+      cp_safe_skips_a_file_that_no_longer_matches_each_filter cp_safe_keeps_a_file_that_still_matches
+      cp_safe_skips_a_file_replaced_by_a_symlink cp_summary_counts_each_outcome_separately
+      cp_never_modifies_a_source cp_keeps_diagnostics_off_stdout cp_verbose_lists_in_path_order;
+      do grep -qF "test $t ... ok" target/p2-cp.log || { echo "P2: $t did not pass" >&2; exit 1; }; done;
+      if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
+      src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//";
+      then echo "P2: a replacing rename, copy or truncating open is in the new code" >&2; exit 1; fi;
+      grep -qF -- "--safe" doc/xdu-cp.1.scd; grep -qiF "indexed size" doc/xdu-cp.1.scd;
+      .agents/factory/bin/temp_index.sh sh -c "set -eu; mkdir dest; r=\$(cd tree && pwd -P);
+      xdu-cp --into dest --root \"\$r\" --safe --force >out.txt; grep -qE \"^Copied: 4\$\" out.txt;
+      cmp tree/alice/data.bin dest/alice/data.bin";
+      cargo test --locked --test rm_tests >target/p2-rm.log 2>&1;
+      git diff --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs;
+      cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+      echo P2-GATE-GREEN'
+  - id: P3
+    name: "xdu-mv relocates on one filesystem with a no-replace rename"
+    status: pending
+    satisfies: [R3, R4, R5, R6, R7, R8, R9]
+    depends_on: [P2]
+    parallel: false
+    hammerable: false
+    hill: uphill
+    verify: 'set -eu; mkdir -p target;
+      cargo test --locked --lib >target/p3-lib.log 2>&1;
+      for t in relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source
+      atomic_fs::tests::a_same_filesystem_move_keeps_the_inode
+      atomic_fs::tests::a_same_filesystem_move_never_replaces
+      atomic_fs::tests::a_same_filesystem_move_by_the_link_route_never_replaces
+      atomic_fs::tests::a_same_filesystem_move_skips_a_non_regular_object;
+      do grep -qF "test $t ... ok" target/p3-lib.log || { echo "P3: $t did not pass" >&2; exit 1; }; done;
+      cargo test --locked --test mv_tests >target/p3-mv.log 2>&1;
+      for t in mv_renames_on_one_filesystem_keeping_the_inode mv_never_replaces_an_existing_destination
+      mv_dry_run_writes_nothing mv_dry_run_and_the_real_run_select_identical_rows_under_limit
+      mv_refuses_an_s3_index_before_anything mv_refuses_a_path_outside_root_before_moving_anything
+      mv_refuses_a_missing_into mv_declined_prompt_moves_nothing mv_empty_match_exits_zero
+      mv_safe_skips_a_changed_file_and_leaves_it mv_skips_a_symlink_at_the_source_path
+      mv_skips_a_directory_at_the_source_path mv_skips_a_fifo_at_the_source_path
+      mv_summary_counts_and_exit_status mv_accepts_every_xdu_find_filter;
+      do grep -qF "test $t ... ok" target/p3-mv.log || { echo "P3: $t did not pass" >&2; exit 1; }; done;
+      cargo test --locked --test cp_tests >target/p3-cp.log 2>&1;
+      if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
+      src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs src/bin/xdu-mv.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//";
+      then echo "P3: a replacing rename, copy or truncating open is in the new code" >&2; exit 1; fi;
+      test -f doc/xdu-mv.1.scd;
+      if grep -nE "^[[:space:]]*[.'']" doc/xdu-mv.1.scd; then echo "P3: roff control line" >&2; exit 1; fi;
+      .agents/factory/bin/temp_index.sh sh -c "set -eu; mkdir dest; r=\$(cd tree && pwd -P);
+      xdu-mv --into dest --root \"\$r\" -u bob -n >/dev/null; test -f tree/bob/notes.txt; test ! -e dest/bob;
+      xdu-mv --into dest --root \"\$r\" -u bob --force >/dev/null; test -f dest/bob/notes.txt; test ! -e tree/bob/notes.txt";
+      cargo test --locked --test rm_tests >target/p3-rm.log 2>&1;
+      git diff --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs;
+      cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+      echo P3-GATE-GREEN'
+  - id: P4
+    name: "Man pages, README and packaging in lockstep"
+    status: pending
+    satisfies: [R10]
+    depends_on: [P3]
+    parallel: false
+    hammerable: false
+    hill: uphill
+    verify: 'set -eu; mkdir -p target;
+      for f in doc/xdu-cp.1.scd doc/xdu-mv.1.scd; do grep -qF "The index is not updated." "$f";
+      grep -qF "Reading a source may update its atime" "$f"; grep -qF "XDU_INDEX" "$f"; grep -qF "XDU_JOBS" "$f";
+      if grep -nE "^[[:space:]]*[.'']" "$f"; then echo "P4: roff control line in $f" >&2; exit 1; fi; done;
+      grep -qF "xdu-cp -i" README.md; grep -qF "xdu-mv -i" README.md;
+      test "$(grep -c "xdu-rm xdu-cp xdu-mv; do" .github/workflows/release.yaml)" -eq 3;
+      test "$(grep -c "xdu-rm xdu-cp xdu-mv; do" packaging/extensions/check.sh)" -eq 3;
+      grep -qF "BINARIES=\"xdu xdu-find xdu-view xdu-rm xdu-cp xdu-mv\"" install.sh;
+      grep -qF -- "--bin xdu-cp --bin xdu-mv" Dockerfile; grep -qF "target/release/xdu-mv" Dockerfile;
+      grep -qF "target/release/xdu-mv" packaging/rpm/xdu.spec;
+      grep -qF "xdu*" hpccm/xdu.py; grep -qF "xdu*" hpccm/xdu.def; grep -qF "xdu*" hpccm/xdu.docker;
+      grep -qF "check share/man/man1/xdu-cp.1" .github/workflows/test.yaml;
+      grep -qF "check share/man/man1/xdu-mv.1" .github/workflows/test.yaml;
+      grep -qF "share/bash-completion/completions/xdu-cp.bash" .github/workflows/test.yaml;
+      grep -qF "share/zsh/site-functions/_xdu-mv" .github/workflows/test.yaml;
+      grep -qF "\"xdu-cp\", \"xdu-mv\"" tests/cli_version_tests.rs;
+      cargo test --locked --test cli_version_tests >target/p4-version.log 2>&1;
+      cargo build --locked --release --bin gen-completions >target/p4-gen.log 2>&1;
+      mkdir -p target/p4-comp/bash target/p4-comp/zsh;
+      ./target/release/gen-completions target/p4-comp/bash target/p4-comp/zsh 2>>target/p4-gen.log;
+      test -s target/p4-comp/bash/xdu-cp.bash; test -s target/p4-comp/bash/xdu-mv.bash;
+      test -s target/p4-comp/zsh/_xdu-cp; test -s target/p4-comp/zsh/_xdu-mv;
+      grep -qF "xdu-cp" AGENTS.md; grep -qF "xdu-mv" .agents/factory/invariants.md;
+      grep -qF "src/atomic_fs.rs" .agents/factory/invariants.md;
+      grep -qF "xdu-cp" issues/manpage-gate-coverage-gaps.md;
+      test -f issues/www-cp-mv-at-release.md; grep -qF "www-cp-mv-at-release" ROADMAP.md;
+      grep -qF "xdu-rm.1" issues/xdu-rm-on-shared-engine.md;
+      git diff --quiet edcc163 -- doc/xdu-rm.1.scd www/;
+      if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
+      src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs src/bin/xdu-mv.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//";
+      then echo "P4: a replacing rename, copy or truncating open is in the new code" >&2; exit 1; fi;
+      cargo test --locked >target/p4-all.log 2>&1;
+      git diff --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs;
+      cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+      echo P4-GATE-GREEN'
+  - id: P5
+    name: "xdu-mv crosses filesystems: durable copy, unchanged check, then unlink"
+    status: pending
+    satisfies: [R5]
+    depends_on: [P4]
+    parallel: false
+    hammerable: false
+    hill: uphill
+    verify: 'set -eu; mkdir -p target target/p5-tmp target/p5-samefs;
+      cargo test --locked --lib >target/p5-lib.log 2>&1;
+      for t in atomic_fs::tests::exdev_routes_to_the_copy_path
+      atomic_fs::tests::move_across_fails_closed_at_every_step
+      atomic_fs::tests::move_across_abandoned_at_every_step_leaves_the_file_whole_somewhere
+      atomic_fs::tests::move_across_flushes_file_and_directory_before_unlinking
+      atomic_fs::tests::move_across_keeps_a_source_that_grew_during_the_copy
+      atomic_fs::tests::move_across_keeps_a_source_whose_mtime_was_restored
+      atomic_fs::tests::move_across_keeps_a_source_swapped_before_the_unlink
+      atomic_fs::tests::move_across_rolls_back_when_the_source_unlink_fails
+      atomic_fs::tests::move_across_counts_an_existing_destination_without_copying
+      atomic_fs::tests::move_across_carries_metadata
+      relocate::tests::the_production_policy_routes_exdev_to_the_copy_path
+      relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source;
+      do grep -qF "test $t ... ok" target/p5-lib.log || { echo "P5: $t did not pass" >&2; exit 1; }; done;
+      test -f tests/xfs-wire.sh; test -f tests/mv_xfs_tests.rs;
+      cargo test --locked --test mv_xfs_tests -- --list >target/p5-xfs-list.log 2>&1;
+      test "$(grep -c ": test$" target/p5-xfs-list.log)" -ge 3;
+      if env -u XDU_TEST_XFS_DIR sh tests/xfs-wire.sh "" 3 >target/p5-xfs-unset.log 2>&1;
+      then echo "P5: xfs-wire.sh passed with no second filesystem" >&2; exit 1; fi;
+      grep -qF "XDU_TEST_XFS_DIR is not set" target/p5-xfs-unset.log;
+      if TMPDIR="$PWD/target/p5-tmp" XDU_TEST_XFS_DIR="$PWD/target/p5-samefs" sh tests/xfs-wire.sh "" 3 >target/p5-xfs-same.log 2>&1;
+      then echo "P5: xfs-wire.sh passed on the same filesystem" >&2; exit 1; fi;
+      grep -qF "XDU_TEST_XFS_DIR is not on another filesystem" target/p5-xfs-same.log;
+      grep -qF "/dev/shm" .github/workflows/test.yaml; grep -qF "hdiutil create" .github/workflows/test.yaml;
+      grep -qF "sh tests/xfs-wire.sh" .github/workflows/test.yaml; grep -qF "XDU_TEST_XFS_DIR" AGENTS.md;
+      grep -qiF "another filesystem" doc/xdu-mv.1.scd; grep -qF ".xdu-" doc/xdu-mv.1.scd;
+      grep -qF "The index is not updated." doc/xdu-mv.1.scd;
+      if grep -nE "^[[:space:]]*[.'']" doc/xdu-mv.1.scd; then echo "P5: roff control line" >&2; exit 1; fi;
+      test -f issues/xdu-mv-quarantine-unlink.md; grep -qF "xdu-mv-quarantine-unlink" ROADMAP.md;
+      if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
+      src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs src/bin/xdu-mv.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//";
+      then echo "P5: a replacing rename, copy or truncating open is in the new code" >&2; exit 1; fi;
+      cargo test --locked >target/p5-all.log 2>&1;
+      git diff --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs doc/xdu-rm.1.scd;
+      cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+      echo P5-GATE-GREEN'
+review:
+  last_reviewed_commit: ""
+  verdict: none
+  blocked_reason: ""
+  cycle: 0
+---
+
+# TECH.md — Bulk copy and move: `xdu-cp` and `xdu-mv` over a shared select-act engine
+
+The **context engine and finite-state machine** for building this feature. The YAML
+frontmatter above is the resume ground-truth (read it with
+`uv run --with pyyaml python .agents/factory/bin/next_phase.py spec/bulk-copy-move-xdu-cp-mv/TECH.md`);
+the per-phase checklists below are the work. `xdu-build` executes the next actionable phase, runs
+its `verify:` command, updates state via
+`uv run --with pyyaml python .agents/factory/bin/set_phase.py …`, and makes one atomic code+state
+commit.
+
+- **Vision / requirements (locked):** [`GOAL.md`](GOAL.md) — R-IDs are the contract.
+- **Authoritative design:** [`PLAN.md`](PLAN.md) (section numbers below are PLAN's).
+- **Backing research:** [`research/00-digest.md`](research/00-digest.md) + briefs 01–04.
+
+## Frontmatter field reference
+
+- `status` (top): `planned | in_progress | blocked | in_review | done` (`done` is stamped by
+  `xdu-publish` after confirmation, just before landing — the terminal state of the retained record)
+- `appetite`: `small | big` — caps phase count and build-iteration budget (circuit breaker).
+- phase `status`: `pending | in_progress | done | blocked`
+- `satisfies`: GOAL R-IDs this phase delivers (traceability anchor for `xdu-review`).
+- `depends_on`: phase ids that must be `done` first (a phase is actionable only when met).
+- `parallel`: `true` only for genuinely independent, non-coupled work. Every phase here touches
+  `src/cli.rs`, `src/lib.rs` or a file a later phase edits, so all are `false`.
+- `hammerable`: `false` marks a correctness/security phase that scope-hammering must **never**
+  cut. P5 is the GOAL's designated first cut, but that cut goes through a GOAL amendment (below),
+  never through hammering.
+- `hill`: `uphill` → `crest` → `downhill`.
+- `attempts`: durable failed-verify counter, bumped by `set_phase.py --phase P<n> --record-attempt`.
+- `verify`: the exact command that proves the phase. Every gate names its tests and greps
+  `test NAME ... ok` from a log, so a renamed or vanished test turns it red.
+- `review.cycle`: completed review passes, auto-incremented by every `set_phase.py --verdict …`.
+
+## Conventions (apply to every phase)
+
+- Commit conventions, code style, and load-bearing invariants come from
+  [`AGENTS.md`](../../AGENTS.md). Consult
+  [`.agents/factory/invariants.md`](../../.agents/factory/invariants.md) §2, §2b, §4, §5, §8, §10,
+  §11 and §13 for this change.
+- One phase per `xdu-build` invocation; one atomic commit containing **both** the code and the
+  `TECH.md` state change. Subjects `[feature] Build bulk-copy-move-xdu-cp-mv P<n>: …`.
+- **No `Co-Authored-By` trailer.**
+- A CLI change updates its `doc/*.scd` page **in the same commit** (§10). `scdoc` is not
+  installed on every agent host; when it is absent, say so in the commit body, and read the
+  page through `scdoc < f.scd | mandoc -Tutf8 | col -b` wherever it is.
+- **Untouchable:** `src/bin/xdu-rm.rs`, `tests/rm_tests.rs`, `doc/xdu-rm.1.scd`, `XduRmArgs`,
+  `XduFindArgs`, `parquet_source`, `deterministic_limit_clause`, `QueryFilters` and its
+  `to_conditions`. `src/lib.rs` gains three `pub mod` lines and nothing else.
+  `tests/common/mod.rs` gains arms and functions; no existing one changes.
+- **Never**, in non-comment lines of `src/select.rs`, `src/atomic_fs.rs`, `src/relocate.rs` or
+  the two new bins: `std::fs::rename`, `std::fs::copy`, `libc::rename`, `libc::renameat`,
+  `File::create`, `O_TRUNC`, `.truncate(true)`, `fs::write` (every code phase's gate greps).
+- No `spec/` R-/P-ids in source (§13). Test names describe behaviour.
+- Index rows hold the canonical crawl root: tests pass `--root` as `source.canonicalize()`
+  (macOS `TempDir` lives under `/var` → `/private/var`). Index fixtures use `--apparent-size`
+  where a size is asserted exactly. A test that asserts a carried gid first sets the source's
+  gid to `getgid()` (a temp dir's group can be one the caller is not in).
+- **Calendar checkpoint (GOAL Notes, the recorded cut).** If, by end of **2026-11-10**, P5's
+  local gate and CI's `XFS tests` step on both OSes are not green, stop and raise the cut to the
+  foreman. It is applied only through a GOAL amendment; then P5 is replaced by **P5-cut** (below).
+
+---
+
+## Phase P1 — Selection engine and xdu-cp's atomic, no-replace copy
+**Satisfies:** R1, R3, R4, R6, R8, R9 · **Depends on:** — · **Size:** L, ~1.5 days
+**Goal:** `xdu-cp` exists end to end. It selects through a bound, path-ordered statement,
+refuses everything R3 names before any write, previews with a zero-write dry-run, confirms,
+and copies each regular file atomically into the `--root` layout without ever replacing a name.
+Metadata carriage beyond bytes, the S1 torn-copy check and `--safe` arrive in P2.
+
+- [ ] `src/cli.rs`: `SelectArgs` (`#[derive(Args)]`, PLAN §2.7, every flag of R8 in `xdu-find`'s
+  order and wording, then `xdu-rm`'s `-l -n --safe -f -v -j`); `XduCpArgs` with
+  `#[command(flatten)] select`, `--into DIR` (required), `--root DIR` (default `/`), `name`,
+  `version`, `about`, `after_help` examples. `--safe` is accepted here and wired in P2: until P2,
+  passing it refuses with a clear error rather than being silently ignored.
+- [ ] `src/select.rs` (PLAN §2.2): `Row` (with the indexed `size`), `Selection`, `refuse_s3`,
+  `build_filters`, `checked_glob` (metacharacter, `/`, `.`, `..`, empty and missing-partition
+  refusals), `selection_sql` (pure; `read_parquet(?)`, `regexp_matches(path, ?)`, the other
+  predicates from `to_conditions` on a clone with the pattern cleared, the order tail written
+  once), `select()`.
+- [ ] `src/atomic_fs.rs` (PLAN §2.5): `DirHandle`; destination walk-and-create and source walk,
+  both `O_NOFOLLOW` per component with a per-worker parent cache; `open_source` (`fstatat`
+  NOFOLLOW first, open only `S_ISREG`, then `O_NOFOLLOW|O_NONBLOCK` open and a (dev, ino)
+  match); `rename_noreplace` with the full fail-closed chain (raw `SYS_renameat2` on Linux,
+  `renameatx_np` on macOS, the `linkat` route with its source re-check and NFS-retransmit inode
+  check); `sync_durable`; `copy_atomic` steps 1–3, 5, 7, 8 (existing pre-check, `.xdu-*.part`
+  temp, bytes, flush, publish, directory flush). The crate-private `Faults`/`StepHook` seam.
+- [ ] `src/relocate.rs` (PLAN §2.3, §2.4, §2.6): `RootMap`, `check_whole_set`, `confirm` (prompt
+  on stderr), the chunked ordered executor on a local pool, `Outcome`, `Summary`, `run_cp`.
+- [ ] `src/bin/xdu-cp.rs`: thin; S3 refusal first; exit status from the summary rule.
+- [ ] `Cargo.toml` `[[bin]] xdu-cp`; `src/bin/gen-completions.rs` entry; `tests/common/mod.rs`:
+  `binary_path` arm, `run_cp`, `run_with_stdin`.
+- [ ] `doc/xdu-cp.1.scd`: every flag, the mapping (its own worked example), the R3 refusals, the
+  glob-metacharacter refusal, exit status, `.xdu-*.part` leftovers. AGENTS.md's scdoc escaping
+  rules apply; no line starts with `.` or `'`.
+- [ ] Unit tests named in the `verify:` (the `linkat` route forced through `Faults`; abandon at
+  every `copy_atomic` step); `tests/cp_tests.rs` with the named tests (fixtures as `rm_tests.rs`).
+- **Verify:** see frontmatter (named lib and `cp_tests` tests; grep bans; a `temp_index` drive:
+  copy one partition, a re-run exits non-zero on existing files, dry-run lists all four;
+  `rm_tests` and the untouched-file diff; clippy; fmt).
+- **Touches:** `src/cli.rs` (high-blast, additive), `src/lib.rs` (high-blast, three lines), new
+  `src/select.rs`, `src/atomic_fs.rs`, `src/relocate.rs`, `src/bin/xdu-cp.rs`,
+  `src/bin/gen-completions.rs`, `Cargo.toml`, `tests/common/mod.rs`, `tests/cp_tests.rs`,
+  `doc/xdu-cp.1.scd`.
+
+## Phase P2 — xdu-cp carries metadata, re-checks with --safe and counts every outcome
+**Satisfies:** R1, R2, R7, R9 · **Depends on:** P1 · **Size:** M, ~0.5 day
+**Goal:** a copy carries the source's bytes (never torn), permission bits, atime and mtime, and
+owner and group where permitted (a refusal counted, never silent); `--safe` re-checks every given
+filter against the live object; the summary counts every outcome separately.
+
+- [ ] `copy_atomic` step 4 (PLAN §2.5): `fchown` from S0 (any error a refusal; group-only
+  retry; set-id bits dropped when an id was not carried), `fchmod(mode & 0o7777)`, `futimens`
+  with nanoseconds, in that order. Step 6: the S1 check for both tools.
+- [ ] `select.rs`: `Live`, `Verdict`, `holds_live` (PLAN §2.2) against the stored thresholds;
+  size by the measure that matches the row's indexed size, both when neither does. A DuckDB
+  boundary-grid test evaluates `to_where_clause()` over one-row `VALUES` and asserts the same
+  boolean as `holds_live` at `t-1`, `t`, `t+1` for every clock and every mode operator.
+- [ ] Wire `--safe` in `relocate` on the `fstat` of the opened source; remove P1's refusal.
+- [ ] `Summary` and `-v` listing complete (R9 taxonomy); failures always on stderr.
+- [ ] `doc/xdu-cp.1.scd`: `--safe` semantics (every filter; the size rule, naming the "indexed
+  size"; the regular-file rule), ownership best-effort, the R10 sentences ("The index is not
+  updated." and "Reading a source may update its atime …", each kept on one source line).
+- [ ] Tests named in the `verify:`. `cp_carries_owner_and_group_when_permitted` sets the source's
+  gid to `getgid()` and chowns to the caller's own ids (the only success path CI can take
+  without root); the refusal paths go through the `Faults` seam.
+- **Verify:** see frontmatter.
+- **Touches:** `src/select.rs`, `src/atomic_fs.rs`, `src/relocate.rs`, `tests/cp_tests.rs`,
+  `doc/xdu-cp.1.scd`.
+
+## Phase P3 — xdu-mv relocates on one filesystem with a no-replace rename
+**Satisfies:** R3, R4, R5 (same filesystem), R6, R7, R8, R9 · **Depends on:** P2 · **Size:** M, ~0.5 day
+**Goal:** `xdu-mv` exists end to end on one filesystem, sharing every gate with `xdu-cp`. A
+cross-device rename is reported per file and the source kept; that is the shipped behaviour if
+the cut applies.
+
+- [ ] `src/cli.rs`: `XduMvArgs` (flatten `SelectArgs`, `--into`, `--root`, `version`).
+- [ ] `atomic_fs`: `move_same_fs` (PLAN §2.5): **always** `fstatat(src_parent, name, NOFOLLOW)`
+  and skip anything but `S_ISREG`; `holds_live` on it under `--safe`; the existing-destination
+  pre-check; `rename_noreplace`.
+- [ ] `relocate`: `run_mv` with a `CrossFs` policy enum, `Refuse | Copy`. This phase ships
+  `Refuse`: `CrossDevice` fails the file with "SRC: crossing filesystems is not supported by this
+  build" on stderr, the source kept. `Copy` arrives in P5; `Refuse` stays as the cut's behaviour
+  and is unit-tested either way.
+- [ ] `src/bin/xdu-mv.rs`, `Cargo.toml` `[[bin]]`, `gen-completions`, `tests/common` arm and
+  `run_mv`.
+- [ ] `doc/xdu-mv.1.scd` (same coverage as `xdu-cp.1`, the R10 sentences, its own worked mapping
+  example with paths distinct from `xdu-cp.1`'s), including the swap note for the
+  same-filesystem rename.
+- [ ] Tests named in the `verify:` (directory and FIFO cases run **without** `--safe`).
+- **Verify:** see frontmatter (named lib and `mv_tests` tests; `cp_tests` still green; grep bans;
+  a `temp_index` drive: dry-run moves nothing, the real run moves `bob`).
+- **Touches:** `src/cli.rs` (high-blast, additive), `src/atomic_fs.rs`, `src/relocate.rs`,
+  `src/bin/xdu-mv.rs`, `src/bin/gen-completions.rs`, `Cargo.toml`, `tests/common/mod.rs`,
+  `tests/mv_tests.rs`, `doc/xdu-mv.1.scd`.
+
+## Phase P4 — Man pages, README and packaging in lockstep
+**Satisfies:** R10 · **Depends on:** P3 · **Size:** M, ~0.5 day
+**Goal:** both tools ship everywhere the four existing binaries ship, documented, with their man
+pages under the counted literal gate. With P1–P4 done the cycle is publishable even if P5 is cut.
+
+- [ ] `doc/xdu-cp.1.scd`, `doc/xdu-mv.1.scd`: final R10 pass; SEE ALSO; `XDU_INDEX` and
+  `XDU_JOBS` each named twice (flag and ENVIRONMENT), as `xdu-rm.1` does. Cross-references in
+  `doc/xdu.1.scd` (SEE ALSO, the marker-warning list, the lossy-path note), `doc/xdu-find.1.scd`
+  and `doc/xdu-view.1.scd` SEE ALSO. **Not** `doc/xdu-rm.1.scd` (GOAL non-goal): add a line to
+  `issues/xdu-rm-on-shared-engine.md` that its migration also adds `xdu-cp(1)`/`xdu-mv(1)` to
+  `xdu-rm.1`'s SEE ALSO.
+- [ ] `.github/workflows/test.yaml`: `check share/man/man1/xdu-cp.1 '2x:XDU_INDEX' '2x:XDU_JOBS'
+  '1x:s3://BUCKET/PREFIX' '<N>x:<its worked destination path>'` and the same for `xdu-mv.1`
+  with its own path (free of `_` and `*`; counts derived from an ubuntu-24.04 render and
+  re-counted by hand); +2 man, +2 bash, +2 zsh entries in the produced list; "all six" in its OK
+  line. The same-commit three-place obligation (§13): `AGENTS.md` Commands and `invariants.md`
+  §13 name the new literal class.
+- [ ] `release.yaml` lines 168, 208, 289 and `packaging/extensions/check.sh` lines 49, 100, 108:
+  `… xdu-rm xdu-cp xdu-mv; do`; optional `xdu-cp --dry-run` cold smoke beside `check.sh:122`.
+  `Dockerfile` `--bin` and `cp` lists and its "four" comment **in the same commit as `check.sh`**
+  (both run it).
+- [ ] `install.sh` `BINARIES`; `packaging/rpm/xdu.spec` (`--bin`, `install`, `%files`).
+- [ ] `hpccm/xdu.py`: replace the named `--version` smoke with a loop over `{bindir}/xdu*`;
+  regenerate `xdu.def` and `xdu.docker` with `make -B` (hpccm is not on the planning host; if it
+  is absent on the build host, say so, hand-edit the specs to the recipe's exact output, and
+  rely on CI's `make check`); `hpccm/README.md` binary list.
+- [ ] `tests/cli_version_tests.rs` array.
+- [ ] `README.md`: one `xdu-cp -i …` and one `xdu-mv -i …` example after "Bulk Deletion".
+- [ ] `AGENTS.md` (binary counts, `#[command]` count, pages count, repo map, data flow, CLI
+  surface, tarball layout, §5's engine statement) and `invariants.md` (§5 engine binding, §13
+  counts and tarball, the high-blast list gains `src/select.rs`, `src/atomic_fs.rs`,
+  `src/relocate.rs`, `src/bin/xdu-mv.rs`). `issues/manpage-gate-coverage-gaps.md` and its
+  ROADMAP paragraph: six pages, two hand-added this cycle.
+- [ ] File `issues/www-cp-mv-at-release.md` (from `templates/ISSUE.md`) with a `ROADMAP.md` entry:
+  at the release that ships the tools, move them from the site's roadmap (`www/index.html`,
+  † v0.8) to its tools table, and correct "one shared engine behind `rm`, `cp` and `mv`" (rm is
+  not migrated). `www/` deploys on push to `main`, so it is not edited in this cycle.
+- **Verify:** see frontmatter (the R10 sentences and roff check on both pages; README; every
+  packaging list by exact count; generated completions; `cli_version_tests`; issue files;
+  `doc/xdu-rm.1.scd` and `www/` untouched; the whole suite; clippy; fmt). CI's packaging job is
+  the render, literal-count and `make check` proof.
+- **Touches:** `doc/*.scd` (not `xdu-rm.1.scd`), `README.md`, `.github/workflows/test.yaml`,
+  `.github/workflows/release.yaml`, `packaging/extensions/check.sh`, `Dockerfile`, `install.sh`,
+  `packaging/rpm/xdu.spec`, `hpccm/` (recipe, specs, README), `tests/cli_version_tests.rs`,
+  `AGENTS.md`, `.agents/factory/invariants.md`, `issues/`, `ROADMAP.md`.
+
+## Phase P5 — xdu-mv crosses filesystems: durable copy, unchanged check, then unlink
+**Satisfies:** R5 (cross filesystem) · **Depends on:** P4 · **Size:** L, ~1.0 day
+**Goal:** a cross-device move copies as `xdu-cp` does, unlinks the source only after the copy
+and its directory are durable and the source is unchanged, and leaves every file whole
+somewhere at every step. Proven by fault-seam unit tests on every OS and by a real second
+filesystem in CI. This is the last phase and the GOAL's first cut.
+
+- [ ] `atomic_fs::move_across` (PLAN §2.5): S0 at open; the source-parent `faccessat` pre-check;
+  `copy_atomic` steps 1–6 (S1 included); publish; directory flush; S2 check (dev, ino, type,
+  size, mtime, ctime) immediately before `unlinkat(src_parent, name)`; inode-checked rollback of
+  our destination on a failed flush, an S2 mismatch or a failed unlink (counted failed or
+  skipped as PLAN says); best-effort source-directory flush. Never writes the source's times.
+- [ ] `relocate`: the binary's policy becomes `CrossFs::Copy`; `CrossDevice` routes to
+  `move_across`. `Refuse` stays and keeps its unit test.
+- [ ] Unit tests named in the `verify:`: a `StepHook` that fails at each `Step`, one that
+  abandons at each `Step` without cleanup (simulated crash; then assert source whole or final
+  name whole, never a partial final name), a recording hook asserting no unlink precedes both
+  flushes, mutation cases (append; same-size rewrite with the mtime restored, which only ctime
+  catches; a swap of the source name before the unlink), a forced unlink failure, and a
+  `relocate` test that drives the **production** policy through a forced `EXDEV`.
+- [ ] `tests/mv_xfs_tests.rs`: at least three `#[ignore = "needs XDU_TEST_XFS_DIR on a second
+  filesystem"]` tests (a move across carrying bytes, mode and times; an existing destination
+  skipped and counted; the source gone and the destination's `st_dev` different). The shared
+  fixture **panics** with "XDU_TEST_XFS_DIR is not set" when the variable is unset, and with
+  "XDU_TEST_XFS_DIR is not on another filesystem" when a probe rename from a `TempDir` into it
+  does not return `EXDEV`, so the tier can never pass vacuously.
+- [ ] `tests/xfs-wire.sh PREFIX MIN`, modelled on `tests/s3-wire.sh`: runs `mv_xfs_tests` with
+  `--include-ignored` and fails unless the passed count equals the listed count and is at least
+  MIN.
+- [ ] `.github/workflows/test.yaml`, test matrix, before `Test`: the Linux step mkdirs
+  `/dev/shm/xdu-xfs`, asserts its `stat -c %d` differs from `$GITHUB_WORKSPACE`'s and exports
+  `XDU_TEST_XFS_DIR`; the macOS step creates and attaches an APFS image with `hdiutil create -ov
+  -size 256m -fs APFS` in a three-try retry loop, asserts the device differs and exports the
+  mount. Then an `XFS tests` step: `sh tests/xfs-wire.sh "" N`, N the file's listed count. No
+  step runs anything under `spec/`.
+- [ ] `AGENTS.md` Testing: the `XDU_TEST_XFS_DIR` tier and how to run it on a host with a second
+  filesystem.
+- [ ] `doc/xdu-mv.1.scd`: the cross-filesystem sequence ("another filesystem"), the flush cost,
+  the remaining races (PLAN §2.5), destinations without a no-replace rename or hard links. Do not
+  repeat the page's worked destination path or add an `XDU_*` mention: P4's counted literals
+  must stay true; if they change, re-count and update `test.yaml` in the same commit.
+- [ ] File `issues/xdu-mv-quarantine-unlink.md` (from `templates/ISSUE.md`) with a `ROADMAP.md`
+  entry: the quarantine rename that would close the final-name swap race (PLAN §5).
+- [ ] **Deferral ledger (this is the last phase):** walk P1–P5's bodies and commit messages for
+  "do not fix here", "known limitation", "follow-up", "deferred", "later"; each must have an
+  `issues/` file and a `ROADMAP.md` entry. Expected set: `xdu-mv-quarantine-unlink` (P5),
+  `www-cp-mv-at-release` (P4), the `xdu-rm.1` SEE ALSO line in
+  `issues/xdu-rm-on-shared-engine.md` (P4). `issues/s3-index-rm.md` and
+  `issues/local-reader-bound-parameters.md` are widened and narrowed at publish (GOAL), not here.
+- **Verify:** see frontmatter. The local gate proves the seam layer and the production routing,
+  that the tier exists with at least three tests, that `xfs-wire.sh` fails for the right reason
+  with no second filesystem and on the same filesystem, and that CI wires both OS steps. **The
+  real-`EXDEV` run is proven only by CI's `XFS tests` step**; the sandbox on the planning host
+  refused every disk-image route (research 02). That CI result is part of the checkpoint.
+- **Touches:** `src/atomic_fs.rs`, `src/relocate.rs`, `tests/mv_xfs_tests.rs`,
+  `tests/xfs-wire.sh`, `.github/workflows/test.yaml`, `AGENTS.md`, `doc/xdu-mv.1.scd`,
+  `issues/xdu-mv-quarantine-unlink.md`, `ROADMAP.md`.
+
+### P5-cut — applies only after a GOAL amendment (the recorded first cut)
+**Satisfies:** R5 as amended · **Size:** S, ~0.25 day. The foreman amends `GOAL.md` (R5's
+cross-filesystem path becomes a refusal with a clear error, and the path is seeded), then
+rewrites P5's frontmatter to this phase with `set_phase.py`. Work: keep P3's per-file
+`CrossFs::Refuse` (no `st_dev` pre-flight: it misfires on overlayfs and misses bind mounts,
+research 02); state the refusal in `xdu-mv(1)`; file `issues/xdu-mv-cross-filesystem.md` (from
+`templates/ISSUE.md`, carrying PLAN §2.5's `move_across` design, research 02's CI plan and the
+quarantine hardening) with a `ROADMAP.md` entry; run the deferral ledger above with
+`xdu-mv-cross-filesystem` in place of `xdu-mv-quarantine-unlink`. Verify: the named
+`relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source`, `grep -qiF
+"crossing filesystems" doc/xdu-mv.1.scd`, `test -f issues/xdu-mv-cross-filesystem.md`, its
+ROADMAP grep, and the `rm_tests`/diff/clippy/fmt tail.
+
+---
+
+## Calendar and fit
+
+| Day | Work |
+|-----|------|
+| 2026-11-06 | Plan (this) |
+| 11-07 – 11-08 | P1 (1.5 d), P2 starts |
+| 11-09 | P2, P3 |
+| 11-10 | P4, P5 (**checkpoint end of day: P5's gate and CI's `XFS tests` green, else the cut**) |
+| 11-11 | CI, blind review |
+| 11-12 | One remediation |
+| 11-13 | Publish |
+
+Estimate 4.0 build-days (P1 1.5, P2 0.5, P3 0.5, P4 0.5, P5 1.0) against about 3. P1–P4 (3.0 d)
+fit; P5 does not, with margin. **The cut is the expected path**: plan on P5-cut unless P1–P4
+land early. The checkpoint keys on CI, so the foreman must start a CI run on P5's branch head on
+11-10.
+
+## How `xdu-build` drives this
+
+1. `next_phase.py` prints the next actionable phase (statuses are authoritative; the
+   `current_phase` pointer is reconciled against them).
+2. Pre-flight: clean tree, on `branch`, `base` reachable.
+3. Execute every `[ ]` in the phase (consult `PLAN.md` / `research/` for detail).
+4. Run the phase's `verify:` command — never advance on a checkbox alone.
+5. Amend this file freely if reality diverges (regenerate frontmatter with `set_phase.py`; note the
+   amendment in the commit body). STOP and escalate only on a **`GOAL.md` contradiction**.
+6. Mark the phase `done`, advance `current_phase`, `--touch`; one `[feature]` commit; stop and
+   report.
