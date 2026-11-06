@@ -46,3 +46,18 @@ is skipped by the parser):
 - **Skill cause:** fix cycles routinely carry a "fails on main" criterion, and Step 6's `verify:` guidance only describes green gates; each plan has to reinvent the red check and its pitfalls (shared `target/` swaps `CARGO_BIN_EXE_*` binaries; a compile error looks like red).
 - **Recommended fix:** promote a generic `red_on_base.sh BASE TEST TOKEN -- CARGO_ARGS` into `.agents/factory/bin/` and name it in Step 6 for `kind: fix`.
 - **Confidence:** med · **Effort:** small
+
+## F3 — A red gate that shares one target dir can test the wrong tree
+`origin=xdu-build:P2 severity=high category=tooling status=open target=.agents/factory/bin/ (the F2 helper)`
+- **What happened:** `verify/red.sh` builds every red tree into one `target/red-target`. Cargo
+  keys a path package by paths relative to its root, so every tree gets the same hashes. `git
+  archive` keeps commit-time mtimes, so the `base` tree looked fresh and reused the previous
+  mutant's `xdu` library. The base red passed the gate while really testing `mutant-nofffd`.
+  The token matched, and only the failing directory showed it.
+- **Skill cause:** Step 4 says to see the gate fail once, but nothing tells a plan that its red
+  gate can be answered by another tree's build. Each plan writes its own red script (F2), and
+  this pitfall is invisible from its output.
+- **Recommended fix:** the promoted `red_on_base.sh` (F2) stamps every extracted file before
+  building and requires a `Compiling <crate> v` line in its log. Its report names the directory
+  the test failed under, so a reviewer can tell base from mutant.
+- **Confidence:** high · **Effort:** small

@@ -3,10 +3,10 @@ slug: xdu-view-prefix-bytes-vs-chars
 title: xdu-view lists full child names under a non-ASCII directory
 kind: fix
 appetite: small
-status: in_progress
+status: in_review
 branch: fix/xdu-view-prefix-bytes-vs-chars
 base: main
-current_phase: P2
+current_phase: done
 last_updated: '2026-11-06'
 phases:
 - id: P1
@@ -37,7 +37,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
 - id: P2
   name: 'The S3 arm: wire test with explicit names; wire count 54; ledger'
-  status: pending
+  status: done
   satisfies:
   - R4
   - R5
@@ -45,7 +45,7 @@ phases:
   - P1
   parallel: false
   hammerable: false
-  hill: uphill
+  hill: downhill
   verify: 'set -eu; mkdir -p target; if [ ! -f target/test-ext/httpfs.duckdb_extension
     ]; then cargo build --locked --example extension-probe; sh packaging/extensions/fetch.sh
     target/debug/examples/extension-probe target/test-ext; fi; XDU_TEST_EXTENSION_DIR=target/test-ext
@@ -161,15 +161,15 @@ statement text stays pinned exactly, and the regression test is shown to fail on
 **Goal:** the same walk passes over an `s3://` index with the non-ASCII directory above and below
 the partition, the test is red on `7689a92`, and the standing CI gate counts it.
 
-- [ ] `tests/s3_tests.rs`: `view_non_ascii_directories_list_full_names` (PLAN §2.4), `#[test]` and
+- [x] `tests/s3_tests.rs`: `view_non_ascii_directories_list_full_names` (PLAN §2.4), `#[test]` and
       the siblings' exact `#[ignore = "…"]` reason; ASCII partition `p` only, under a non-ASCII
       crawled root; the explicit `"s3 {view} full names under {dir}"` walk over the S3 index
       before any local query, then `ViewParity::compare` over the walked directories, then
       `parity.finish()`. Reuse the P1 fixture and `set_atime_at`. No early
       `return` (the wire script refuses it).
-- [ ] `.github/workflows/test.yaml`: `sh tests/s3-wire.sh "" 54`. `AGENTS.md`:
+- [x] `.github/workflows/test.yaml`: `sh tests/s3-wire.sh "" 54`. `AGENTS.md`:
       `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 54`. Same commit as the test.
-- [ ] Deferral ledger: walk P1, P2 and PLAN for "not fixed here", "follow-up", "known limitation",
+- [x] Deferral ledger: walk P1, P2 and PLAN for "not fixed here", "follow-up", "known limitation",
       "deferred". The one deferral this cycle makes, `LIKE` `_`/`%` over-matching, is recorded as
       `issues/xdu-view-like-metacharacters.md` with a `ROADMAP.md` entry (filed at plan). Any new
       one found while building gets its own `issues/` file and ROADMAP entry before this phase
@@ -179,6 +179,22 @@ the partition, the test is red on `7689a92`, and the standing CI gate counts it.
   red with `s3 list full names under` on `base` and the three mutants; the seed and its entry;
   `scope.sh` still green; full `cargo test`, clippy, fmt).
 - **Touches:** `tests/s3_tests.rs`, `.github/workflows/test.yaml` (**CI gate**), `AGENTS.md`.
+- **Amended at build (2026-11-06).**
+  - The S3 test adds wide filler (`wide_source_tree`) in `p/pad` and at the crawled root.
+    Without it the fixture's chunks are smaller than a footer read, and `parity.finish()`
+    refuses the whole-object GET. The filler is walked like the rest of `p`.
+  - `verify/red.sh` now stamps every extracted file and requires `Compiling xdu v` in the
+    log. All trees share `target/red-target` under the same package hashes, and `git
+    archive` keeps commit-time mtimes. That let the `base` tree reuse the previous mutant's
+    library, so a base red failed under `bad\u{FFFD}name` instead of at the partition root.
+    Re-run after the fix, all eight red runs compile `xdu` and fail where they should: base at
+    the partition root, each mutant under its own directory.
+  - Ledger: no new deferral. The `LIKE` one is filed (`issues/xdu-view-like-metacharacters.md`
+    plus its ROADMAP entry).
+- **Left for CI:** the Tests workflow's "S3 tests" step on both legs must print
+  `s3-wire: '' 54 of 54 passed`. The Linux leg is the first run of both new tests on
+  Linux, where names are stored byte for byte (`cargo test` runs `view_tests`; the wire tier
+  runs the S3 test). The red gate is local only.
 
 ---
 

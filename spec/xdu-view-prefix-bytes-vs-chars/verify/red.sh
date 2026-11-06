@@ -93,8 +93,15 @@ case $XDU_TEST_EXTENSION_DIR in
 esac
 export XDU_TEST_EXTENSION_DIR
 
+# Every tree builds the same package into one target dir, and cargo keys the build by paths
+# relative to the tree, so only mtimes tell one tree's sources from the last one's. git archive
+# stamps files with the commit time, older than any build, which would let the base tree reuse
+# the previous mutant's library. Stamp every file now, and require below that xdu was compiled.
+find "$src" -type f -exec touch {} + || die "cannot stamp the tree's files"
+
 (cd "$src" && CARGO_TARGET_DIR="$root/target/red-target" cargo test --locked "$@") >"$log" 2>&1
 rc=$?
+grep -qF "Compiling xdu v" "$log" || die "xdu was not compiled for $tree, so another tree's build answered (see $log)"
 if [ "$rc" -eq 0 ]; then die "$name passes on $tree, so it does not detect it (see $log)"; fi
 grep -qF "test $name ... FAILED" "$log" || die "$name did not run and fail on $tree (see $log)"
 grep -qF "$token" "$log" || die "$name failed on $tree, but not with \"$token\" (see $log)"
