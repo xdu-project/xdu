@@ -143,3 +143,60 @@ The image builds run `check.sh` too, inside the image build.
   `2026-11-06T02:00:06.3050446Z #22 11.52 extension-check: ok platform=linux_amd64 engine=v1.4.4`
 
 Each image leg's three tool lines are 403 answers of the same form as above.
+
+## Review cycle 4 remediation: head `e1311fc` (runs 42239258332, 42239258104, 42239257985)
+
+All three runs concluded `success`; every job `success` except the jobs skipped on a branch
+(Publish release assets; image push, merge and sign). Quoted from `target/ci/run-<id>.log`.
+The probe lines show the new root-bearing-bundle rule (R11) accepts each platform's bundle:
+a bundle without a self-signed root would refuse before any request, and the probe passed.
+
+- Tests 42239258332, job `Test (ubuntu-24.04)`, step `S3 tests`:
+  `Test (ubuntu-24.04)	S3 tests	2026-11-06T15:08:42.5558204Z s3-wire: '' 53 of 53 passed`
+- Same job, step `AWS TLS probe`:
+  `Test (ubuntu-24.04)	AWS TLS probe	2026-11-06T15:08:42.5793038Z aws-tls-probe: platform bundle /etc/ssl/certs/ca-certificates.crt`
+  `Test (ubuntu-24.04)	AWS TLS probe	2026-11-06T15:08:44.2460124Z aws-tls-probe: xdu-find: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Test (ubuntu-24.04)	AWS TLS probe	2026-11-06T15:08:45.8899719Z aws-tls-probe: xdu-view: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Test (ubuntu-24.04)	AWS TLS probe	2026-11-06T15:08:46.1106999Z aws-tls-probe: xdu: 2026-11-06T15:08:46Z ERROR the S3 endpoint refused the credentials while listing the index prefix for s3://xdu-tls-probe/p; check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, and that they may write there (Generic S3 error: Error performing list request: Error performing GET https://xdu-tls-probe.s3.us-east-1.amazonaws.com/?list-type=2&prefix=p%2F in 199.082962ms - HTTP 403 InvalidAccessKeyId)`
+- Job `Test (macos-15)`, step `S3 tests`:
+  `Test (macos-15)	S3 tests	2026-11-06T15:11:50.1114400Z s3-wire: '' 53 of 53 passed`
+- Same job, step `AWS TLS probe`:
+  `Test (macos-15)	AWS TLS probe	2026-11-06T15:11:50.2180060Z aws-tls-probe: platform bundle /etc/ssl/cert.pem`
+  `Test (macos-15)	AWS TLS probe	2026-11-06T15:11:52.1520930Z aws-tls-probe: xdu-find: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Test (macos-15)	AWS TLS probe	2026-11-06T15:11:53.8264910Z aws-tls-probe: xdu-view: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Test (macos-15)	AWS TLS probe	2026-11-06T15:11:54.0411170Z aws-tls-probe: xdu: 2026-11-06T15:11:54Z ERROR the S3 endpoint refused the credentials while listing the index prefix for s3://xdu-tls-probe/p; check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, and that they may write there (Generic S3 error: Error performing list request: Error performing GET https://xdu-tls-probe.s3.us-east-1.amazonaws.com/?list-type=2&prefix=p%2F in 127.146125ms - HTTP 403 InvalidAccessKeyId)`
+- Job `Packaging (man + completions generate)`:
+  `Packaging (man + completions generate)	Assert critical literals survive into the published man-page text	2026-11-06T15:02:35.7717737Z OK: every asserted literal survived into the published man-page text`
+- Release 42239258104, job `Build (aarch64-unknown-linux-gnu)`, step `Check extensions load (cold HOME)`:
+  `Build (aarch64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:29:50.8470371Z aws-tls-probe: platform bundle /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`
+  `Build (aarch64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:29:51.8918535Z aws-tls-probe: xdu-find: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build (aarch64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:29:52.8390368Z aws-tls-probe: xdu-view: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build (aarch64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:29:52.9240696Z aws-tls-probe: xdu: 2026-11-06T15:29:52Z ERROR the S3 endpoint refused the credentials while listing the index prefix for s3://xdu-tls-probe/p; check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, and that they may write there (Generic S3 error: Error performing list request: Error performing GET https://xdu-tls-probe.s3.us-east-1.amazonaws.com/?list-type=2&prefix=p%2F in 75.139766ms - HTTP 403 InvalidAccessKeyId)`
+  `Build (aarch64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:29:52.9781547Z extension-check: ok platform=linux_arm64 engine=v1.4.4`
+- Release 42239258104, job `Build (x86_64-unknown-linux-gnu)`, step `Check extensions load (cold HOME)`:
+  `Build (x86_64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:35:31.9142861Z aws-tls-probe: platform bundle /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`
+  `Build (x86_64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:35:33.3745551Z aws-tls-probe: xdu-find: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build (x86_64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:35:34.7699662Z aws-tls-probe: xdu-view: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build (x86_64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:35:34.9402251Z aws-tls-probe: xdu: 2026-11-06T15:35:34Z ERROR the S3 endpoint refused the credentials while listing the index prefix for s3://xdu-tls-probe/p; check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, and that they may write there (Generic S3 error: Error performing list request: Error performing GET https://xdu-tls-probe.s3.us-east-1.amazonaws.com/?list-type=2&prefix=p%2F in 158.172028ms - HTTP 403 InvalidAccessKeyId)`
+  `Build (x86_64-unknown-linux-gnu)	Check extensions load (cold HOME)	2026-11-06T15:35:35.0032427Z extension-check: ok platform=linux_amd64 engine=v1.4.4`
+- Release 42239258104, job `Build macOS (aarch64-apple-darwin)`, step `Check extensions load (cold HOME)`:
+  `Build macOS (aarch64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:25:46.1715940Z aws-tls-probe: platform bundle /etc/ssl/cert.pem`
+  `Build macOS (aarch64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:25:47.6937460Z aws-tls-probe: xdu-find: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build macOS (aarch64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:25:49.1734110Z aws-tls-probe: xdu-view: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build macOS (aarch64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:25:49.3561350Z aws-tls-probe: xdu: 2026-11-06T15:25:49Z ERROR the S3 endpoint refused the credentials while listing the index prefix for s3://xdu-tls-probe/p; check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, and that they may write there (Generic S3 error: Error performing list request: Error performing GET https://xdu-tls-probe.s3.us-east-1.amazonaws.com/?list-type=2&prefix=p%2F in 129.145375ms - HTTP 403 InvalidAccessKeyId)`
+  `Build macOS (aarch64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:25:49.5718040Z extension-check: ok platform=osx_arm64 engine=v1.4.4`
+- Release 42239258104, job `Build macOS (x86_64-apple-darwin)`, step `Check extensions load (cold HOME)`:
+  `Build macOS (x86_64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:27:13.9609990Z aws-tls-probe: platform bundle /etc/ssl/cert.pem`
+  `Build macOS (x86_64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:27:15.6492560Z aws-tls-probe: xdu-find: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build macOS (x86_64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:27:17.4658110Z aws-tls-probe: xdu-view: Error: the S3 endpoint refused the credentials while listing the index for s3://xdu-tls-probe/p (HTTP 403); check the access key, secret and region`
+  `Build macOS (x86_64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:27:17.7821220Z aws-tls-probe: xdu: 2026-11-06T15:27:17Z ERROR the S3 endpoint refused the credentials while listing the index prefix for s3://xdu-tls-probe/p; check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or the profile AWS_PROFILE names, and that they may write there (Generic S3 error: Error performing list request: Error performing GET https://xdu-tls-probe.s3.us-east-1.amazonaws.com/?list-type=2&prefix=p%2F in 222.244397ms - HTTP 403 InvalidAccessKeyId)`
+  `Build macOS (x86_64-apple-darwin)	Check extensions load (cold HOME)	2026-11-06T15:27:18.4669940Z extension-check: ok platform=osx_amd64 engine=v1.4.4`
+- Publish Image 42239257985, job `Validate build (linux/arm64)`:
+  `Validate build (linux/arm64)	UNKNOWN STEP	2026-11-06T15:15:11.1899145Z #22 6.587 aws-tls-probe: platform bundle /etc/ssl/certs/ca-certificates.crt`
+  `Validate build (linux/arm64)	UNKNOWN STEP	2026-11-06T15:15:13.8822088Z #22 9.310 extension-check: ok platform=linux_arm64 engine=v1.4.4`
+- Publish Image 42239257985, job `Validate build (linux/amd64)`:
+  `Validate build (linux/amd64)	UNKNOWN STEP	2026-11-06T15:22:28.3118787Z #22 9.924 aws-tls-probe: platform bundle /etc/ssl/certs/ca-certificates.crt`
+  `Validate build (linux/amd64)	UNKNOWN STEP	2026-11-06T15:22:31.2694055Z #22 12.84 extension-check: ok platform=linux_amd64 engine=v1.4.4`
+
+Still not shown by any log: the Linux writer half of red-first test 4(a) (recorded above);
+accepted by the foreman.
