@@ -202,7 +202,10 @@ ordering is load-bearing:
 - **Every S3 connection authenticates the server, against one trust source.**
   `S3Settings::resolve` picks the source once for both directions: the file `AWS_CA_BUNDLE`
   names, else the first of `s3::PLATFORM_CA_BUNDLES` present. A missing, unreadable or
-  certificate-free source refuses before any request, naming `AWS_CA_BUNDLE`.
+  certificate-free source refuses before any request, naming `AWS_CA_BUNDLE`, and so does one
+  whose certificates include no self-signed root (`is_self_signed_root` in
+  `bundle_certificates`): the writer's webpki anchors at any certificate in the file, but the
+  readers' OpenSSL needs a chain that ends at a root there.
   - **Writer.** `S3Sink`'s client trusts only that file's certificates
     (`tls_certs_only`): never the platform verifier, built-in roots or
     `tls_certs_merge`.
@@ -220,8 +223,16 @@ ordering is load-bearing:
     directory and the macOS keychain. A plain `http://` endpoint override resolves no source.
   - **The tests that hold it:** the `tls_` wire tests. A self-signed, unknown-CA or
     wrong-name endpoint is refused by all three tools; an endpoint the named CA signed
-    answers as plain HTTP does; an unusable `AWS_CA_BUNDLE` stops each tool before it
-    connects.
+    answers as plain HTTP does; an unusable `AWS_CA_BUNDLE`, or one without a root, stops
+    each tool before it connects.
+  - **One known exception: the readers' host-name check.** httpfs's httplib accepts a
+    certificate whose subject CN names the endpoint's host when its SAN does not, or when it
+    has none; the writer checks the SAN alone and refuses it. The fallback is inside the pinned
+    extension, so it is recorded, not fixed (GOAL R11). The fix is a committed follow-up fix
+    cycle, seeded as `issues/s3-reader-tls-hostname.md`, and removing this exception is its
+    acceptance. The wire test
+    `tls_a_leaf_naming_the_host_only_in_its_cn_is_refused_by_xdu_alone` pins the split as it
+    stands, so that fix must flip it. Nothing else in this rule has an exception.
 
 ## 6. Unix-only
 

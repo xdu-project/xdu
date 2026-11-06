@@ -432,7 +432,13 @@ file: the one `AWS_CA_BUNDLE` names, else the platform's bundle (the first of
 `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem` and `/etc/ssl/cert.pem` present).
 `SSL_CERT_FILE` and the macOS keychain are not read, nothing turns verification off, and a
 self-signed or unknown-CA endpoint is refused by all three tools; a store with a private CA needs
-`AWS_CA_BUNDLE` set to that CA's file.
+`AWS_CA_BUNDLE` set to that CA's file. That file must include the root certificate the chain ends
+at (a file with no self-signed root, such as an intermediate CA alone, is refused before any
+request), and the endpoint's certificate must name its host in the subject alternative name (SAN).
+Known limitation: `xdu-find` and `xdu-view` also accept a certificate whose subject common name
+(CN) names the host when its SAN does not, which `xdu` refuses; a follow-up
+([`issues/s3-reader-tls-hostname.md`](issues/s3-reader-tls-hostname.md)) will make the readers
+check the SAN alone.
 
 ### Querying with DuckDB
 

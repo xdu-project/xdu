@@ -2713,11 +2713,32 @@ fn assert_each_tool_refuses(
     source: &Path,
     before: &BTreeMap<String, Vec<u8>>,
 ) {
+    let all = ["xdu-find", "xdu-view", "xdu"];
+    assert_tools_refuse(s3, identity, case, &all, ca_bundle, extra, source, before);
+    s3.assert_proxy_clean();
+}
+
+/// `assert_each_tool_refuses` for the tools named in `which` alone.
+#[allow(clippy::too_many_arguments)]
+fn assert_tools_refuse(
+    s3: &TestS3,
+    identity: &common::s3::FrontIdentity,
+    case: &str,
+    which: &[&str],
+    ca_bundle: Option<&Path>,
+    extra: &[(&str, &OsString)],
+    source: &Path,
+    before: &BTreeMap<String, Vec<u8>>,
+) {
+    assert!(!which.is_empty());
     for tool in 0..3 {
         let hermetic = Hermetic::new();
         let front = s3.tls_front(identity);
         let mut tools = tls_tools(s3, &hermetic, &front.url(), ca_bundle, extra, source);
         let (name, cmd) = &mut tools[tool];
+        if !which.contains(name) {
+            continue;
+        }
         let proxied = s3.requests().len();
         let (out, err, ok) = run(cmd);
         let what = format!("{case}, {name}");
@@ -2757,7 +2778,6 @@ fn assert_each_tool_refuses(
         );
         hermetic.assert_left_empty();
     }
-    s3.assert_proxy_clean();
 }
 
 #[test]
@@ -3133,6 +3153,199 @@ fn tls_the_reader_connection_pins_verification_and_the_ca_file() {
         settings_of(&conn),
         ("httplib".to_string(), true, true, String::new())
     );
+    s3.assert_no_whole_parquet_get();
+    s3.assert_proxy_clean();
+}
+
+/// `xdu-view` on `locator` against the front at `url`, with no terminal: it gets past every S3
+/// request it makes before the terminal, through the front, and names no certificate.
+fn assert_view_reads_through(
+    s3: &TestS3,
+    hermetic: &Hermetic,
+    locator: &str,
+    url: &str,
+    bundle: &Path,
+    case: &str,
+) {
+    let mut view = s3.view_command(hermetic);
+    view.args(["-i", locator])
+        .env("AWS_ENDPOINT_URL", url)
+        .env("AWS_CA_BUNDLE", bundle);
+    let (out, err, ok, proxied) = run_counting(s3, without_a_terminal(&mut view));
+    assert!(!ok, "{case}, xdu-view: ran without a terminal");
+    assert!(out.is_empty(), "{case}, xdu-view: wrote to stdout: {out:?}");
+    assert!(proxied > 0, "{case}, xdu-view: sent no request: {err}");
+    assert!(
+        !err.contains(UNTRUSTED) && !err.to_lowercase().contains("certificate"),
+        "{case}, xdu-view: refused the endpoint: {err}"
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn tls_a_ca_bundle_without_a_root_is_refused_and_one_with_it_answers() {
+    // The readers' OpenSSL ends every chain at a self-signed root; the writer's webpki anchors
+    // at any certificate in the file. A file without a root would let the writer build an
+    // index the readers then refuse, so it is refused before any connection.
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 5)]);
+    let pki = common::s3::TestPki::new();
+    let intermediate_only = pki.intermediate_only_file();
+
+    for tool in 0..3 {
+        let hermetic = Hermetic::new();
+        let front = s3.tls_front(&pki.intermediate_leaf);
+        let mut tools = tls_tools(
+            &s3,
+            &hermetic,
+            &front.url(),
+            Some(&intermediate_only),
+            &[],
+            &source,
+        );
+        let (name, cmd) = &mut tools[tool];
+        let (out, err, ok, proxied) = run_counting(&s3, cmd);
+        let what = format!("an intermediate and no root, {name}");
+        assert!(!ok, "{what}: the tool succeeded: {err}");
+        assert!(out.is_empty(), "{what}: stdout written: {out:?}");
+        assert!(
+            err.contains("AWS_CA_BUNDLE"),
+            "{what}: stderr does not name AWS_CA_BUNDLE: {err}"
+        );
+        assert!(
+            err.contains(intermediate_only.to_str().unwrap()),
+            "{what}: stderr does not name the file: {err}"
+        );
+        assert!(
+            err.contains("root"),
+            "{what}: stderr does not name the root: {err}"
+        );
+        assert!(!err.contains("not trusted"), "{what}: {err}");
+        assert_eq!(
+            front.connections().len(),
+            0,
+            "{what}: the tool connected before refusing"
+        );
+        assert_eq!(proxied, 0, "{what}: a request reached the endpoint");
+        assert_eq!(
+            s3.snapshot(WRITE_PREFIX),
+            before,
+            "{what}: the index changed"
+        );
+        hermetic.assert_left_empty();
+    }
+
+    // With the root beside the intermediate, every tool answers through a leaf the
+    // intermediate signed, the front showing the leaf and the intermediate. One crawl thread
+    // and one chunk a partition, so each chunk is larger than the footer read a query opens it
+    // with.
+    let bundle = pki.root_and_intermediate_file();
+    let front = s3.tls_front(&pki.intermediate_leaf);
+    let hermetic = Hermetic::new();
+    let tls = |mut cmd: Command| {
+        cmd.env("AWS_ENDPOINT_URL", front.url())
+            .env("AWS_CA_BUNDLE", &bundle);
+        cmd
+    };
+    let varied = work.path().join("varied");
+    varied_source_tree(&varied);
+    let prefix = "chained/idx";
+    let locator = s3.url(prefix);
+    let mut xdu = tls(s3.write_command(&hermetic));
+    xdu.args(xdu_args_chunked(&varied, &locator, "1", "100000"));
+    let (out, err, ok, proxied) = run_counting(&s3, &mut xdu);
+    assert!(ok, "root and intermediate, xdu: {err}");
+    assert!(
+        out.is_empty(),
+        "root and intermediate, xdu: stdout written: {out:?}"
+    );
+    assert!(proxied > 0, "root and intermediate, xdu: sent no request");
+    let written = s3.snapshot(prefix);
+    assert!(
+        written.contains_key(COMPLETION_MARKER),
+        "{:?}",
+        written.keys()
+    );
+    let mut find = tls(s3.find_command(&hermetic));
+    find.args(["-i", &locator, "--count"]);
+    let (got, err, ok, proxied) = run_counting(&s3, &mut find);
+    assert!(ok, "root and intermediate, xdu-find: {err}");
+    assert!(
+        proxied > 0,
+        "root and intermediate, xdu-find: sent no request"
+    );
+    let (want, err, ok) = run(s3.find_command(&hermetic).args(["-i", &locator, "--count"]));
+    assert!(ok, "xdu-find over plain HTTP: {err}");
+    assert!(!want.trim().is_empty());
+    assert_eq!(got, want, "root and intermediate, xdu-find --count");
+    let case = "root and intermediate";
+    assert_view_reads_through(&s3, &hermetic, &locator, &front.url(), &bundle, case);
+    assert!(
+        front
+            .connections()
+            .iter()
+            .all(|c| c.handshake.is_ok() || !c.application_bytes),
+        "{:?}",
+        front.connections()
+    );
+    assert_clean(&s3, &hermetic);
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn tls_a_leaf_naming_the_host_only_in_its_cn_is_refused_by_xdu_alone() {
+    // A recorded exception, not the rule. The writer checks a certificate's SAN alone; the
+    // readers' check is httpfs's httplib, which falls back on the subject CN when the SAN does
+    // not name the host. This test pins that split as it stands. The fix committed in
+    // issues/s3-reader-tls-hostname.md must make the readers refuse these leaves too, which
+    // fails the reader half below: that is its red-first, and the assertions flip with it.
+    let work = TempDir::new().unwrap();
+    let (s3, before) = seeded_write_target(work.path());
+    let source = work.path().join("source");
+    small_tree(&source, &[("alice", 5)]);
+    // An index whose chunk a count reads by range, for the readers.
+    let wide_source = work.path().join("wide-source");
+    let wide_index = work.path().join("wide-index");
+    wide_source_tree(&wide_source, "alice", ROWS);
+    build_index(&wide_source, &wide_index);
+    s3.seed_index(&wide_index, PREFIX);
+    let locator = s3.url(PREFIX);
+    let pki = common::s3::TestPki::new();
+    let ca = pki.ca_file();
+
+    for (case, identity) in &pki.cn_only {
+        assert_tools_refuse(
+            &s3,
+            identity,
+            case,
+            &["xdu"],
+            Some(&ca),
+            &[],
+            &source,
+            &before,
+        );
+
+        // Today the readers answer through the same certificate.
+        let front = s3.tls_front(identity);
+        let hermetic = Hermetic::new();
+        let mut find = s3.find_command(&hermetic);
+        find.args(["-i", &locator, "--count"])
+            .env("AWS_ENDPOINT_URL", front.url())
+            .env("AWS_CA_BUNDLE", &ca);
+        let (got, err, ok, proxied) = run_counting(&s3, &mut find);
+        assert!(ok, "{case}, xdu-find: refused the CN-only leaf: {err}");
+        assert!(proxied > 0, "{case}, xdu-find: sent no request");
+        assert_eq!(got.trim(), ROWS.to_string(), "{case}, xdu-find --count");
+        assert_view_reads_through(&s3, &hermetic, &locator, &front.url(), &ca, case);
+        assert_eq!(
+            s3.snapshot(WRITE_PREFIX),
+            before,
+            "{case}: the index changed"
+        );
+        hermetic.assert_left_empty();
+    }
     s3.assert_no_whole_parquet_get();
     s3.assert_proxy_clean();
 }

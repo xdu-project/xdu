@@ -352,7 +352,8 @@ pub enum TrustOrigin {
 ///
 /// It is read once, by the resolver. The writer trusts the certificates read here and nothing
 /// else; the readers bind the path for `httpfs`, whose OpenSSL reopens it at the first request.
-/// The certificates kept are those both TLS stacks load, so the two directions trust one set.
+/// The certificates kept are those both TLS stacks load, and they include a self-signed root,
+/// which the readers need a chain to end at, so the two directions trust one set.
 /// `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in directory and the macOS keychain are
 /// never a source.
 #[derive(Clone)]
@@ -458,8 +459,8 @@ impl S3Settings {
     /// It fails closed: half-set environment credentials, a profile holding only one half of
     /// a key pair, a profile named by `AWS_PROFILE` that neither file holds, no credentials at
     /// all, an endpoint that is not a bare `http(s)://host[:port]`, and, for an `https`
-    /// endpoint, no trust source or one that is unreadable or holds no usable CA certificate
-    /// are errors.
+    /// endpoint, no trust source or one that is unreadable, holds no usable CA certificate or
+    /// holds no self-signed root are errors.
     pub fn resolve(env: &dyn EnvSource) -> Result<S3Settings> {
         let profile_var = env_text(env, "AWS_PROFILE")?;
         let profile = profile_var
@@ -699,6 +700,11 @@ fn resolve_trust(env: &dyn EnvSource) -> Result<TrustSource> {
 /// never load different sets. A certificate that is valid DER but that webpki will not take as
 /// an anchor is dropped: kept, it would fail the writer's client, and a platform bundle can
 /// hold one. Blocks of other kinds, such as keys, are skipped.
+///
+/// The certificates kept must include a self-signed root. webpki anchors at any certificate in
+/// the file, but the readers' OpenSSL accepts a chain only when it ends at a self-signed
+/// certificate there, so a file without one, such as an intermediate CA alone, would let the
+/// writer build an index the readers then refuse.
 fn bundle_certificates(text: &str) -> std::result::Result<Vec<CertificateDer<'static>>, String> {
     if text.lines().any(|line| {
         line.trim_start()
@@ -730,7 +736,117 @@ fn bundle_certificates(text: &str) -> std::result::Result<Vec<CertificateDer<'st
     if kept.is_empty() {
         return Err("holds no usable CA certificate".to_string());
     }
+    if !kept
+        .iter()
+        .any(|certificate| is_self_signed_root(certificate))
+    {
+        return Err(
+            "holds no root CA certificate (one issued and signed by itself), so no chain can end \
+             in it; add the root its CA certificates chain to"
+                .to_string(),
+        );
+    }
     Ok(kept)
+}
+
+/// Whether `der` is a self-signed root: its issuer is its own subject, byte for byte, and its
+/// signature verifies under its own public key with an algorithm the writer's TLS stack
+/// verifies.
+///
+/// That is what OpenSSL needs at the end of a chain: it takes a certificate as self-signed on a
+/// name match, a key identifier naming its own key and a signature algorithm of its key's
+/// family, and both conditions here imply those for any certificate a CA issues as a root. A
+/// root whose self-signature uses an algorithm the writer does not verify, such as SHA-1 RSA,
+/// does not count, so a file holding only such roots is refused: it fails closed.
+fn is_self_signed_root(der: &[u8]) -> bool {
+    let Some(parts) = CertificateParts::parse(der) else {
+        return false;
+    };
+    parts.issuer == parts.subject
+        && rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .all
+            .iter()
+            .filter(|algorithm| {
+                algorithm.signature_alg_id().as_ref() == parts.signature_algorithm
+                    && algorithm.public_key_alg_id().as_ref() == parts.key_algorithm
+            })
+            .any(|algorithm| {
+                algorithm
+                    .verify_signature(parts.public_key, parts.signed, parts.signature)
+                    .is_ok()
+            })
+}
+
+/// The parts of a DER certificate a signature check needs, each as webpki reads it: the
+/// algorithm identifiers without their SEQUENCE header and the bit strings without their
+/// unused-bits octet.
+struct CertificateParts<'a> {
+    /// The whole `tbsCertificate` element, the bytes the signature covers.
+    signed: &'a [u8],
+    signature_algorithm: &'a [u8],
+    signature: &'a [u8],
+    issuer: &'a [u8],
+    subject: &'a [u8],
+    key_algorithm: &'a [u8],
+    public_key: &'a [u8],
+}
+
+impl<'a> CertificateParts<'a> {
+    fn parse(der: &'a [u8]) -> Option<CertificateParts<'a>> {
+        const INTEGER: u8 = 0x02;
+        const BIT_STRING: u8 = 0x03;
+        const SEQUENCE: u8 = 0x30;
+        const VERSION: u8 = 0xa0;
+        let Some((SEQUENCE, certificate, [])) = der_element(der) else {
+            return None;
+        };
+        let Some((SEQUENCE, tbs, rest)) = der_element(certificate) else {
+            return None;
+        };
+        let signed = &certificate[..certificate.len() - rest.len()];
+        let Some((SEQUENCE, signature_algorithm, rest)) = der_element(rest) else {
+            return None;
+        };
+        let Some((BIT_STRING, [0, signature @ ..], [])) = der_element(rest) else {
+            return None;
+        };
+
+        // The next field of `fields`, which must carry tag `want`.
+        fn take<'b>(fields: &mut &'b [u8], want: u8) -> Option<&'b [u8]> {
+            let (tag, content, rest) = der_element(fields)?;
+            if tag != want {
+                return None;
+            }
+            *fields = rest;
+            Some(content)
+        }
+        let mut fields = tbs;
+        if fields.first() == Some(&VERSION) {
+            take(&mut fields, VERSION)?;
+        }
+        take(&mut fields, INTEGER)?;
+        take(&mut fields, SEQUENCE)?;
+        let issuer = take(&mut fields, SEQUENCE)?;
+        take(&mut fields, SEQUENCE)?;
+        let subject = take(&mut fields, SEQUENCE)?;
+        let key_info = take(&mut fields, SEQUENCE)?;
+        let Some((SEQUENCE, key_algorithm, rest)) = der_element(key_info) else {
+            return None;
+        };
+        let Some((BIT_STRING, [0, public_key @ ..], [])) = der_element(rest) else {
+            return None;
+        };
+        Some(CertificateParts {
+            signed,
+            signature_algorithm,
+            signature,
+            issuer,
+            subject,
+            key_algorithm,
+            public_key,
+        })
+    }
 }
 
 /// Whether `der` has a DER certificate's shape: one SEQUENCE spanning the whole input, holding
@@ -2664,6 +2780,40 @@ s3 =
         (certificate.pem(), certificate.der().clone())
     }
 
+    /// A CA certificate the test CA signed, and a leaf that intermediate signed for
+    /// `IP:127.0.0.1`, made once per test process: each as its PEM and its DER.
+    fn test_intermediate() -> &'static [(String, CertificateDer<'static>); 2] {
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+        static CHAIN: std::sync::OnceLock<[(String, CertificateDer<'static>); 2]> =
+            std::sync::OnceLock::new();
+        CHAIN.get_or_init(|| {
+            let ca_key = KeyPair::generate().unwrap();
+            let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            ca_params
+                .distinguished_name
+                .push(DnType::CommonName, "xdu unit-test root CA");
+            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let ca = Issuer::new(ca_params, ca_key);
+            let key = KeyPair::generate().unwrap();
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "xdu unit-test intermediate CA");
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let intermediate = params.signed_by(&key, &ca).unwrap();
+            let intermediate_issuer = Issuer::new(params, key);
+            let leaf_key = KeyPair::generate().unwrap();
+            let leaf = CertificateParams::new(vec!["127.0.0.1".to_string()])
+                .unwrap()
+                .signed_by(&leaf_key, &intermediate_issuer)
+                .unwrap();
+            [
+                (intermediate.pem(), intermediate.der().clone()),
+                (leaf.pem(), leaf.der().clone()),
+            ]
+        })
+    }
+
     /// A PEM block of `label` around `der`.
     fn pem_block(label: &str, der: &[u8]) -> String {
         const ALPHABET: &[u8; 64] =
@@ -2853,6 +3003,11 @@ s3 =
                 Ok(format!("{pem}{}", pem_block("TRUSTED CERTIFICATE", der))),
                 "TRUSTED CERTIFICATE",
             ),
+            (
+                "an intermediate CA and no root",
+                Ok(test_intermediate()[0].0.clone()),
+                "holds no root CA certificate",
+            ),
         ]
     }
 
@@ -2885,7 +3040,7 @@ s3 =
     #[test]
     fn an_unusable_bundle_is_refused_naming_aws_ca_bundle() {
         let errors = unusable_bundle_errors();
-        assert_eq!(errors.len(), (8 + 7) * 2);
+        assert_eq!(errors.len(), (9 + 8) * 2);
         for (case, err, words) in errors {
             assert!(err.contains("AWS_CA_BUNDLE"), "{case}: {err}");
             assert!(err.contains(words), "{case}: does not say '{words}': {err}");
@@ -2940,6 +3095,110 @@ s3 =
         // Alone, it leaves nothing to trust.
         let err = bundle_certificates(&refused_pem).unwrap_err();
         assert!(err.contains("holds no usable CA certificate"), "{err}");
+    }
+
+    #[test]
+    fn a_bundle_without_a_root_is_refused_naming_aws_ca_bundle() {
+        let [(intermediate_pem, intermediate_der), (leaf_pem, _)] = test_intermediate();
+        let (root_pem, root_der) = test_ca();
+        let named = "/fixture/no-root.pem";
+        for rootless in [
+            intermediate_pem.clone(),
+            format!("{leaf_pem}{intermediate_pem}"),
+        ] {
+            for endpoint in HTTPS_ENDPOINTS {
+                let mut extra = vec![("AWS_CA_BUNDLE", named)];
+                extra.extend_from_slice(endpoint);
+                let env = trust_env(&extra).with_file(named, Ok(&rootless));
+                let err = format!("{:#}", S3Settings::resolve(&env).unwrap_err());
+                assert!(
+                    err.contains("AWS_CA_BUNDLE names /fixture/no-root.pem"),
+                    "{err}"
+                );
+                assert!(err.contains("holds no root CA certificate"), "{err}");
+                assert!(!err.contains("not trusted"), "{err}");
+
+                let platform = PLATFORM_CA_BUNDLES[0];
+                let env = trust_env(endpoint).with_file(platform, Ok(&rootless));
+                let err = format!("{:#}", S3Settings::resolve(&env).unwrap_err());
+                assert!(err.contains(platform), "{err}");
+                assert!(err.contains("holds no root CA certificate"), "{err}");
+                assert!(err.contains("set AWS_CA_BUNDLE"), "{err}");
+                assert!(!err.contains("not trusted"), "{err}");
+            }
+        }
+
+        // With its root beside it, the intermediate serves, and both are kept in file order.
+        let both = format!("{intermediate_pem}{root_pem}");
+        let env = trust_env(&[("AWS_CA_BUNDLE", named)]).with_file(named, Ok(&both));
+        let trust = S3Settings::resolve(&env).unwrap().trust.unwrap();
+        assert_eq!(
+            trust.certificates(),
+            &[intermediate_der.clone(), root_der.clone()]
+        );
+    }
+
+    #[test]
+    fn a_root_is_a_certificate_its_own_key_signed() {
+        use rcgen::{CertificateParams, DnType, Issuer, KeyPair};
+        let [(_, intermediate), (_, leaf)] = test_intermediate();
+        assert!(is_self_signed_root(&test_ca().1));
+        assert!(is_self_signed_root(&make_ca("xdu another root", false).1));
+        assert!(!is_self_signed_root(intermediate));
+        assert!(!is_self_signed_root(leaf));
+
+        // Issued under its own name, but signed by another key: not a root.
+        let name = "xdu look-alike root";
+        let mut signer_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        signer_params
+            .distinguished_name
+            .push(DnType::CommonName, name);
+        let signer = Issuer::new(signer_params, KeyPair::generate().unwrap());
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(DnType::CommonName, name);
+        let look_alike = params
+            .signed_by(&KeyPair::generate().unwrap(), &signer)
+            .unwrap();
+        let parts = CertificateParts::parse(look_alike.der()).unwrap();
+        assert_eq!(parts.issuer, parts.subject);
+        assert!(!is_self_signed_root(look_alike.der()));
+
+        // A root with one bit of its signature flipped: its own key no longer verifies it.
+        let mut flipped = test_ca().1.to_vec();
+        let last = flipped.len() - 1;
+        flipped[last] ^= 1;
+        assert!(is_certificate_der(&flipped));
+        assert!(!is_self_signed_root(&flipped));
+
+        for garbage in [&b""[..], b"not a certificate", &test_ca().1[..40]] {
+            assert!(!is_self_signed_root(garbage));
+        }
+    }
+
+    #[test]
+    fn every_platform_bundle_on_this_host_holds_a_root() {
+        // The root rule must not refuse the bundles hosts ship. A host with none cannot reach an
+        // https endpoint at all, so it fails here rather than passing on nothing.
+        let present: Vec<&str> = PLATFORM_CA_BUNDLES
+            .iter()
+            .copied()
+            .filter(|bundle| Path::new(bundle).is_file())
+            .collect();
+        assert!(
+            !present.is_empty(),
+            "no platform CA bundle on this host (looked for {PLATFORM_CA_BUNDLES:?})"
+        );
+        for bundle in present {
+            let text = fs::read_to_string(bundle).unwrap();
+            let kept =
+                bundle_certificates(&text).unwrap_or_else(|reason| panic!("{bundle} {reason}"));
+            let roots = kept.iter().filter(|c| is_self_signed_root(c)).count();
+            assert!(
+                roots > 0,
+                "{bundle}: no root among {} certificates",
+                kept.len()
+            );
+        }
     }
 
     #[test]

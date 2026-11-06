@@ -213,7 +213,7 @@ assume `nightly` — use the pinned toolchain.
 cargo build --release                                   # all bins (bundled DuckDB C++ is the slow part)
 cargo test                                              # lib unit tests + tests/ integration
 cargo test --test rm_tests                              # one integration file
-XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 51   # S3 wire tier (see Testing)
+XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 53   # S3 wire tier (see Testing)
 cargo clippy --all-targets --all-features -- -D warnings   # lint gate (must be clean)
 cargo fmt --all -- --check                              # format gate
 
@@ -518,15 +518,18 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold that rule. **Every S3
    connection authenticates the server against one trust source**, which `S3Settings::resolve`
    picks once for both directions: the file `AWS_CA_BUNDLE` names, else the first of
-   `s3::PLATFORM_CA_BUNDLES` present; a missing, unreadable or certificate-free source refuses
-   before any request, naming `AWS_CA_BUNDLE`. The writer's client trusts only that file's
+   `s3::PLATFORM_CA_BUNDLES` present; a missing, unreadable or certificate-free source, or one
+   holding no self-signed root, refuses before any request, naming `AWS_CA_BUNDLE`. The writer's client trusts only that file's
    certificates (`tls_certs_only`). The reader's `engine::open_s3_connection` runs fixed text
    after the `LOAD`, pinning `httpfs_client_implementation` to `httplib`, turning
    `enable_server_cert_verification` and `enable_curl_server_cert_verification` on, and binding the
    path as `SET ca_cert_file = ?`, never as SQL text. Nothing disables verification, nothing adds
    roots beside the source, and `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in directory
    and the macOS keychain are never sources; a plain `http://` override resolves none. The `tls_`
-   wire tests hold it (`invariants.md` §5).
+   wire tests hold it (`invariants.md` §5). One known exception: the readers' host-name check is
+   httpfs's httplib, which accepts a certificate whose CN names the host when its SAN does not;
+   the writer refuses it. It is recorded until the follow-up fix cycle seeded as
+   `issues/s3-reader-tls-hostname.md` lands, and nothing else in the rule has one.
 6. **Unix-only.** `MetadataExt` (atime; disk usage = `st_blocks`×512) is load-bearing; don't add
    code assuming portability. A future S3/Windows source must special-case (S3 has no atime).
 7. **Shared rayon-pool concurrency.** See Architecture. Preserve the single-pool + driver-thread +
@@ -570,8 +573,9 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   one credential resolver. Its `CREATE SECRET` must bind every key `httpfs` would otherwise take from
   the environment, and no request error may print a response body (one can echo the session token).
   The resolver also picks the one TLS trust source (`AWS_CA_BUNDLE`, else the first of
-  `PLATFORM_CA_BUNDLES`) for both directions, and `S3Sink`'s client trusts only its certificates
-  (`tls_certs_only`); a change here can widen or drop server authentication (invariant 5).
+  `PLATFORM_CA_BUNDLES`) for both directions, refusing one that holds no self-signed root, and
+  `S3Sink`'s client trusts only its certificates (`tls_certs_only`); a change here can widen or
+  drop server authentication (invariant 5).
 - **`src/view_query.rs`** — every `xdu-view` statement, on the invariant 5 surface.
 - **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning (through
   `IndexSink`; `LocalSink` is the local protocol); the reserved-index-name collision rejection in
@@ -620,8 +624,9 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   listed count by hand: **raise it in the commit that adds a test**. A selection by prefix
   (`harness_`, `find_`, `write_`, `view_`, `tls_`) runs one family. The `tls_` family reaches the
   endpoint over `https` through `TestS3::tls_front`, a TLS terminator before the counting proxy,
-  with certificates `TestPki` makes per run (a test CA, an unrelated CA, a wrong-name leaf and a
-  self-signed end-entity one), and asserts on proxied requests, never on handshakes. Wire tests never return early (the script
+  with certificates `TestPki` makes per run (a test CA, an unrelated CA, a wrong-name leaf, a
+  self-signed end-entity one, an intermediate CA with a leaf it signed, and two leaves whose CN
+  alone names the host), and asserts on proxied requests, never on handshakes. Wire tests never return early (the script
   refuses an early `return`); the fixture panics when it cannot bind or find the extension. Spawned
   binaries run hermetic (`tests/common/s3.rs`'s `Hermetic`: no `AWS_*`, `DUCKDB_*`, `*_PROXY`,
   `SSL_CERT_FILE` or `SSL_CERT_DIR`, empty `HOME`, `TMPDIR` and working directory, checked empty

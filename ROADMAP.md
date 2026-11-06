@@ -42,7 +42,7 @@ range requests: measured against an 80.1 MiB index, `--count` moved 0.13 MiB and
 3.94 MiB, where a staging design pays the full 80.1 MiB every time. The intention is that a query
 costs what the query asks for, not what the index weighs.
 
-*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: in flight as a pilot (build into a bucket; `xdu-find` and `xdu-view` query in place) — see `spec/s3-index-target/`; its deferrals are the six entries after `S3 as a crawl source` and the debug-build DuckDB entry*
+*Horizon: mid-term · Depends on: shipped DuckDB extensions, for `httpfs` — met, on `main` since #31 · Refs: in flight as a pilot (build into a bucket; `xdu-find` and `xdu-view` query in place) — see `spec/s3-index-target/`; its deferrals are the eight entries after `S3 as a crawl source` and the debug-build DuckDB entry*
 **Seed:** [`issues/s3-index-target.md`](issues/s3-index-target.md)
 
 ## S3 as a crawl source
@@ -111,6 +111,28 @@ still cannot reach the authority in either direction.
 
 *Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (TECH review cycle 2 triage, foreman ruling at run B)*
 **Seed:** [`issues/s3-legacy-bucket-names.md`](issues/s3-legacy-bucket-names.md)
+
+## One host-name rule for both S3 directions
+
+`xdu-find` and `xdu-view` accept an `https` S3 endpoint whose certificate names the host only in its
+subject CN, which `xdu` refuses: the readers' TLS client is the pinned `httpfs`'s httplib, which
+falls back on the CN when the SAN does not name the host. The pilot lands with this as a recorded
+exception to its TLS rule, and the fix is committed: make the readers check the SAN alone, through
+an in-process relay that uses the writer's TLS client or an upstream change, and delete the
+exception.
+
+*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (GOAL R11 and its 2026-11-06 clarification, REVIEW cycle 4 finding 1)*
+**Seed:** [`issues/s3-reader-tls-hostname.md`](issues/s3-reader-tls-hostname.md)
+
+## Reach an AWS bucket whose name holds a dot
+
+The bucket rule admits dots, but against AWS every tool addresses the bucket virtual-hosted over
+`https`, where AWS's one-label wildcard certificate cannot cover a dotted name. All three tools
+refuse it as an untrusted certificate, which sends the operator after the wrong cause. Path-style
+addressing in both directions, or a refusal that names the dot, would fix it.
+
+*Horizon: near-term · Depends on: S3 as an index target · Refs: `spec/s3-index-target/` (REVIEW cycle 4 finding 3)*
+**Seed:** [`issues/s3-dotted-bucket-names.md`](issues/s3-dotted-bucket-names.md)
 
 ## Bind the index path and partition names in local-index reader SQL
 

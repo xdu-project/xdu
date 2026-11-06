@@ -117,6 +117,14 @@ is read; a missing or unreadable file, or one holding no CA certificate, is
 refused before any request. A plain http:// endpoint does not use TLS, and
 none of this applies to it.
 
+A private CA's certificate for the endpoint must name the endpoint's host in
+its subject alternative name (SAN), and the CA file must include the root
+certificate its chain ends at: a file holding no self-signed root, such as an
+intermediate CA alone, is refused before any request. Known limitation:
+xdu-find and *xdu-view*(1) accept a certificate whose subject common name (CN)
+names the host when its SAN does not, or when it has none, while *xdu*(1)
+refuses it. A follow-up will make the readers check the SAN alone.
+
 The bucket must have a name S3 allows: 3 to 63 lowercase letters, digits, dots
 and hyphens, beginning and ending with a letter or digit, with no two dots
 together. A locator naming any other bucket is refused before a request is

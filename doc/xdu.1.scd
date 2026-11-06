@@ -113,6 +113,15 @@ a missing or unreadable file, or one holding no CA certificate, fails it before
 any request. A plain http:// endpoint does not use TLS, and none of this
 applies to it.
 
+A private CA's certificate for the endpoint must name the endpoint's host in
+its subject alternative name (SAN), and the CA file must include the root
+certificate its chain ends at: a file holding no self-signed root, such as an
+intermediate CA alone, fails the run before any request. Known limitation:
+xdu checks the SAN alone, but *xdu-find*(1) and *xdu-view*(1) also accept a
+certificate whose subject common name (CN) names the host when its SAN does
+not, or when it has none. A follow-up will make the readers check the SAN
+alone.
+
 # ENVIRONMENT
 
 *XDU_JOBS*

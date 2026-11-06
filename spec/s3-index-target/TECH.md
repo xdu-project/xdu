@@ -3,10 +3,10 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: in_progress
+status: in_review
 branch: feature/s3-index-target
 base: main
-current_phase: P5
+current_phase: done
 last_updated: '2026-11-06'
 phases:
 - id: P1
@@ -113,7 +113,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P4-GATE-GREEN
 - id: P5
   name: 'Close the cycle: full S3 suite, gate literals, deferral ledger'
-  status: in_progress
+  status: done
   satisfies:
   - R9
   - R10
@@ -156,7 +156,7 @@ phases:
     echo P5-GATE-GREEN'
 - id: P6
   name: TLS server authentication for both directions
-  status: in_progress
+  status: done
   satisfies:
   - R11
   depends_on:
@@ -1071,11 +1071,15 @@ by count, and every deferral recorded.
 > (triage above). Gate retuned: the seed list names `s3-reader-tls-hostname` and
 > `s3-dotted-bucket-names`.
 >
-> - [ ] `issues/s3-reader-tls-hostname.md` (kind `fix`): finding 1's root fix, with the review's
+> - [x] `issues/s3-reader-tls-hostname.md` (kind `fix`): finding 1's root fix, with the review's
 >   reproduction, the exception wire test as its red-first, the two candidate routes of PLAN
 >   §7.6, and the acceptance that removes the R11 and §5 exception. A `ROADMAP.md` entry.
-> - [ ] `issues/s3-dotted-bucket-names.md`: finding 3, with path style as a candidate. A
+>   *Done (appetite big: route 1 needs a spike). It also carries PLAN §7.6's narrower
+>   trust-source edge, which route 1 closes.*
+> - [x] `issues/s3-dotted-bucket-names.md`: finding 3, with path style as a candidate. A
 >   `ROADMAP.md` entry. The `S3 as an index target` entry's deferral count rises to eight.
+>   *Done (kind `fix`, appetite small). Both entries sit after the legacy-bucket one, so the
+>   eight stay contiguous.*
 > - [ ] Run B: both legs `s3-wire: '' 53 of 53 passed`, equal to the minimum; the Packaging
 >   literal step printed its `OK:` line; Lint green. Recorded in `evidence/p5-ci.md`.
 >
@@ -1211,37 +1215,63 @@ review after P6 runs on the human's say-so, not the bound.*
 > in `invariants.md` §5, `AGENTS.md` and the exception test; the SAN, root and CN sentences on
 > the three pages and the README.
 >
-> - [ ] **Red first.** Write the unit test for a rootless bundle and the wire test for an
+> - [x] **Red first.** Write the unit test for a rootless bundle and the wire test for an
 >   intermediate-only bundle, and show both failing on `src/` at `9f0019d`: the resolver keeps
 >   the intermediate, the writer builds through it, and the readers refuse it after connecting.
 >   Quote the failing lines in the commit body.
-> - [ ] `src/s3.rs`: the root predicate of PLAN §7.6 and its refusal in `bundle_certificates`,
+>   *Done, `src/` at `9f0019d` (macOS arm64).* Three unit tests failed: the new one and the two
+>   that read the unusable-bundle table, each with `unwrap_err()` on an `Ok` holding the
+>   intermediate as the source. The wire test failed at its first tool, `xdu-find` refusing
+>   only after connecting ("TLS certificate is not trusted … SSL server verification failed").
+>   Run with the tools reordered in a copy, it failed at `xdu`: "the tool succeeded", the
+>   writer indexing through the intermediate. The copy was restored with `cp` and `cmp`.
+> - [x] `src/s3.rs`: the root predicate of PLAN §7.6 and its refusal in `bundle_certificates`,
 >   naming `AWS_CA_BUNDLE` for both origins and never saying "not trusted". Unit tests: a
 >   rootless bundle is refused for both origins (and joins the unusable-bundle table, so the
 >   "not trusted" sweep covers it), the predicate (a root, an intermediate, a leaf, and a
 >   certificate whose issuer is its subject but which another key signed), and every platform
 >   bundle present on the host holds a root. Check `/etc/ssl/cert.pem` and a Mozilla-derived
 >   bundle locally.
-> - [ ] `tests/common/s3.rs`: `TestPki` gains an intermediate under the test CA, a leaf it signs
+>   *Done:* `is_self_signed_root` over `CertificateParts::parse`, with no crate added. The
+>   predicate test also flips one bit of a root's signature. `/etc/ssl/cert.pem` (128
+>   certificates; the unit test), Homebrew's `ca-certificates` `cert.pem` (181) and certifi's
+>   `cacert.pem` (117), both Mozilla-derived, each passed the resolver as `AWS_CA_BUNDLE`:
+>   `xdu-find` went on to "cannot reach" a dead `https` endpoint.
+> - [x] `tests/common/s3.rs`: `TestPki` gains an intermediate under the test CA, a leaf it signs
 >   (the front shows the leaf and the intermediate), the intermediate-only and root-plus-
 >   intermediate files, and two test-CA leaves whose CN is `127.0.0.1`: one with
 >   `DNS:wrong.example` as its SAN and one with no SAN.
-> - [ ] `tests/s3_tests.rs`: two `tls_` wire tests. The first refuses an intermediate-only bundle
+> - [x] `tests/s3_tests.rs`: two `tls_` wire tests. The first refuses an intermediate-only bundle
 >   in all three tools before any connection (0 front connections, 0 proxied requests) and has a
 >   root-plus-intermediate bundle answer in all three. The second documents the exception: `xdu`
 >   refuses both CN leaves under the refusal rule, and `xdu-find` and `xdu-view` answer through
 >   them today. A comment names `issues/s3-reader-tls-hostname.md`. Show that it exercises the
 >   CN fallback: with the leaves' CN changed to another name, its reader assertions go red.
-> - [ ] Manual: §5's exception bullet and its `AGENTS.md` mirror; Testing names the new
+>   *Done.* Mutation: both CN-only leaves renamed `xdu test endpoint` in a copy of
+>   `tests/common/s3.rs`. The test went red at "xdu-find: refused the CN-only leaf … SSL server
+>   verification failed". The file was restored with `cp` and checked with `cmp`. Reads that
+>   open a chunk go to a wide index or a chunked build, so no ranged read covers a whole
+>   object. `assert_each_tool_refuses` now wraps `assert_tools_refuse`, which takes the tools
+>   to drive.
+> - [x] Manual: §5's exception bullet and its `AGENTS.md` mirror; Testing names the new
 >   `TestPki` identities; the count 53 in `test.yaml` and `AGENTS.md`'s command.
-> - [ ] Docs: `xdu.1`, `xdu-find.1`, `xdu-view.1` and the README say that a private CA's
+> - [x] Docs: `xdu.1`, `xdu-find.1`, `xdu-view.1` and the README say that a private CA's
 >   certificate must name the endpoint's host in its SAN, that the file must include the root,
 >   and that the readers' CN fallback is a known limitation. No counted literal changes; say
 >   whether scdoc rendered them.
+>   *Done:* scdoc is not installed here, so the pages were not rendered. The new paragraph
+>   names no counted literal (`AWS_CA_BUNDLE` stays at two a page), and no line opens with `.`
+>   or `'`. The Packaging job's literal step is the rendered check, in run B.
 > - [ ] Run B: both legs `s3-wire: '' 53 of 53 passed` with all seven `tls_` tests `ok`, and
 >   every `aws-tls-probe` line an HTTP answer with no certificate, `AWS_CA_BUNDLE` or "cannot
 >   reach" line, on both test legs and every release leg. That shows the root rule accepts the
 >   Debian, RHEL and macOS platform bundles. Recorded in `evidence/p6-ci.md`.
+>
+> *Local gates (macOS arm64), run from the stored text:* P6 printed `s3-wire: 'tls_' 7 of 7
+> passed`, `s3-wire: '' 53 of 53 passed`, 60 `s3::` unit tests ok and `P6-GATE-GREEN`; P5 then
+> printed `s3-wire: '' 53 of 53 passed` and `P5-GATE-GREEN`. Both include `cargo test --locked`,
+> clippy with `-D warnings` and `fmt --check`. P5 and P6 are marked `done` on this evidence, on
+> the foreman's instruction, with each run B item left open.
 >
 > **Run B evidence (cycle 4):** as P6's list above, at 53, plus both new tests `ok` on both legs:
 > `tls_a_ca_bundle_without_a_root_is_refused_and_one_with_it_answers` and

@@ -516,15 +516,17 @@ impl Drop for TestS3 {
     }
 }
 
-/// What a TLS endpoint shows its clients: one certificate and its key.
+/// What a TLS endpoint shows its clients: its certificate, any intermediates after it, and its
+/// key.
 #[derive(Clone)]
 pub struct FrontIdentity {
     certificate: rustls::pki_types::CertificateDer<'static>,
+    intermediates: Vec<rustls::pki_types::CertificateDer<'static>>,
     key: Vec<u8>,
 }
 
-/// Certificates made for one test run with `rcgen`: a test CA, an unrelated CA, and the
-/// identities a TLS front can show.
+/// Certificates made for one test run with `rcgen`: a test CA, an unrelated CA, an
+/// intermediate CA under the test CA, and the identities a TLS front can show.
 ///
 /// The self-signed certificate is an end-entity one. A self-signed CA certificate shown as a
 /// server's would be refused as a CA used as an end entity, which is a different rule from the
@@ -538,6 +540,12 @@ pub struct TestPki {
     pub wrong_name: FrontIdentity,
     /// A self-signed end-entity certificate for `IP:127.0.0.1`.
     pub self_signed: FrontIdentity,
+    /// A leaf the intermediate CA signed for `IP:127.0.0.1`, shown with the intermediate.
+    pub intermediate_leaf: FrontIdentity,
+    /// Test-CA leaves whose subject CN is `127.0.0.1`: one whose SAN is `DNS:wrong.example`
+    /// only, and one with no SAN. A client that checks the SAN alone refuses both for
+    /// `127.0.0.1`; one that falls back on the CN takes them.
+    pub cn_only: [(&'static str, FrontIdentity); 2],
 }
 
 impl TestPki {
@@ -552,13 +560,13 @@ impl TestPki {
             let certificate = params.self_signed(&key).expect("CA certificate");
             (certificate, Issuer::new(params, key))
         };
-        let identity = |names: &[&str], issuer: Option<&Issuer<'_, KeyPair>>| {
+        let named = |common_name: &str, names: &[&str], issuer: Option<&Issuer<'_, KeyPair>>| {
             let key = KeyPair::generate().expect("leaf key");
             let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
             let mut params = CertificateParams::new(names).expect("leaf params");
             params
                 .distinguished_name
-                .push(DnType::CommonName, "xdu test endpoint");
+                .push(DnType::CommonName, common_name);
             let certificate = match issuer {
                 Some(issuer) => params.signed_by(&key, issuer),
                 None => params.self_signed(&key),
@@ -566,20 +574,58 @@ impl TestPki {
             .expect("leaf certificate");
             FrontIdentity {
                 certificate: certificate.der().clone(),
+                intermediates: Vec::new(),
                 key: key.serialize_der(),
             }
+        };
+        let identity = |names: &[&str], issuer: Option<&Issuer<'_, KeyPair>>| {
+            named("xdu test endpoint", names, issuer)
         };
 
         let (ca_certificate, ca) = make_ca("xdu test CA");
         let (other_certificate, _) = make_ca("xdu unrelated CA");
+        let intermediate_key = KeyPair::generate().expect("intermediate key");
+        let mut intermediate_params =
+            CertificateParams::new(Vec::<String>::new()).expect("intermediate params");
+        intermediate_params
+            .distinguished_name
+            .push(DnType::CommonName, "xdu test intermediate CA");
+        intermediate_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let intermediate_certificate = intermediate_params
+            .signed_by(&intermediate_key, &ca)
+            .expect("intermediate certificate");
+        let intermediate = Issuer::new(intermediate_params, intermediate_key);
+        let mut intermediate_leaf = identity(&["127.0.0.1"], Some(&intermediate));
+        intermediate_leaf
+            .intermediates
+            .push(intermediate_certificate.der().clone());
+
         let dir = TempDir::new().expect("PKI directory");
         fs::write(dir.path().join("ca.pem"), ca_certificate.pem()).expect("test CA file");
         fs::write(dir.path().join("other-ca.pem"), other_certificate.pem())
             .expect("unrelated CA file");
+        fs::write(
+            dir.path().join("intermediate-only.pem"),
+            intermediate_certificate.pem(),
+        )
+        .expect("intermediate-only file");
+        fs::write(
+            dir.path().join("root-and-intermediate.pem"),
+            format!("{}{}", ca_certificate.pem(), intermediate_certificate.pem()),
+        )
+        .expect("root-and-intermediate file");
         TestPki {
             leaf: identity(&["127.0.0.1"], Some(&ca)),
             wrong_name: identity(&["wrong.example"], Some(&ca)),
             self_signed: identity(&["127.0.0.1"], None),
+            intermediate_leaf,
+            cn_only: [
+                (
+                    "CN 127.0.0.1, SAN DNS:wrong.example",
+                    named("127.0.0.1", &["wrong.example"], Some(&ca)),
+                ),
+                ("CN 127.0.0.1, no SAN", named("127.0.0.1", &[], Some(&ca))),
+            ],
             dir,
         }
     }
@@ -592,6 +638,16 @@ impl TestPki {
     /// A CA that signed nothing the fronts show.
     pub fn other_ca_file(&self) -> PathBuf {
         self.dir.path().join("other-ca.pem")
+    }
+
+    /// The intermediate CA alone, without the test CA it chains to.
+    pub fn intermediate_only_file(&self) -> PathBuf {
+        self.dir.path().join("intermediate-only.pem")
+    }
+
+    /// The test CA, then the intermediate CA it signed.
+    pub fn root_and_intermediate_file(&self) -> PathBuf {
+        self.dir.path().join("root-and-intermediate.pem")
     }
 
     /// A directory beside the CA files, for a test that needs files of its own there.
@@ -670,7 +726,10 @@ impl TestS3 {
             .expect("TLS versions")
             .with_no_client_auth()
             .with_single_cert(
-                vec![identity.certificate.clone()],
+                std::iter::once(&identity.certificate)
+                    .chain(&identity.intermediates)
+                    .cloned()
+                    .collect(),
                 PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key.clone())),
             )
             .expect("TLS front configuration");

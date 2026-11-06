@@ -241,6 +241,10 @@ is skipped by the parser):
   Say that a red-first which needs the pre-phase tree on another platform must run in run A
   (or a throwaway worktree), since run B sees only the fixed tree.
 - **Confidence:** high · **Effort:** small
+- · seen again (review cycle 4 remediation): the skill does not say which FSM state a remediation
+  leaves while its CI evidence is pending. Cycles 1 and 2 left the phases `in_progress`; this
+  brief said to mark them `done` on local evidence with the run B item open. The brief, not the
+  skill, had to settle it.
 
 ## F13 — temp_index.sh drives `target/release` whatever `CARGO_TARGET_DIR` says
 `origin=xdu-review:step-2 severity=medium category=tooling status=open target=.agents/factory/bin/temp_index.sh`
