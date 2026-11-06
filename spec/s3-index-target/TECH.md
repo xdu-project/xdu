@@ -3,10 +3,10 @@ slug: s3-index-target
 title: Build an index into S3 and query it in place
 kind: feature
 appetite: big
-status: blocked
+status: in_progress
 branch: feature/s3-index-target
 base: main
-current_phase: done
+current_phase: P6
 last_updated: '2026-11-05'
 phases:
 - id: P1
@@ -153,11 +153,66 @@ phases:
     doc/xdu.1.scd doc/xdu-find.1.scd doc/xdu-view.1.scd; do grep -qF "3 to 63 lowercase
     letters" $f; done; cargo clippy --locked --all-targets --all-features -- -D warnings;
     cargo fmt --all -- --check; echo P5-GATE-GREEN'
+- id: P6
+  name: TLS server authentication for both directions
+  status: pending
+  satisfies:
+  - R11
+  depends_on:
+  - P5
+  parallel: false
+  hammerable: false
+  hill: uphill
+  verify: 'set -eu; sh tests/s3-wire.sh tls_ 5; for t in tls_a_self_signed_endpoint_is_refused_by_all_three_tools
+    tls_an_endpoint_the_named_ca_signed_answers_as_plain_http_does tls_an_unusable_ca_bundle_is_refused_before_any_connection
+    tls_only_the_resolved_file_is_trusted tls_the_reader_connection_pins_verification_and_the_ca_file;
+    do grep -qxF "$t: test" target/wire-tls_.list; done; listed=$(cargo test --locked
+    --test s3_tests -- --list --include-ignored 2>/dev/null | grep -c '': test$'');
+    test "$listed" -ge 51; XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh
+    "" "$listed"; grep -qF "sh tests/s3-wire.sh \"\" $listed" .github/workflows/test.yaml;
+    grep -qF "XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh \"\" $listed"
+    AGENTS.md; cargo test --locked --lib s3:: >target/p6-lib.log 2>&1; grep -qE "test
+    result: ok. [1-9][0-9]* passed" target/p6-lib.log; for t in the_trust_source_is_the_file_aws_ca_bundle_names
+    an_empty_aws_ca_bundle_is_unset without_aws_ca_bundle_the_first_platform_bundle_present_is_the_source
+    no_platform_bundle_is_refused_naming_aws_ca_bundle an_unusable_bundle_is_refused_naming_aws_ca_bundle
+    no_resolver_error_says_the_certificate_is_not_trusted a_certificate_webpki_rejects_is_dropped_and_the_rest_kept
+    a_plain_http_endpoint_resolves_no_trust_source the_tls_statements_are_fixed_text_and_bind_only_the_path;
+    do grep -qF "test s3::tests::$t ... ok" target/p6-lib.log; done; cargo test --locked;
+    if grep -rniE "danger_accept_invalid|tls_danger_|allow_invalid_certificates|dangerous\(\)|with_custom_certificate_verifier|tls_certs_merge|add_root_certificate|with_root_certificate|tls_backend_preconfigured|use_preconfigured_tls|webpki_roots|rustls_native_certs|rustls_platform_verifier|cert_verification[^;]*(false|=[[:space:]]*''?0)"
+    src; then echo "a TLS path disables verification or trusts more than the one source"
+    >&2; exit 1; fi; for f in src/*.rs src/bin/*.rs; do if sed -n ''1,/^#\[cfg(test)\]/p''
+    "$f" | grep -vE ''^[[:space:]]*//'' | grep -iE ''cert_verification|ca_cert_file|httpfs_client_implementation''
+    | grep -vF -e "SET httpfs_client_implementation = ''httplib''" -e "SET enable_server_cert_verification
+    = true" -e "SET enable_curl_server_cert_verification = true" -e "SET ca_cert_file
+    = ?"; then echo "$f: TLS setting text other than the four fixed statements" >&2;
+    exit 1; fi; done; for s in "SET httpfs_client_implementation = ''httplib''" "SET
+    enable_server_cert_verification = true" "SET enable_curl_server_cert_verification
+    = true" "SET ca_cert_file = ?"; do found=; for f in src/*.rs; do if sed -n ''1,/^#\[cfg(test)\]/p''
+    "$f" | grep -vE ''^[[:space:]]*//'' | grep -qF "$s"; then found=1; fi; done; test
+    -n "$found"; done; sed -n ''1,/^#\[cfg(test)\]/p'' src/s3.rs | grep -vE ''^[[:space:]]*//''
+    | grep -qF ''.tls_certs_only(''; if grep -rnE ''let _ = .*(ca_cert_file|cert_verification|httpfs_client_implementation|duckdb_tls_statements)''
+    src; then echo "a TLS statement''s error is dropped" >&2; exit 1; fi; for f in
+    doc/xdu.1.scd doc/xdu-find.1.scd doc/xdu-view.1.scd README.md; do grep -qF AWS_CA_BUNDLE
+    "$f"; done; for p in xdu xdu-find xdu-view; do sed -n "/check share\/man\/man1\/$p\.1
+    /,/[^\\\\]\$/p" .github/workflows/test.yaml | grep -qE "''[0-9]+x:AWS_CA_BUNDLE''";
+    done; for f in .agents/factory/invariants.md AGENTS.md; do grep -qF AWS_CA_BUNDLE
+    "$f"; grep -qF ''SET ca_cert_file = ?'' "$f"; done; sh -n packaging/extensions/aws-tls-probe.sh;
+    grep -qE ''^[[:space:]]+(run: )?sh packaging/extensions/aws-tls-probe\.sh'' .github/workflows/test.yaml;
+    probe=$(grep -nE ''^[^#]*aws-tls-probe\.sh'' packaging/extensions/check.sh | head
+    -n 1 | cut -d: -f1); aside=$(grep -nF ''mv "$x/lib"'' packaging/extensions/check.sh
+    | cut -d: -f1); test -n "$probe"; test -n "$aside"; test "$probe" -lt "$aside";
+    for p in src/s3.rs src/lib.rs; do sed -n ''/^  pull_request:/,/^[a-z]/p'' .github/workflows/release.yaml
+    | grep -qF -- "- $p"; done; for c in openssl-sys native-tls aws-lc-sys; do if
+    out=$(cargo tree --locked -e normal,dev --target all -i $c 2>&1); then echo "$c
+    is in the tree" >&2; exit 1; fi; case "$out" in *"did not match any packages"*)
+    ;; *) printf ''%s\n'' "$out" >&2; echo "cargo tree failed while looking for $c"
+    >&2; exit 1;; esac; done; cargo tree --locked -e normal --target all -i ring >/dev/null;
+    cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
+    -- --check; echo P6-GATE-GREEN'
 review:
   last_reviewed_commit: fdc32709a5dbc8c2d2cf4b9c1eeba7bc9768347a
   verdict: changes-requested
-  blocked_reason: 'review cycle 3: S3 readers accept any TLS certificate (engine.rs);
-    bound exhausted, human gate'
+  blocked_reason: ''
   cycle: 3
 ---
 # TECH.md — Build an index into S3 and query it in place
@@ -974,6 +1029,78 @@ by count, and every deferral recorded.
 > **Run B evidence (cycle 2):** both test legs' `s3-wire: '' 46 of 46 passed`, equal to the
 > workflow's minimum; the Packaging job's "OK: every asserted literal survived into the published
 > man-page text"; the Lint job green. Record in `evidence/p5-ci.md`.
+
+## Phase P6 — TLS server authentication for both directions
+**Satisfies:** R11 (with R4, R5, R9, R10 as PLAN §7.2 maps) · **Depends on:** P5 · **Size:** ~0.75–1
+day (PLAN §7.4)
+**Goal:** every `https` S3 connection, the writer's and the readers', authenticates the server
+against the one CA file the resolver picks: `AWS_CA_BUNDLE`, else the first platform bundle. A
+self-signed, unknown-CA or wrong-name endpoint is refused by all three tools, an unusable
+source is refused before any connection, and real AWS roots are checked on every CI and release
+platform. Design: PLAN §7; probes: [`research/07`](research/07-tls-server-auth.md).
+
+*Origin: review cycle 3 finding 1 (HIGH, `src/engine.rs`), the human's route 1, GOAL amendment
+`86bf298`. P6 is a fourth build cycle: the review bound in `review.cycle` was spent at 3, so the
+review after P6 runs on the human's say-so, not the bound.*
+
+- [ ] **Red first.** On the tree before this phase, write wire tests 1 and 4 (PLAN §7.1) and show
+  them failing: the readers answer through a self-signed front, and through a test-CA front
+  trusted only via `SSL_CERT_FILE`. Quote the failing lines in the commit body. On macOS only
+  the readers' half of 4(a) goes red; the writer's half needs a Linux host, so run B confirms it
+  from the Ubuntu leg's history or a Linux run.
+- [ ] `src/s3.rs`: `TrustSource`, `PLATFORM_CA_BUNDLES` (httpfs's order), `S3Settings.trust`
+  resolved in `S3Settings::resolve` only for an `https` endpoint; the PEM parse, keeping what
+  `RootCertStore::add` accepts; the refusals naming `AWS_CA_BUNDLE` and the path; `Debug` shows
+  the path and origin. The PEM rules: refuse malformed PEM, invalid DER and `TRUSTED
+  CERTIFICATE` blocks; drop only DER-valid certificates webpki rejects. No resolver error says
+  "TLS certificate is not trusted". `duckdb_tls_statements()` sits beside
+  `duckdb_secret_statement`, each statement whole on one line. The nine unit tests PLAN §7.1
+  names.
+- [ ] `src/engine.rs`: `open_s3_connection_from` runs the fixed batch, then the bound
+  `SET ca_cert_file = ?`, after the `LOAD` and before the `CREATE SECRET`; every error
+  propagates. The doc comment says what it trusts.
+- [ ] `src/s3.rs`: `DirectConnector` carries the source's certificates and builds its client with
+  `tls_certs_only` (an empty list over plain HTTP). `S3Sink::request_error` words a rustls
+  certificate refusal as untrusted, ahead of its unreachable branch.
+- [ ] `src/lib.rs`: `S3Cause::Untrusted` in `classify_s3_text`, and its message in
+  `s3_request_error`, the same words as the writer's.
+- [ ] `tests/common/s3.rs`: `TestPki` (rcgen; the self-signed certificate is end-entity),
+  `TlsFront` relaying to the counting proxy with its connection and handshake counts, and
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` stripped in `Hermetic::command_for`. `Cargo.toml`
+  dev-dependencies `rcgen = "=0.14.10"` and `tokio-rustls` `=0.26.4` with ring only;
+  `Cargo.lock` gains only what `rcgen` needs.
+- [ ] `tests/s3_tests.rs`: the five `tls_` wire tests (PLAN §7.1), each through the front and
+  the proxy, never returning early.
+- [ ] `packaging/extensions/aws-tls-probe.sh` (new): any HTTP status passes; "certificate",
+  `AWS_CA_BUNDLE` and a third "cannot reach" fail. It runs:
+  - from `test.yaml`'s test legs, after the S3 step;
+  - from `check.sh`, with `HOME` the cold home, after the shipped-tools block and before
+    `expect_absent` and the `mv "$x/lib"`.
+  `release.yaml`'s `pull_request.paths` gains `src/s3.rs` and `src/lib.rs`. *Subject to Q4
+  (PLAN §7.4): if the foreman rules it out, drop this item and the gate's `aws-tls-probe` and
+  `release.yaml` predicates through `set_phase.py --verify-file`, and record the ruling here.*
+- [ ] Docs, same commit (§10, §13): `AWS_CA_BUNDLE` and the trust sentence on `xdu.1`,
+  `xdu-find.1` and `xdu-view.1`; counts re-derived; each page's `check` block and `AGENTS.md`'s
+  duplicated-literal sentence; the README sentence. Read each page rendered, or say scdoc was
+  not installed.
+- [ ] Manual: the PLAN §7.1 invariant bullet into `invariants.md` §5 verbatim, mirrored in
+  `AGENTS.md` invariant 5; the High-risk entries for `src/engine.rs` and `src/s3.rs`; Testing
+  names the `tls_` prefix and the front; Commands and `test.yaml` carry the new listed count.
+- **Run B evidence:**
+  - both test legs' `s3-wire: '' 51 of 51 passed`, equal to the workflow's minimum;
+  - both test legs' `aws-tls-probe` lines, each quoting the AWS answer per tool;
+  - every release leg's `aws-tls-probe` lines followed by `extension-check: ok`, with the
+    platform bundle each one reports;
+  - the Packaging job's literal `OK:` line, and Lint green.
+  Record them in `evidence/p6-ci.md`. A certificate error or a "cannot reach" in any probe line
+  is a phase failure, never re-worded.
+- **Verify:** see frontmatter.
+- **Touches:** `src/s3.rs`, `src/engine.rs`, `src/lib.rs` (all high-blast), `tests/common/s3.rs`,
+  `tests/s3_tests.rs`, `Cargo.toml`, `Cargo.lock`, `doc/xdu.1.scd`, `doc/xdu-find.1.scd`,
+  `doc/xdu-view.1.scd`, `README.md`, `AGENTS.md`, `.agents/factory/invariants.md`,
+  `.github/workflows/test.yaml`, `.github/workflows/release.yaml` (paths only),
+  `packaging/extensions/aws-tls-probe.sh`, `packaging/extensions/check.sh`. The `.github/` and
+  `packaging/` files are not on `invariants.md`'s high-blast list.
 
 ---
 

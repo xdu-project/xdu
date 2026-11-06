@@ -1,7 +1,7 @@
 # PLAN — Build an index into S3 and query it in place
 
-> **Status:** Passed the PLAN gate, reconciled with GOAL amendment `0f0edbd` · **Last updated:**
-> 2026-11-05
+> **Status:** P1–P5 passed the PLAN gate, reconciled with GOAL amendment `0f0edbd`. P6 (§7,
+> R11, GOAL amendment `86bf298`) awaits the PLAN gate · **Last updated:** 2026-11-05
 > **Authoritative technical design.** The *how*. Vision/contract is [`GOAL.md`](GOAL.md);
 > the phased executable roadmap is [`TECH.md`](TECH.md). Backing detail is in
 > [`research/`](research/); decisions are consolidated in
@@ -198,6 +198,7 @@ rule).
 | R8 | §2.7 refusal at `xdu-rm.rs:27` (P1) |
 | R9 | §2.11 per-phase pages + README; CI literal counts |
 | R10 | §2.10 in-process s3s-fs on loopback; CI fetch + `--include-ignored` + a passed count equal to the `--list` count guard on both legs; `#[ignore]` locally |
+| R11 | §7 (P6): one trust source from the resolver; the reader pins httplib, turns verification on and binds `ca_cert_file`; the writer trusts only that file's certificates; `tls_` wire tests behind a TLS front |
 
 ## 3. Invariant gate (AGENTS.md constitution check)
 
@@ -336,6 +337,363 @@ No open question remains for build.
 - **Release gates:** `cargo fmt --check`, `cargo clippy --all-targets --all-features -D warnings`,
   and the man-page render plus literal counts (CI on push; locally after installing `scdoc`).
 
+## 7. Phase P6 — TLS server authentication (R11)
+
+Review cycle 3 finding 1: the readers accept any server certificate, and the writer verifies
+against a different store. GOAL amendment `86bf298` adds R11. The probes behind every choice
+below are in [`research/07`](research/07-tls-server-auth.md); the decision is digest D11.
+
+### 7.1 Design
+
+- **What the stacks do today (probed).**
+  - **Reader.** The pinned httpfs reads through httplib, with OpenSSL 3.0.8 linked in and curl
+    beside it (`httpfs_client_implementation = default` means httplib). It verifies nothing
+    until `enable_server_cert_verification` is on. With it on and no `ca_cert_file`, httplib
+    trusts OpenSSL's defaults: `SSL_CERT_FILE`, else the compiled-in `/etc/ssl`, which is wrong
+    on RHEL-family hosts. It never reads the macOS keychain.
+  - **Writer.** The writer's `reqwest` 0.13 trusts `rustls-platform-verifier`: the keychain on
+    macOS, and on Linux the native store, which honours `SSL_CERT_FILE`.
+  - **Neither honours `AWS_CA_BUNDLE`.** Both readers' settings are global `SET`s, and
+    `SET ca_cert_file = ?` takes a bound value.
+- **Trust source (`src/s3.rs`, the resolver).** `S3Settings` gains `trust: Option<TrustSource>`,
+  resolved in `S3Settings::resolve` and `Some` exactly when the endpoint is `https`.
+  - **`TrustSource`** holds the file's absolute path (valid UTF-8, since it is bound as text),
+    its origin (`AWS_CA_BUNDLE` or the platform), and the DER certificates read from it.
+  - **Resolution.** `AWS_CA_BUNDLE` when set and non-empty; set-but-empty counts as unset, as
+    every variable the resolver reads does. Else the first file present in
+    `PLATFORM_CA_BUNDLES`, in httpfs's own probe order:
+    `/etc/ssl/certs/ca-certificates.crt`,
+    `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/pki/tls/certs/ca-bundle.crt`,
+    `/etc/ssl/ca-bundle.pem`, `/etc/ssl/cert.pem`.
+  - **Reads.** The file is read through `EnvSource::read_file`, so unit tests feed fixtures for
+    both origins. A file that is present but unreadable is an error; the resolver does not skip
+    on to the next candidate.
+  - **Certificates kept.** Every `CERTIFICATE` block is parsed
+    (`rustls::pki_types::pem::PemObject`). Only certificates `rustls::RootCertStore::add`
+    accepts are kept, since one that webpki cannot parse would otherwise fail the writer's
+    client build. Keeping none is an error.
+  - **Refused outright,** so that OpenSSL never loads what the writer leaves out:
+    - a block that is not valid PEM, or a `CERTIFICATE` block that is not valid DER, since
+      OpenSSL would fail on it at request time;
+    - a `TRUSTED CERTIFICATE` block, which OpenSSL trusts and webpki cannot read.
+  - **Dropped, and only these:** DER-valid certificates webpki rejects.
+  - **Errors** come before any request and name `AWS_CA_BUNDLE` and the path, never a
+    credential:
+    - `AWS_CA_BUNDLE names <path>, which cannot be read (<kind>)`;
+    - `… holds no usable CA certificate`;
+    - `no platform CA bundle found (looked for <list>); set AWS_CA_BUNDLE to a CA file`;
+    - a platform file that is present but unusable gets the same shape.
+  - **One phrase belongs to the endpoint refusal alone:** "TLS certificate is not trusted". No
+    resolver error may contain it, so a test can tell "refused the server" from "found no
+    roots".
+  - **Never a source:** `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's `/etc/ssl` default and the
+    keychain. A plain `http://` override resolves no source, so a broken `AWS_CA_BUNDLE` does not
+    stop it (R11: TLS does not apply).
+- **Reader (`src/engine.rs`, `open_s3_connection_from`).** After the `LOAD`, before the
+  `CREATE SECRET` and any request, one fixed batch runs:
+  `SET httpfs_client_implementation = 'httplib'; SET enable_server_cert_verification = true;
+  SET enable_curl_server_cert_verification = true`.
+  - **Then the file.** `SET ca_cert_file = ?`, prepared, with `TrustSource`'s path bound, when
+    there is a source.
+  - **Where the text lives.** It comes from `S3Settings::duckdb_tls_statements()`, beside
+    `duckdb_secret_statement`, so a unit test pins it without httpfs. Every error propagates.
+  - **Why pin httplib:** curl ignores `ca_cert_file` (probed), so an engine whose `default`
+    moved to curl would change the trust source silently. A removed `httplib` fails the `SET`
+    loudly.
+  - **Why the curl flag too:** it keeps that backend verifying, failing closed, if anything ever
+    selects it.
+- **Writer (`src/s3.rs`, `DirectConnector`).** The connector carries the source's DER
+  certificates. Its client is built with
+  `reqwest::ClientBuilder::tls_certs_only(certificates)`, so the platform verifier, the native
+  store and `SSL_CERT_FILE` drop out. It never uses `tls_certs_merge` or
+  `add_root_certificate`.
+  - **Plain `http://` endpoint:** no source, so the list is empty and the client cannot complete
+    any TLS handshake, a redirect included.
+  - **Dependencies:** the writer gains no runtime crate. `rustls::pki_types` and
+    `rustls::RootCertStore` are already in the tree.
+- **One source, both directions.** The resolver reads the file once. The reader's OpenSSL
+  reopens the same path at its first request; the writer uses the certificates read. The only
+  gap is a file replaced between those two reads, which is a change of trust configuration by
+  whoever controls the file, not a way around it.
+- **Refusal wording (`src/lib.rs`, `src/s3.rs`).**
+  - **Reader.** `classify_s3_text` gains `S3Cause::Untrusted` for httplib's "SSL server
+    verification failed" (and curl's "SSL peer certificate", defensively).
+  - **Writer.** `S3Sink::request_error` matches rustls's "invalid peer certificate" in the
+    error chain, ahead of its unreachable branch, which today words a TLS refusal as "cannot
+    reach".
+  - **Shared message:** `the S3 endpoint's TLS certificate is not trusted while <what> for
+    <index>; it must chain to a CA in the file AWS_CA_BUNDLE names, else the platform's CA
+    bundle`. The marker-ordering guarantees are untouched. The writer's refusal comes at the
+    pre-flight LIST, before the marker DELETE, so an existing index keeps its marker (R4's
+    terms).
+- **Tests (`tests/common/s3.rs`, `tests/s3_tests.rs`).**
+  - **The TLS front.** `TlsFront`, on `TestS3`'s runtime, accepts on `127.0.0.1:0`, terminates
+    TLS with `tokio-rustls` and relays plaintext to the counting proxy. Every existing proxy
+    assertion still holds: ranged reads only, one recorded request per connection, nothing
+    bypassing the proxy. For each connection it records the handshake's outcome, any alert the
+    client sent, and whether application bytes followed.
+  - **Why tests never count handshakes.** httplib finishes the handshake and only then checks
+    the result (its refusal is "SSL server verification failed", not a connection failure). So a
+    refusing reader shows a *completed* handshake, then a close with no application bytes. The
+    rustls writer fails inside the handshake, and its retries can repeat the attempt.
+  - **The rules that follow:**
+    - **Refusal:** the front accepted at least one connection for the run, and the proxy
+      recorded 0 requests.
+    - **Writer refusal:** also at least one failed handshake that carries a certificate alert.
+    - **Acceptance:** at least one proxied request per tool.
+  - **Certificates.** `TestPki` generates with `rcgen`: a test CA, an unrelated CA, a leaf the
+    test CA signs for `IP:127.0.0.1`, a test-CA leaf for `DNS:wrong.example` only, and a
+    self-signed **end-entity** certificate for `IP:127.0.0.1`. It must not be a CA certificate:
+    a self-signed CA certificate is refused as `CaUsedAsEndEntity`, which proves a different
+    rule. Each CA's PEM goes in a temp directory outside the `Hermetic` directories.
+  - **Hermetic children.** `Hermetic::command_for` also strips `SSL_CERT_FILE` and
+    `SSL_CERT_DIR`. `AWS_CA_BUNDLE` already goes with `AWS_*`.
+  - **New wire tests** (`tls_` prefix, `#[ignore]` like the rest; 46 → **51**). Each goes
+    through the front and the proxy:
+    1. `tls_a_self_signed_endpoint_is_refused_by_all_three_tools`.
+       - **Setup:** a seeded index, the self-signed certificate, then the wrong-name test-CA
+         leaf, each with `AWS_CA_BUNDLE` naming the test CA. The self-signed one is also tried
+         with no `AWS_CA_BUNDLE` (platform bundle).
+       - **Asserts:** `xdu` (into the seeded prefix), `xdu-find --count` and `xdu-view` each
+         exit non-zero with empty stdout. Stderr carries the exact phrase "TLS certificate is
+         not trusted" and `AWS_CA_BUNDLE`. The refusal rule holds: at least one front
+         connection per run and 0 proxied requests, plus, for `xdu`, a failed handshake with a
+         certificate alert. The prefix's objects are byte-identical afterwards, marker
+         included, and `HOME`, `TMPDIR` and cwd are empty.
+       - **Platform leg.** The run with no `AWS_CA_BUNDLE` panics, naming the list, if no
+         platform bundle exists on the host. It never passes on a "no roots" refusal.
+    2. `tls_an_endpoint_the_named_ca_signed_answers_as_plain_http_does`.
+       - **Writer:** `xdu` over TLS into one prefix and over HTTP into another, from one source
+         tree. The objects are equal apart from the marker's `completed_at`.
+       - **`xdu-find`:** `--count`, `-u`, `--top 3` and the default listing give byte-identical
+         stdout over both.
+       - **`xdu-view`:** the `view_query` statements give equal results on an in-test
+         `open_s3_connection_from` connection for each. The binary, driven with no terminal,
+         gets past the marker read through the front (recorded requests, no certificate
+         cause) before it stops for want of a terminal.
+       - **Every run:** no whole-object GET, and at least one proxied request per tool.
+    3. `tls_an_unusable_ca_bundle_is_refused_before_any_connection`.
+       - **Setup:** `AWS_CA_BUNDLE` names a missing path, a directory, an empty file, and a PEM
+         holding only a key.
+       - **Asserts:** the three tools exit non-zero naming `AWS_CA_BUNDLE`, and the front
+         accepted 0 connections. The same four values over the plain-HTTP proxy still answer
+         `--count`.
+    4. `tls_only_the_resolved_file_is_trusted`.
+       - **Setup:** the endpoint shows the test-CA leaf. In (a), `AWS_CA_BUNDLE` is unset and
+         `SSL_CERT_FILE` names the test CA. In (b), `AWS_CA_BUNDLE` names the unrelated CA and
+         `SSL_CERT_FILE` names the test CA. `SSL_CERT_DIR` is not used: OpenSSL reads it only
+         as a hashed directory, so naming a file would prove nothing.
+       - **Asserts:** all three tools refuse under the refusal rule, with stderr carrying "TLS
+         certificate is not trusted", which rules out a "no roots" refusal.
+       - **What it proves:** case (a) fails on today's readers on every host. It fails on
+         today's writer only on Linux, since macOS's platform verifier ignores
+         `SSL_CERT_FILE`. So the writer half of red-first shows on the Ubuntu leg, not on a Mac.
+    5. `tls_the_reader_connection_pins_verification_and_the_ca_file`. After
+       `open_s3_connection_from`, `current_setting` reads `httplib`, `true`, `true` and the
+       resolved absolute path for an `https` endpoint, and an empty `ca_cert_file` for an
+       `http` one. One run puts the bundle under a directory whose name holds a `'`; the path
+       reads back intact, which shows it is bound, not SQL text.
+  - **Unit tests (`s3::tests`, always run).**
+    - `the_trust_source_is_the_file_aws_ca_bundle_names`;
+    - `an_empty_aws_ca_bundle_is_unset`;
+    - `without_aws_ca_bundle_the_first_platform_bundle_present_is_the_source`;
+    - `no_platform_bundle_is_refused_naming_aws_ca_bundle`;
+    - `an_unusable_bundle_is_refused_naming_aws_ca_bundle` (malformed PEM, invalid DER, a
+      `TRUSTED CERTIFICATE` block);
+    - `no_resolver_error_says_the_certificate_is_not_trusted`;
+    - `a_certificate_webpki_rejects_is_dropped_and_the_rest_kept`;
+    - `a_plain_http_endpoint_resolves_no_trust_source`;
+    - `the_tls_statements_are_fixed_text_and_bind_only_the_path`.
+  - **Red first.** Wire test 1 must fail on `d5913be`, with the readers answering, and wire test
+    4(a) must fail there too. Record both in the commit body.
+  - **Dev-dependencies, pinned exactly:** `rcgen = "=0.14.10"` (default features: `crypto`,
+    `pem`, `ring`; no aws-lc) and
+    `tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }`.
+- **Real roots on the release platforms: a CI probe.** New
+  `packaging/extensions/aws-tls-probe.sh BINDIR [EXTDIR]`. Nothing local runs it: it is not
+  part of `cargo test` or `tests/s3-wire.sh`.
+  - **What it runs.** Under `env -i` with a cold `HOME`, it runs `xdu-find --count`, `xdu-view`
+    and `xdu SRC -o` against `s3://xdu-tls-probe/p` on AWS (`us-east-1`, virtual-hosted, no
+    override). It uses AWS's documented example key pair, `AKIAIOSFODNN7EXAMPLE`, so no account
+    and no secret.
+  - **Asserts, per tool:** exit non-zero, and stderr carries an HTTP answer. That is any status:
+    `HTTP [0-9]{3}`, "refused the credentials", or "does not exist at the S3 endpoint". A
+    squatted bucket in another region may answer 301 or 400, and that still proves the
+    handshake verified. Stderr must carry neither "certificate" nor `AWS_CA_BUNDLE`. "cannot
+    reach" is retried twice, then fails.
+  - **What it prints:** the matched stderr line for each tool, so a reader of the log sees the
+    real answer, and the first platform bundle present, for information only.
+  - **Where it runs:**
+    - in `test.yaml`'s test legs, after the S3 step: Debian-family `ubuntu-24.04` and
+      `macos-15`;
+    - from `check.sh` on every release leg: manylinux_2_28 containers (RHEL-family, `/etc/pki`)
+      on amd64 and arm64, and macOS. It runs while the extracted `lib/` is still in place:
+      before the `expect_absent` block (which moves it aside) and before the cold-`HOME` check.
+      Placed after them, a correct reader would die naming the missing extension.
+    - **Release triggers.** P6's diff touches `src/engine.rs` and `Cargo.toml`, so the release
+      workflow runs on its pull request. `release.yaml`'s `pull_request.paths` gains
+      `src/s3.rs` and `src/lib.rs`, so that a later change to the trust list re-runs the
+      RHEL-family probe before a tag rather than at one.
+  - **What it proves:** the resolver finds a usable bundle on each of those hosts, each platform
+    build of httpfs accepts it, and AWS's real chain verifies against it in both TLS stacks.
+  - **What it cannot prove:** that verification is on. With it off, AWS answers 403 too. The
+    loopback tests own that.
+  - **Cost:** a release now depends on AWS answering, as it already depends on the DuckDB
+    extension host. See Q4.
+- **Docs and manual.**
+  - **Man pages.** `doc/xdu.1.scd`, `doc/xdu-find.1.scd` and `doc/xdu-view.1.scd` get
+    `AWS_CA_BUNDLE` in `ENVIRONMENT`, plus a sentence in the S3 section: every `https`
+    connection verifies the server against that file, else the first platform bundle (the
+    list); `SSL_CERT_FILE` is not read; nothing turns verification off. Counts are re-derived;
+    `AWS_CA_BUNDLE` joins each page's `check` list in `test.yaml` and `AGENTS.md`'s
+    duplicated-literal sentence in the same commit (§13).
+  - **`README.md`:** one sentence in `### Indexes in S3`.
+  - **`AGENTS.md`:** invariant 5 mirrors the new bullet below, and the High-risk entries for
+    `src/engine.rs` and `src/s3.rs` name the trust source. Testing names the `tls_` prefix and
+    the front, and Commands and the workflow carry 51.
+- **Invariant text** (a new bullet in `invariants.md` §5; §5 is in §1–§12, so a breach is
+  auto-CRITICAL). The build applies it verbatim:
+
+  > - **Every S3 connection authenticates the server, against one trust source.**
+  >   `S3Settings::resolve` picks the source once for both directions: the file `AWS_CA_BUNDLE`
+  >   names, else the first of `s3::PLATFORM_CA_BUNDLES` present. A missing, unreadable or
+  >   certificate-free source refuses before any request, naming `AWS_CA_BUNDLE`.
+  >   - **Writer.** `S3Sink`'s client trusts only that file's certificates
+  >     (`tls_certs_only`): never the platform verifier, built-in roots or
+  >     `tls_certs_merge`.
+  >   - **Reader.** `engine::open_s3_connection` runs fixed text after the `LOAD`: it pins
+  >     `httpfs_client_implementation` to `httplib`, turns `enable_server_cert_verification` and
+  >     `enable_curl_server_cert_verification` on, and binds the path as `SET ca_cert_file = ?`.
+  >     The path is never SQL text.
+  >   - **Nothing disables verification:** no `danger_accept_invalid_*`, `tls_danger_*`,
+  >     `allow_invalid_certificates` or custom verifier; no `false` for either flag; no option
+  >     or variable that turns it off.
+  >   - **Nothing adds roots beside the one source:** no `tls_certs_merge`,
+  >     `add_root_certificate`, `with_root_certificate`, `webpki-roots`, `rustls-native-certs`
+  >     or platform verifier.
+  >   - **Never trust sources:** `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in
+  >     directory and the macOS keychain. A plain `http://` endpoint override resolves no source.
+  >   - **The tests that hold it:** the `tls_` wire tests. A self-signed, unknown-CA or
+  >     wrong-name endpoint is refused by all three tools; an endpoint the named CA signed
+  >     answers as plain HTTP does; an unusable `AWS_CA_BUNDLE` stops each tool before it
+  >     connects.
+
+### 7.2 Requirement → design map (P6)
+
+| R-ID | Design element(s) |
+|------|-------------------|
+| R11 | §7.1 `TrustSource` in `S3Settings::resolve` (one source, both directions; refusal naming `AWS_CA_BUNDLE`); reader's fixed `SET`s and bound `ca_cert_file`; writer's `tls_certs_only`; untrusted-certificate cause in both directions; wire tests 1–5; unit tests; man pages; invariant §5 bullet |
+| R4 | The certificate refusal follows R4's terms: no rows, and for `xdu` a refusal at the pre-flight LIST, before the marker DELETE (wire test 1 checks the seeded marker survives) |
+| R5 | The resolver stays the one resolver; `AWS_CA_BUNDLE` joins the variables it reads |
+| R9 | `AWS_CA_BUNDLE` on the three pages and in the README, under the literal-count gate |
+| R10 | The `tls_` tests run on the loopback endpoint in CI's S3 step; the minimum rises to 51 |
+
+### 7.3 Invariant gate (P6)
+
+- **Gate #1 (before the design): sane.** It touches §2b, §5, §10, §11 and §13. Nothing in R11
+  is at odds with them. Verification is on the same footing as `CREATE SECRET`: fixed text plus
+  bound values.
+- **Gate #2 (against the design):**
+  - **§2b.** Untouched: every refusal precedes the marker DELETE. A bad trust source fails at
+    resolve; a bad certificate fails at the pre-flight LIST.
+  - **§5.** The new statements are fixed text, and the one path is a bound value. The rule
+    joins §5 as the bullet above.
+  - **§7.** No new thread. The front runs on the test runtime.
+  - **§10.** No new flag. A new variable is documented on its pages in the same commit.
+  - **§11.** Trust selection is a library function, testable without the binaries.
+  - **§13.**
+    - No runtime crate is added, and the P3 dependency floor holds for dev-dependencies too
+      (the gate checks `-e normal,dev`).
+    - The new literal follows the three-place rule, and no spec ids go in source.
+- **Deviations:** one, below. Empty is not reachable, since R10 needs a TLS endpoint and none
+  exists in the tree.
+
+| Deviation | Why needed | Simpler alternative rejected because |
+|-----------|-----------|--------------------------------------|
+| 10. Dev-dependencies `rcgen` (new, with `yasna` and `pem`) and `tokio-rustls` (already locked) | R11's tests need a TLS endpoint on loopback with certificates made per run | Committed PEM fixtures: private keys in a public repo trip secret scanners, and fixed expiry dates rot. A std-only TLS relay over `rustls::StreamOwned` cannot split one stream across two relay threads without a lock |
+
+- **Adversarial review of this design** (xdu-plan Step 3: the tests and the CI probe are
+  gate-shaped). One read-only reviewer raised eight points before this section was committed,
+  and all are adopted above:
+  1. httplib verifies after the handshake, so tests assert on proxied requests, not handshakes.
+  2. The refusal phrase is unique, so a "no roots" refusal cannot pass a certificate test.
+  3. The static greps became a ban list and an allowlist, and a `'` path proves binding.
+  4. `SSL_CERT_DIR` was dropped, and the Linux-only writer half of the red-first is recorded.
+  5. The probe moved ahead of `check.sh`'s `lib/` move, and `release.yaml`'s paths were
+     widened.
+  6. The probe accepts any HTTP status.
+  7. The PEM rules make both stacks load the same set.
+  8. Names are checked in the list file.
+
+### 7.4 Risks and open questions (P6)
+
+- **Q4 (for the foreman at the PLAN gate): the CI request to AWS against GOAL's Non-goals.**
+  - **The tension.** GOAL rules out "a real-provider check as an acceptance gate, whether manual
+    or a CI job against a cloud account". The probe uses no account, and R11's acceptance stays
+    on loopback. But it is a CI step that fails the build on an AWS answer.
+  - **Recommendation:** keep it. It is the only check of the platform-roots half of R11 on the
+    release platforms.
+  - **If the ruling is no:** drop the `aws-tls-probe.sh` checklist item and its three gate
+    predicates. The rest of P6 stands.
+- **The writer's trust narrows on macOS.** Today it trusts the keychain, including roots an
+  administrator or MDM added. After P6 it trusts `/etc/ssl/cert.pem`, which carries Apple's
+  bundle and not those additions. A site whose endpoint chains to such a root sets
+  `AWS_CA_BUNDLE`, and the pages say so. The readers never trusted the keychain.
+- **A platform bundle the list does not name:** for example `/etc/ssl/certs/` as hashed files
+  only. It refuses, naming `AWS_CA_BUNDLE`, which is the designed failure. The release-leg probe
+  covers the Debian, RHEL and macOS families.
+- **Real AWS answers:** a nonexistent bucket may answer 404 rather than 403. Both count. A
+  regional redirect would land in the writer's generic branch and fail the probe, so the build
+  confirms the answers on the first CI run (run B), not here.
+- **Size:** about 0.75–1 day of build, over the half-day aim.
+  - **The core** (resolver, both stacks, wording, front, five wire tests, docs and invariant):
+    about 0.6.
+  - **The CI probe in two workflows:** about 0.25. It is the separable part if the foreman wants
+    P6 smaller (Q4).
+
+### 7.5 Verification (P6)
+
+- **Wire:** `tests/s3-wire.sh tls_ 5` with the five names checked in its log. Then the whole file
+  at its listed count, which must be at least 51 and equal the minimum in `test.yaml` and in
+  `AGENTS.md`'s command.
+- **Unit and suite:** the nine `s3::tests` names, then `cargo test --locked`.
+- **Static predicates.** Each fails on today's tree where it should:
+  - **Ban list** (case-insensitive, over `src/`):
+    - anything that disables verification: `danger_accept_invalid`, `tls_danger_`,
+      `allow_invalid_certificates`, `dangerous()`, `with_custom_certificate_verifier`, and
+      either flag set to `false`, or to `0` in any spelling;
+    - anything that adds roots beside the source: `tls_certs_merge`, `add_root_certificate`,
+      `with_root_certificate`, `tls_backend_preconfigured`, `use_preconfigured_tls`, and any
+      use of the `webpki_roots`, `rustls_native_certs` or `rustls_platform_verifier` crates.
+  - **Allowlist:** every non-comment `src/` line that names `cert_verification`, `ca_cert_file`
+    or `httpfs_client_implementation`, outside a `#[cfg(test)]` module, matches the expected
+    text exactly. A comment cannot satisfy it, and a stray `SET` cannot hide in it.
+    - **Constraints this puts on the build:** each fixed statement sits whole on one source
+      line. Production code names those settings nowhere else; doc comments are exempt.
+    - **The ban list scans test modules too,** so no test may spell a banned string, even
+      inside an assertion.
+  - **What must be there:** `tls_certs_only` called in `src/s3.rs` outside its test module.
+  - **Behaviour behind the text:** wire test 5 reads the settings back, and its `'` path shows
+    the path is bound.
+  - **Errors not dropped:** no `let _ =` around a TLS statement.
+- **Docs and manual:** `AWS_CA_BUNDLE` is on three pages and the README, and in each page's
+  `check` block (block-scoped, so a comment cannot satisfy it). `invariants.md` and `AGENTS.md`
+  carry the rule.
+- **CI probe and dependencies:**
+  - the probe script parses (`sh -n`);
+  - its run line, not a comment, is in `test.yaml` and `check.sh`, and in `check.sh` it comes
+    before the line that moves `lib/` aside;
+  - `release.yaml`'s paths name `src/s3.rs` and `src/lib.rs`.
+
+  The dependency floor runs over `normal,dev`. Then clippy and fmt.
+- **Selection by the list file.** The wire-test names are checked against
+  `target/wire-tls_.list`, not the log, because libtest interleaves stderr into the log.
+  `s3-wire.sh` already proves passed equals listed.
+- **Run B evidence** (CI only):
+  - both test legs' `s3-wire: '' 51 of 51 passed` and their `aws-tls-probe` lines;
+  - each release leg's `aws-tls-probe` lines before `extension-check: ok`;
+  - the Packaging literal step's `OK:` line.
+
 ---
 
-*Backing research: [`research/00-digest.md`](research/00-digest.md) and briefs `01`–`05`.*
+*Backing research: [`research/00-digest.md`](research/00-digest.md) and briefs `01`–`07`.*

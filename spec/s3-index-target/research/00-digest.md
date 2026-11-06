@@ -151,3 +151,17 @@ gap where local stops at it; the gap only arises from a foreign edit, and deleti
   and fixture credential/config files.
 - Loading httpfs from a debug build has been observed only on macOS; the first CI push proves
   linux_amd64.
+
+## D11 — One CA file, chosen by the resolver, verifies both directions (P6, R11)
+
+From [`07`](07-tls-server-auth.md). The pinned httpfs reads S3 through httplib with OpenSSL 3.0.8
+linked in, and verifies nothing unless `enable_server_cert_verification` is on. Without
+`ca_cert_file` it trusts OpenSSL's defaults: `SSL_CERT_FILE`, else the compiled-in `/etc/ssl`,
+which misses RHEL-family hosts. The writer trusts `rustls-platform-verifier`: the macOS keychain,
+or the native store, which honours `SSL_CERT_FILE` too. So the resolver picks one file,
+`AWS_CA_BUNDLE` else the first platform bundle present, in httpfs's own probe order, and checks
+it holds a usable certificate before any request. The reader pins httplib, turns verification on
+and binds the path as `SET ca_cert_file = ?`; the writer's client gets `tls_certs_only` of the
+same file's certificates. A plain-`http://` endpoint resolves no file. Real roots on the release
+platforms are checked by a CI request to AWS with the documented example key pair, which only
+roots, not verification, can fail.
