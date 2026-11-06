@@ -32,9 +32,10 @@ gives you `make foo`, `make foo.def`, `make foo.sif` and `make foo.image`.
 
 ## What it builds
 
-A two-stage image holding the four binaries — `xdu`, `xdu-find`, `xdu-view`,
-`xdu-rm` — plus man pages and shell completions, taken from the published
-release tarball. The download runs in a throwaway first stage, checked against
+A two-stage image holding the release's binaries — `xdu`, `xdu-find`,
+`xdu-view`, `xdu-rm`, and `xdu-cp` and `xdu-mv` from the release that first ships
+them — plus man pages and shell completions, taken from the published release
+tarball. The download runs in a throwaway first stage, checked against
 the published `SHA256SUMS`, keeping `curl` out of the finished image, and the
 architecture is resolved inside the
 container from `uname -m`, so one spec serves both x86_64 and aarch64.
@@ -54,8 +55,10 @@ it can only install released tags, not an arbitrary commit.
 **Why bookworm.** Releases built on the manylinux_2_28 baseline need at most glibc
 2.28, so bookworm (2.36) serves as the runtime. The previous Ubuntu 24.04 releases
 needed up to 2.39 and ran on trixie instead; the runtime stage still runs `--version`
-on all four binaries, so pointing the recipe at a pre-baseline tag fails the build
-loudly instead of producing an image that dies on first use.
+on every `bin/xdu*` the tarball holds, so pointing the recipe at a pre-baseline tag
+fails the build loudly instead of producing an image that dies on first use. The
+smoke loops over the binaries rather than naming them, so the recipe's pinned
+release and a newer one with more tools build from the same specs.
 
 **Man pages and shell completions.** The release tarball ships them, so this
 recipe includes them; the top-level Dockerfile cannot, because `.dockerignore`

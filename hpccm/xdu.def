@@ -46,10 +46,7 @@ From: debian:bookworm-slim
 
 %post
     cd /
-    /opt/xdu/bin/xdu --version
-    /opt/xdu/bin/xdu-find --version
-    /opt/xdu/bin/xdu-view --version
-    /opt/xdu/bin/xdu-rm --version
+    for b in /opt/xdu/bin/xdu*; do "$b" --version || exit 1; done
     test -f /opt/xdu/lib/xdu/extensions/httpfs.duckdb_extension
 
 %environment

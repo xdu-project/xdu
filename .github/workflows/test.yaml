@@ -85,8 +85,53 @@ jobs:
       - name: Build
         run: cargo build --locked --all-features
 
+      # The cross-filesystem move tests need a writable directory on a filesystem other than the
+      # one the temp dirs live on. Linux: /dev/shm, the tmpfs systemd always mounts, writable
+      # without sudo. macOS: an APFS disk image the runner user attaches (APFS keeps nanosecond
+      # times, which HFS+ does not; `hdiutil create` can flake with "Resource busy", so it is
+      # retried). Each step fails if the directory shares the workspace's device, and the test
+      # fixture then proves the real condition, a rename into it answering EXDEV.
+      - name: Second filesystem for the cross-filesystem move tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          d=/dev/shm/xdu-xfs
+          mkdir -p "$d"
+          test "$(stat -c %d "$d")" != "$(stat -c %d "$GITHUB_WORKSPACE")"
+          echo "XDU_TEST_XFS_DIR=$d" >> "$GITHUB_ENV"
+
+      - name: Second filesystem for the cross-filesystem move tests (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          img="$RUNNER_TEMP/xdu-xfs.dmg"
+          d="$RUNNER_TEMP/xdu-xfs"
+          mkdir -p "$d"
+          made=
+          for i in 1 2 3; do
+            if hdiutil create -ov -size 256m -fs APFS -volname xdu-xfs "$img"; then made=1; break; fi
+            sleep 5
+          done
+          test -n "$made"
+          attached=
+          for i in 1 2 3; do
+            if hdiutil attach -nobrowse -mountpoint "$d" "$img"; then attached=1; break; fi
+            sleep 5
+          done
+          test -n "$attached"
+          test "$(stat -f %d "$d")" != "$(stat -f %d "$GITHUB_WORKSPACE")"
+          echo "XDU_TEST_XFS_DIR=$d" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --locked --all-features
+
+      # tests/xfs-wire.sh runs tests/mv_xfs_tests.rs with --include-ignored and fails unless the
+      # passed count equals the listed count and reaches the minimum, the file's listed count;
+      # raise it in the commit that adds a test (AGENTS.md, Testing). The fixture panics unless a
+      # rename into XDU_TEST_XFS_DIR answers EXDEV, so the step cannot pass on one filesystem.
+      # The last line, `xfs-wire: '' N of N passed with XDU_TEST_XFS_DIR=…`, is the record.
+      - name: XFS tests
+        run: sh tests/xfs-wire.sh "" 3
 
       # The S3 wire tests need the pinned httpfs, which nothing in the repository carries. Fetch
       # it the way a release leg does, with the probe from this build naming engine and platform,
@@ -228,8 +273,8 @@ jobs:
               # is satisfied by whichever copy survived, so corrupting one of two occurrences is
               # invisible. That is a property of the page, not of the literal, so it has to be
               # re-checked BY HAND whenever a page changes; nothing here re-derives it. The same
-              # applies to coverage: this list names four pages while the render step globs
-              # doc/*.scd, so a fifth page is unasserted. Both gaps are recorded in
+              # applies to coverage: this list names six pages while the render step globs
+              # doc/*.scd, so a seventh page is unasserted. Both gaps are recorded in
               # issues/manpage-gate-coverage-gaps.md.
               want=""; lit="$spec"
               case "$spec" in
@@ -289,6 +334,16 @@ jobs:
             '1x:AWS_CONFIG_FILE' '1x:AWS_REGION' '1x:AWS_DEFAULT_REGION' \
             '1x:AWS_ENDPOINT_URL_S3' '2x:AWS_ENDPOINT_URL' '2x:AWS_CA_BUNDLE'
           check share/man/man1/xdu-rm.1   '2x:XDU_INDEX' '2x:XDU_JOBS'
+          # xdu-cp.1 and xdu-mv.1 name XDU_INDEX and XDU_JOBS twice each, as xdu-rm.1 does,
+          # and s3://BUCKET/PREFIX once, in the -i refusal. Each page also carries one worked
+          # --root/--into mapping, and its destination path is counted: a mis-escaped or fused
+          # path there teaches an operator the wrong layout. The two pages use different paths,
+          # so each literal also checks that the page is the one it claims to be. The paths hold
+          # no `_`, `*` or `-`, which scdoc would read as markup or the homebrew build escapes.
+          check share/man/man1/xdu-cp.1   '2x:XDU_INDEX' '2x:XDU_JOBS' '1x:s3://BUCKET/PREFIX' \
+            '1x:/cold/alice/logs/app.log'
+          check share/man/man1/xdu-mv.1   '2x:XDU_INDEX' '2x:XDU_JOBS' '1x:s3://BUCKET/PREFIX' \
+            '1x:/archive/carol/runs/r1.h5'
           # A line starting with `.` or `'` is a roff control request: scdoc drops the period
           # silently, and the intuitive `\.` escape destroys the rest of the line. Rewrap instead.
           if grep -nE "^[[:space:]]*['.]" doc/*.scd; then
@@ -330,14 +385,20 @@ jobs:
             share/man/man1/xdu-find.1 \
             share/man/man1/xdu-view.1 \
             share/man/man1/xdu-rm.1 \
+            share/man/man1/xdu-cp.1 \
+            share/man/man1/xdu-mv.1 \
             share/bash-completion/completions/xdu.bash \
             share/bash-completion/completions/xdu-find.bash \
             share/bash-completion/completions/xdu-view.bash \
             share/bash-completion/completions/xdu-rm.bash \
+            share/bash-completion/completions/xdu-cp.bash \
+            share/bash-completion/completions/xdu-mv.bash \
             share/zsh/site-functions/_xdu \
             share/zsh/site-functions/_xdu-find \
             share/zsh/site-functions/_xdu-view \
-            share/zsh/site-functions/_xdu-rm; do
+            share/zsh/site-functions/_xdu-rm \
+            share/zsh/site-functions/_xdu-cp \
+            share/zsh/site-functions/_xdu-mv; do
             if [ ! -s "$f" ]; then
               missing="${missing} ${f}"
             fi
@@ -346,4 +407,4 @@ jobs:
             echo "MISSING generated packaging artifacts:${missing}" >&2
             exit 1
           fi
-          echo "OK: all four man pages and all bash+zsh completions present"
+          echo "OK: all six man pages and all bash+zsh completions present"

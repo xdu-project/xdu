@@ -13,7 +13,7 @@
 set -eu
 
 REPO="xdu-project/xdu"
-BINARIES="xdu xdu-find xdu-view xdu-rm"
+BINARIES="xdu xdu-find xdu-view xdu-rm xdu-cp xdu-mv"
 
 # Colors for output (disabled if not a terminal)
 if [ -t 1 ]; then

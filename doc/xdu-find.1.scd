@@ -102,8 +102,8 @@ no extension.
 Credentials, region and endpoint come from the AWS variables and shared files
 listed below, so the same invocation reaches AWS S3 or, with an endpoint set,
 an S3-compatible store. The proxy variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
-are not used: requests go straight to the endpoint. *xdu-rm*(1) refuses S3
-indices.
+are not used: requests go straight to the endpoint. *xdu-rm*(1), *xdu-cp*(1)
+and *xdu-mv*(1) refuse S3 indices.
 
 Every connection to an https endpoint, which is every AWS one, authenticates
 the server's certificate against one CA file: the file *AWS_CA_BUNDLE* names,
@@ -219,4 +219,4 @@ profile in the shared files:
 
 # SEE ALSO
 
-*xdu*(1), *xdu-view*(1), *xdu-rm*(1)
+*xdu*(1), *xdu-view*(1), *xdu-rm*(1), *xdu-cp*(1), *xdu-mv*(1)

@@ -6,8 +6,8 @@
     hpccm --recipe xdu.py --format singularity \
           --singularity-version=3.2 > xdu.def
 
-Installs the four xdu binaries, plus man pages and shell completions, from
-the upstream release tarball. The tarball is extracted whole into the prefix,
+Installs the xdu binaries, plus man pages and shell completions, from the
+upstream release tarball. The tarball is extracted whole into the prefix,
 so a release that ships DuckDB extensions puts its lib/xdu/extensions/ beside
 bin/, where the binaries look for them; from 0.6.0 on, the build fails if the
 extensions are not there. The download runs in a throwaway
@@ -88,7 +88,7 @@ Stage1 += label(metadata={
     'org.opencontainers.image.source': PROJECT,
     'org.opencontainers.image.version': version,
 })
-# xdu-find, xdu-view and xdu-rm link libstdc++.so.6, from bundled DuckDB.
+# Every binary that queries an index links libstdc++.so.6, from bundled DuckDB.
 Stage1 += packages(apt=['ca-certificates', 'libstdc++6'])
 Stage1 += copy(_from='build', src=DIST, dest=DIST)
 
@@ -99,11 +99,12 @@ Stage1 += shell(commands=[
 ])
 
 # Running each binary fails the build on a base image whose glibc is too old,
-# instead of shipping an image that dies at first exec.
-smoke = ['{}/xdu --version'.format(bindir),
-         '{}/xdu-find --version'.format(bindir),
-         '{}/xdu-view --version'.format(bindir),
-         '{}/xdu-rm --version'.format(bindir)]
+# instead of shipping an image that dies at first exec. The loop runs every
+# bin/xdu* the tarball holds rather than a list of names, so one recipe serves
+# releases with different sets of tools; which tools a tarball must hold is
+# checked when the release is built. An empty glob stays literal and fails to
+# run, so a tarball with no binaries fails here too.
+smoke = ['for b in {}/xdu*; do "$b" --version || exit 1; done'.format(bindir)]
 # The binaries load the pinned extensions from beside bin/ with no download
 # fallback, so a tarball without lib/ would build an image whose first S3
 # query fails. .release drops any -rc suffix, so 0.6.0-rc.N is checked too.

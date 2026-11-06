@@ -32,6 +32,8 @@ pub fn binary_path(name: &str) -> PathBuf {
         "xdu-find" => env!("CARGO_BIN_EXE_xdu-find").into(),
         "xdu-rm" => env!("CARGO_BIN_EXE_xdu-rm").into(),
         "xdu-view" => env!("CARGO_BIN_EXE_xdu-view").into(),
+        "xdu-cp" => env!("CARGO_BIN_EXE_xdu-cp").into(),
+        "xdu-mv" => env!("CARGO_BIN_EXE_xdu-mv").into(),
         other => panic!("unknown test binary: {other}"),
     }
 }
@@ -313,6 +315,43 @@ pub fn run_rm(args: &[&str]) -> (String, String, bool) {
         .args(args)
         .output()
         .expect("failed to spawn xdu-rm");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
+/// Run `xdu-cp` with arbitrary args and no input; returns (stdout, stderr, success).
+pub fn run_cp(args: &[&str]) -> (String, String, bool) {
+    run_with_stdin("xdu-cp", args, None)
+}
+
+/// Run `xdu-mv` with arbitrary args and no input; returns (stdout, stderr, success).
+pub fn run_mv(args: &[&str]) -> (String, String, bool) {
+    run_with_stdin("xdu-mv", args, None)
+}
+
+/// Run a project binary with `input` on stdin, or with stdin closed when `input` is `None`;
+/// returns (stdout, stderr, success).
+///
+/// The prompt tests need both: an answer, and end of input with nothing typed.
+pub fn run_with_stdin(name: &str, args: &[&str], input: Option<&str>) -> (String, String, bool) {
+    use std::process::Stdio;
+    let mut child = Command::new(binary_path(name))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn {name}: {e}"));
+    {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        if let Some(text) = input {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+    }
+    let output = child.wait_with_output().expect("wait for child");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),

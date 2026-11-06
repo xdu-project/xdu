@@ -46,7 +46,7 @@ cold_run() {
 }
 
 tar xzf "$tarball" -C "$x"
-for b in xdu xdu-find xdu-view xdu-rm; do
+for b in xdu xdu-find xdu-view xdu-rm xdu-cp xdu-mv; do
     if [ ! -x "$x/bin/$b" ]; then die "tarball has no executable bin/$b"; fi
 done
 cp "$probe" "$x/bin/extension-probe"
@@ -97,7 +97,7 @@ done
 # The engine-version tie. source_id is constant across every build of one engine version, so
 # this proves the shipped readers carry the probe's engine version, not that they came from
 # the same build; that rests on the workflow building both in one cargo invocation.
-for b in xdu-find xdu-view xdu-rm; do
+for b in xdu-find xdu-view xdu-rm xdu-cp xdu-mv; do
     if ! grep -a -q -F "$source_id" "$x/bin/$b"; then die "bin/$b does not carry engine source_id $source_id"; fi
 done
 
@@ -105,7 +105,7 @@ done
 # runtime floor the runner cannot meet shows only when the binary runs. `--version` needs no
 # index and no terminal, so it runs the same way for the TUI as for the batch tools; stdin is
 # /dev/null and stdout a pipe.
-for b in xdu xdu-find xdu-view xdu-rm; do
+for b in xdu xdu-find xdu-view xdu-rm xdu-cp xdu-mv; do
     if ! v=$(cold_run "$x/bin/$b" --version < /dev/null 2>&1); then die "bin/$b --version did not run: $v"; fi
     if ! printf '%s\n' "$v" | grep -Eqx "$b [0-9]+\.[0-9]+\.[0-9]+.*"; then die "bin/$b --version printed '$v', expected '$b <version>'"; fi
 done
@@ -122,6 +122,10 @@ if [ "$count" != 3 ]; then die "bin/xdu-find --count printed '$count', expected 
 dry=$(cold_run "$x/bin/xdu-rm" -i "$s/index" --pattern '*.log' --dry-run)
 if ! printf '%s\n' "$dry" | grep -qF '2 file(s) would be deleted'; then die "bin/xdu-rm --dry-run did not match the two .log files: $dry"; fi
 if [ ! -f "$tree/user1/a.log" ]; then die "bin/xdu-rm --dry-run deleted a file"; fi
+mkdir "$s/stage"
+dry=$(cold_run "$x/bin/xdu-cp" -i "$s/index" --pattern '*.log' --into "$s/stage" --root "$tree" --dry-run)
+if ! printf '%s\n' "$dry" | grep -qF '2 file(s) would be copied'; then die "bin/xdu-cp --dry-run did not match the two .log files: $dry"; fi
+if [ -n "$(ls -A "$s/stage")" ]; then die "bin/xdu-cp --dry-run wrote under --into"; fi
 
 # The shipped tools find this host's CA bundle and verify AWS's real chain with it, in both TLS
 # stacks: a platform smoke check, not acceptance (the loopback tests own that). It needs the

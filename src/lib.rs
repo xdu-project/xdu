@@ -1,9 +1,12 @@
 //! Shared types and utilities for xdu tools.
 
+pub mod atomic_fs;
 pub mod cli;
 pub mod crawl;
 pub mod engine;
+pub mod relocate;
 pub mod s3;
+pub mod select;
 pub mod view_query;
 
 pub use s3::{IndexLocator, S3Locator, S3Settings};
