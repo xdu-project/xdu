@@ -2553,6 +2553,76 @@ fn view_quotes_in_the_prefix_and_a_directory_match_local() {
 
 #[test]
 #[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn view_non_ascii_directories_list_full_names() {
+    // The writer refuses a non-ASCII partition name, so the non-ASCII sits above the partition
+    // (the crawled root) and below it (the fixture's directories).
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let source = work.path().join("hôme-ü/src");
+    let mut files = common::view_tree(&source, "p", false, epoch);
+    // Wide filler in p (walked like the rest) and loose at the root (a __root__ partition for
+    // the parity check), so each chunk is larger than a footer read and finish() can hold the
+    // reads to bounded ranges.
+    wide_source_tree(&source.join("p"), "pad", ROWS);
+    wide_source_tree(&source, "", ROWS);
+    for file in common::list_files_recursive(&source.join("p/pad")) {
+        let rel = file
+            .strip_prefix(&source)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        files.push((rel, 1));
+    }
+    let index = work.path().join("index");
+    build_index(&source, &index);
+    s3.seed_index(&index, PREFIX);
+    let root = source.canonicalize().unwrap().to_str().unwrap().to_string();
+    assert!(!root.is_ascii(), "{root}");
+    let expected = common::view_tree_children(&root, &files);
+    let want: BTreeMap<String, i64> = files
+        .iter()
+        .map(|(rel, size)| (format!("{root}/{rel}"), *size as i64))
+        .collect();
+    let parity = ViewParity::over(s3, work, &index, PREFIX);
+
+    // Over S3 first, before any local query, so a failure here is the S3 arm's own.
+    let mut dirs: Vec<(&str, String)> = Vec::new();
+    for view in ["list", "tree"] {
+        let walk = common::walk_view(
+            &parity.remote_conn,
+            &parity.remote,
+            "p",
+            "s3",
+            view,
+            &expected,
+        );
+        assert_eq!(walk.files, want, "s3 {view} reached every file");
+        if dirs.is_empty() {
+            dirs = walk
+                .listings
+                .into_iter()
+                .map(|(dir, _)| ("p", dir))
+                .collect();
+        }
+    }
+    // The partition root, the six directories below it and the accented one's `a`.
+    assert_eq!(dirs.len(), 8, "{dirs:?}");
+
+    let mut compared = 0;
+    for sort_mode in SortMode::ALL {
+        compared += parity.compare(&["p"], &dirs, &QueryFilters::new(), sort_mode);
+    }
+    assert!(compared > 0);
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
 fn view_failures_name_distinct_causes_before_the_terminal() {
     let (s3, work) = seeded();
     let index = work.path().join("index");

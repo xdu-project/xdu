@@ -527,6 +527,17 @@ offset fix, plus moving the unit test that pins the local statement text.
 *Horizon: near-term · Depends on: — · Refs: the terminal-safety entry above (the other multibyte defect in these views)*
 **Seed:** [`issues/xdu-view-prefix-bytes-vs-chars.md`](issues/xdu-view-prefix-bytes-vs-chars.md)
 
+## `xdu-view` lists a sibling's files under a directory named with `_` or `%`
+
+Both views select a directory's rows with `path LIKE '<dir>/%'` and never escape the directory, so
+`_` and `%` in its name act as wildcards. Measured on the bundled engine against a local index,
+listing `a_b` also reports the files of its siblings `axb` and `a%b`, with their sizes summed in, and
+selecting one of those phantom entries leads nowhere. The S3 arm binds the same unescaped pattern.
+Pre-existing; it may ride with the local bound-parameters work, which rewrites the same literal.
+
+*Horizon: near-term · Depends on: — · Refs: `spec/xdu-view-prefix-bytes-vs-chars/` (GOAL non-goals; found at plan)*
+**Seed:** [`issues/xdu-view-like-metacharacters.md`](issues/xdu-view-like-metacharacters.md)
+
 ## Completion marker: scoped runs should not speak for the whole index
 
 `xdu` clears the completion marker on every run — including `xdu -p onepartition` — and rewrites it
