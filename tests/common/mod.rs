@@ -28,6 +28,7 @@ pub fn binary_path(name: &str) -> PathBuf {
         "xdu-rm" => env!("CARGO_BIN_EXE_xdu-rm").into(),
         "xdu-view" => env!("CARGO_BIN_EXE_xdu-view").into(),
         "xdu-cp" => env!("CARGO_BIN_EXE_xdu-cp").into(),
+        "xdu-mv" => env!("CARGO_BIN_EXE_xdu-mv").into(),
         other => panic!("unknown test binary: {other}"),
     }
 }
@@ -176,6 +177,11 @@ pub fn run_rm(args: &[&str]) -> (String, String, bool) {
 /// Run `xdu-cp` with arbitrary args and no input; returns (stdout, stderr, success).
 pub fn run_cp(args: &[&str]) -> (String, String, bool) {
     run_with_stdin("xdu-cp", args, None)
+}
+
+/// Run `xdu-mv` with arbitrary args and no input; returns (stdout, stderr, success).
+pub fn run_mv(args: &[&str]) -> (String, String, bool) {
+    run_with_stdin("xdu-mv", args, None)
 }
 
 /// Run a project binary with `input` on stdin, or with stdin closed when `input` is `None`;

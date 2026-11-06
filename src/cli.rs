@@ -374,3 +374,27 @@ pub struct XduCpArgs {
     #[arg(long, value_name = "DIR", default_value = "/")]
     pub root: PathBuf,
 }
+
+/// Arguments for `xdu-mv` — the bulk move tool.
+#[derive(Parser, Debug)]
+#[command(
+    name = "xdu-mv",
+    version,
+    about = "Move files matching index query criteria into a directory tree",
+    after_help = "Examples:
+  xdu-mv -i /index/projects -u carol --mtime-older-than 730 --into /archive --root /projects -n
+  xdu-mv -i /index/projects -p '*.h5' --into /archive --root /projects --safe --force
+  xdu-mv -i /index/projects --older-than 365 --into /archive -v"
+)]
+pub struct XduMvArgs {
+    #[command(flatten)]
+    pub select: SelectArgs,
+
+    /// Existing directory to move into; each file lands at DIR/<its path relative to --root>
+    #[arg(long, value_name = "DIR")]
+    pub into: PathBuf,
+
+    /// Prefix stripped from each indexed path to form its place under --into
+    #[arg(long, value_name = "DIR", default_value = "/")]
+    pub root: PathBuf,
+}

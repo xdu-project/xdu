@@ -14,9 +14,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 
 use crate::atomic_fs::{
-    self, DirHandle, ParentCache, Placed, Source, Stat, components, copy_atomic, is_not_a_directory,
+    self, DirHandle, Faults, Moved, NoHook, ParentCache, Placed, Source, Stat, components,
+    copy_atomic, is_not_a_directory,
 };
-use crate::cli::XduCpArgs;
+use crate::cli::{SelectArgs, XduCpArgs, XduMvArgs};
 use crate::select::{Live, Row, Verdict, holds_live, select};
 use crate::{QueryFilters, SizeMode};
 
@@ -278,13 +279,126 @@ fn copy_one(
     }
 }
 
+/// What `xdu-mv` does with a file whose destination is on another filesystem, where no rename
+/// can reach it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrossFs {
+    /// Fail the file, naming the cause, and leave the source where it is.
+    Refuse,
+}
+
+/// The cross-filesystem policy this build ships.
+pub const CROSS_FS: CrossFs = CrossFs::Refuse;
+
+/// The failure reported for a file the `Refuse` policy kept at its source.
+pub const CROSSING_REFUSED: &str = "crossing filesystems is not supported by this build";
+
+/// Move one planned file by a no-replace rename: walk to its source directory without
+/// following a symlink, and let `move_same_fs` judge the object at the name (only a regular
+/// file moves, with or without `--safe`), re-check it under `--safe` against that same
+/// `lstat`, create its destination directory, and rename it.
+fn move_one(
+    anchors: &Anchors,
+    worker: &mut Worker,
+    item: &Planned,
+    safe: Option<SafeCheck<'_>>,
+    cross: CrossFs,
+    faults: Faults,
+) -> Outcome {
+    let (Some(parent), Some(name)) = (item.source.parent(), item.source.file_name()) else {
+        return Outcome::Failed("not a file path".to_string());
+    };
+    let walked = worker.source_parent.get(parent, || {
+        atomic_fs::walk_nofollow(&anchors.root, &components(parent))
+    });
+    let source_dir = match walked {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Outcome::Missing,
+        Err(e) if is_not_a_directory(&e) => return Outcome::Skipped("not a regular file"),
+        Err(e) => return Outcome::Failed(e.to_string()),
+    };
+    let rel_parent = item.rel.parent().unwrap_or(Path::new(""));
+    let dest_cache = &mut worker.dest_parent;
+    let dest = move || {
+        let cache = dest_cache;
+        cache.get(rel_parent, || {
+            atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent))
+        })
+    };
+    let admit = |stat: &Stat| match safe {
+        None => Ok(()),
+        Some(check) => match holds_live(check.filters, check.size_mode, &live(stat)) {
+            Verdict::Holds => Ok(()),
+            Verdict::NotRegular => Err("not a regular file"),
+            Verdict::Changed(reason) => Err(reason),
+        },
+    };
+    match atomic_fs::move_same_fs_with(source_dir, name, dest, name, admit, faults, &mut NoHook) {
+        Ok(Moved::Done) => Outcome::Done { owner_kept: true },
+        Ok(Moved::Missing) => Outcome::Missing,
+        Ok(Moved::NotRegular) => Outcome::Skipped("not a regular file"),
+        Ok(Moved::Rejected(reason)) => Outcome::Skipped(reason),
+        Ok(Moved::Existing) => Outcome::Existing,
+        Ok(Moved::CrossDevice) => match cross {
+            CrossFs::Refuse => Outcome::Failed(CROSSING_REFUSED.to_string()),
+        },
+        Err(e) => Outcome::Failed(e.to_string()),
+    }
+}
+
+/// The words one tool uses for its action.
+#[derive(Clone, Copy, Debug)]
+struct Verbs {
+    tool: &'static str,
+    /// The prompt's verb: `Copy`.
+    ask: &'static str,
+    /// The refusal's verb: `copy`.
+    act: &'static str,
+    /// The listing's and dry run's participle: `copied`.
+    done: &'static str,
+    /// The summary's count label: `Copied`.
+    count: &'static str,
+}
+
+const CP: Verbs = Verbs {
+    tool: "xdu-cp",
+    ask: "Copy",
+    act: "copy",
+    done: "copied",
+    count: "Copied",
+};
+
+const MV: Verbs = Verbs {
+    tool: "xdu-mv",
+    ask: "Move",
+    act: "move",
+    done: "moved",
+    count: "Moved",
+};
+
+/// What a run does with each planned file.
+#[derive(Clone, Copy, Debug)]
+enum Action {
+    Copy,
+    Move(CrossFs),
+}
+
+impl Action {
+    fn verbs(self) -> Verbs {
+        match self {
+            Action::Copy => CP,
+            Action::Move(_) => MV,
+        }
+    }
+}
+
 /// Act on every planned file on a local pool of `jobs` threads, printing and counting each
 /// outcome on the calling thread in path order.
 ///
 /// The pool is local, never rayon's global one: the crawler owns the global pool's shape, and
 /// a library caller (or a test) running two selections must not share or fight over it.
 fn execute(
-    tool: &str,
+    verbs: Verbs,
     map: &RootMap,
     planned: &[Planned],
     jobs: usize,
@@ -316,15 +430,16 @@ fn execute(
             let dest = map.destination(&item.rel);
             match outcome {
                 Outcome::Failed(message) => {
-                    eprintln!("{tool}: {source}: {message}");
+                    eprintln!("{}: {source}: {message}", verbs.tool);
                 }
                 _ if !verbose => {}
                 Outcome::Done { owner_kept: true } => {
-                    writeln!(out, "copied: {source} -> {}", dest.display())?
+                    writeln!(out, "{}: {source} -> {}", verbs.done, dest.display())?
                 }
                 Outcome::Done { owner_kept: false } => writeln!(
                     out,
-                    "copied (ownership not preserved): {source} -> {}",
+                    "{} (ownership not preserved): {source} -> {}",
+                    verbs.done,
                     dest.display()
                 )?,
                 Outcome::Missing => writeln!(out, "missing: {source}")?,
@@ -350,17 +465,25 @@ fn checked_into(into: &Path) -> Result<PathBuf> {
 }
 
 /// `xdu-cp`: copy the selected set under `--into`. Returns the process exit status.
+pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
+    run(Action::Copy, &args.select, &args.into, &args.root)
+}
+
+/// `xdu-mv`: move the selected set under `--into`. Returns the process exit status.
+pub fn run_mv(args: &XduMvArgs) -> Result<i32> {
+    run(Action::Move(CROSS_FS), &args.select, &args.into, &args.root)
+}
+
+/// One select-then-act run.
 ///
 /// The order is the refusal order: `--into`, `--root`, the index gates, the empty set, the
 /// whole-set mapping, then the preview or the prompt, and only then a write.
-pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
-    let tool = "xdu-cp";
-    let select_args = &args.select;
-    let into = checked_into(&args.into)?;
-    let root = args
-        .root
+fn run(action: Action, select_args: &SelectArgs, into: &Path, root: &Path) -> Result<i32> {
+    let verbs = action.verbs();
+    let into = checked_into(into)?;
+    let root = root
         .canonicalize()
-        .with_context(|| format!("--root {} does not exist", args.root.display()))?;
+        .with_context(|| format!("--root {} does not exist", root.display()))?;
     let selection = select(select_args)?;
     if let Some(warning) = &selection.warning {
         eprintln!("{warning}");
@@ -371,7 +494,7 @@ pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
     }
     let map = RootMap::new(root, into);
     let planned = check_whole_set(&map, &selection.rows)
-        .map_err(|refusal| anyhow!("refusing to copy anything: {refusal}"))?;
+        .map_err(|refusal| anyhow!("refusing to {} anything: {refusal}", verbs.act))?;
 
     if select_args.dry_run {
         let stdout = io::stdout();
@@ -386,8 +509,9 @@ pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
         }
         writeln!(
             out,
-            "\n{} file(s) would be copied into {}",
+            "\n{} file(s) would be {} into {}",
             planned.len(),
+            verbs.done,
             map.into_dir().display()
         )?;
         return Ok(0);
@@ -395,7 +519,8 @@ pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
 
     if !select_args.force {
         let question = format!(
-            "Copy {} file(s) into {}?",
+            "{} {} file(s) into {}?",
+            verbs.ask,
             planned.len(),
             map.into_dir().display()
         );
@@ -410,18 +535,30 @@ pub fn run_cp(args: &XduCpArgs) -> Result<i32> {
         filters: &selection.filters,
         size_mode: selection.size_mode,
     });
-    let summary = execute(
-        tool,
-        &map,
-        &planned,
-        select_args.jobs,
-        select_args.verbose,
-        |anchors, worker, item| copy_one(anchors, worker, item, safe),
-    )?;
+    let jobs = select_args.jobs;
+    let verbose = select_args.verbose;
+    let summary = match action {
+        Action::Copy => execute(
+            verbs,
+            &map,
+            &planned,
+            jobs,
+            verbose,
+            |anchors, worker, item| copy_one(anchors, worker, item, safe),
+        )?,
+        Action::Move(cross) => execute(
+            verbs,
+            &map,
+            &planned,
+            jobs,
+            verbose,
+            |anchors, worker, item| move_one(anchors, worker, item, safe, cross, Faults::default()),
+        )?,
+    };
     let stdout = io::stdout();
     let mut out = stdout.lock();
     writeln!(out)?;
-    for line in summary.lines("Copied") {
+    for line in summary.lines(verbs.count) {
         writeln!(out, "{line}")?;
     }
     out.flush()?;
@@ -503,6 +640,78 @@ mod tests {
         let planned = check_whole_set(&m, &rows[..2]).unwrap();
         assert_eq!(planned.len(), 2);
         assert_eq!(planned[1].rel, PathBuf::from("b"));
+    }
+
+    /// A rename answered with `EXDEV` under the `Refuse` policy fails the file with the cause
+    /// and leaves the source, inode and bytes, where it was; nothing appears at the
+    /// destination.
+    #[test]
+    fn a_cross_device_move_under_the_refuse_policy_keeps_the_source() {
+        use std::os::unix::fs::MetadataExt;
+
+        let t = tempfile::TempDir::new().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        let source = base.join("src/u/f.dat");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&source)
+            .unwrap();
+        file.write_all(b"STAYS").unwrap();
+        drop(file);
+        let inode = fs::metadata(&source).unwrap().ino();
+        let into = base.join("into");
+        fs::create_dir(&into).unwrap();
+
+        let anchors = Anchors {
+            root: DirHandle::open(Path::new("/")).unwrap(),
+            into: DirHandle::open(&into).unwrap(),
+        };
+        let item = Planned {
+            source: source.clone(),
+            rel: PathBuf::from("u/f.dat"),
+        };
+        let exdev = Faults {
+            force_cross_device: true,
+            ..Faults::default()
+        };
+        for link_route in [false, true] {
+            let faults = Faults {
+                force_link_route: link_route,
+                ..exdev
+            };
+            let got = move_one(
+                &anchors,
+                &mut Worker::default(),
+                &item,
+                None,
+                CrossFs::Refuse,
+                faults,
+            );
+            assert_eq!(
+                got,
+                Outcome::Failed(CROSSING_REFUSED.to_string()),
+                "link route: {link_route}"
+            );
+            assert_eq!(fs::read(&source).unwrap(), b"STAYS");
+            assert_eq!(fs::metadata(&source).unwrap().ino(), inode);
+            assert!(fs::symlink_metadata(into.join("u/f.dat")).is_err());
+        }
+
+        // The same file, the same policy, and no fault: it moves.
+        let got = move_one(
+            &anchors,
+            &mut Worker::default(),
+            &item,
+            None,
+            CrossFs::Refuse,
+            Faults::default(),
+        );
+        assert_eq!(got, Outcome::Done { owner_kept: true });
+        assert_eq!(fs::metadata(into.join("u/f.dat")).unwrap().ino(), inode);
+        assert!(fs::symlink_metadata(&source).is_err());
+        assert_eq!(CROSS_FS, CrossFs::Refuse);
     }
 
     #[test]

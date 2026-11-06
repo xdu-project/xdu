@@ -393,6 +393,9 @@ pub enum Step {
     /// The copy carries the source's atime and mtime.
     Timed,
     TempSynced,
+    /// A move found a regular file at the source and nothing at the destination, and has not
+    /// yet renamed it.
+    Cleared,
     /// The link route made the new name and has not yet removed the old one.
     Linked,
     Published,
@@ -442,6 +445,9 @@ pub(crate) struct Faults {
     pub refuse_owner: bool,
     /// Refuse the group-only `fchown` retry with `EPERM` too.
     pub refuse_group: bool,
+    /// Answer every no-replace rename with `EXDEV`, as a destination on another filesystem
+    /// does.
+    pub force_cross_device: bool,
 }
 
 /// A placement stopped either by an error or, under a test hook, by a simulated crash.
@@ -514,6 +520,9 @@ pub(crate) fn rename_noreplace_with(
 ) -> Result<(), Stop<NoReplace>> {
     let csn = c_name(sn).map_err(NoReplace::Io)?;
     let cdn = c_name(dn).map_err(NoReplace::Io)?;
+    if faults.force_cross_device {
+        return Err(Stop::Err(NoReplace::CrossDevice));
+    }
     if !faults.force_link_route {
         match native_rename_noreplace(sp, &csn, dp, &cdn) {
             Ok(()) => return Ok(()),
@@ -902,12 +911,98 @@ pub(crate) fn copy_atomic_with(
     }
 }
 
+/// What a same-filesystem move did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moved {
+    /// Renamed. The inode travels with the name, and its owner, mode and times with it.
+    Done,
+    /// Nothing at the source name.
+    Missing,
+    /// A symlink, directory, FIFO, socket or device holds the source name; it was not moved.
+    NotRegular,
+    /// The caller's check turned the file down, for the reason given; it was not moved.
+    Rejected(&'static str),
+    /// Something already holds the destination name; neither name was touched.
+    Existing,
+    /// The destination is on another filesystem; the source was not touched.
+    CrossDevice,
+}
+
+/// Move the regular file `sn` in `sp` to `dn` in the directory `dest` yields, by a rename that
+/// never replaces anything.
+///
+/// The object at the source name is judged by `fstatat(AT_SYMLINK_NOFOLLOW)` first, on every
+/// call: a rename moves whatever holds the name, so without this a directory would carry its
+/// whole subtree and a FIFO or symlink would move as itself. Only a regular file goes on to
+/// `admit`, the caller's own check of its metadata (`--safe`), and only then is the
+/// destination directory reached (and created), so nothing is created for a file that is not
+/// moved. A name already taken at the destination is reported before the rename is tried, and
+/// the rename itself refuses one taken in between. An object swapped in at the source name
+/// after the check is renamed as itself and never followed: a rename does not follow a final
+/// symlink.
+pub fn move_same_fs<'d>(
+    sp: &DirHandle,
+    sn: &OsStr,
+    dest: impl FnOnce() -> io::Result<&'d DirHandle>,
+    dn: &OsStr,
+    admit: impl FnOnce(&Stat) -> Result<(), &'static str>,
+) -> io::Result<Moved> {
+    move_same_fs_with(sp, sn, dest, dn, admit, Faults::default(), &mut NoHook)
+}
+
+pub(crate) fn move_same_fs_with<'d>(
+    sp: &DirHandle,
+    sn: &OsStr,
+    dest: impl FnOnce() -> io::Result<&'d DirHandle>,
+    dn: &OsStr,
+    admit: impl FnOnce(&Stat) -> Result<(), &'static str>,
+    faults: Faults,
+    hook: &mut dyn StepHook,
+) -> io::Result<Moved> {
+    let seen = match fstatat_nofollow(sp, sn) {
+        Ok(seen) => seen,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Moved::Missing),
+        Err(e) => return Err(e),
+    };
+    if !seen.is_regular() {
+        return Ok(Moved::NotRegular);
+    }
+    if let Err(reason) = admit(&seen) {
+        return Ok(Moved::Rejected(reason));
+    }
+    let dp = dest()?;
+    match fstatat_nofollow(dp, dn) {
+        Ok(_) => return Ok(Moved::Existing),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let renamed = match step::<NoReplace>(hook, Step::Cleared) {
+        Ok(()) => rename_noreplace_with(sp, sn, dp, dn, faults, hook),
+        Err(stop) => Err(stop),
+    };
+    match renamed {
+        Ok(()) => Ok(Moved::Done),
+        Err(Stop::Err(NoReplace::Existing)) => Ok(Moved::Existing),
+        Err(Stop::Err(NoReplace::CrossDevice)) => Ok(Moved::CrossDevice),
+        Err(Stop::Err(NoReplace::Io(e))) if e.kind() == io::ErrorKind::NotFound => {
+            // The source may have gone in the meantime; a vanished destination directory is a
+            // failure, not a missing file.
+            match fstatat_nofollow(sp, sn) {
+                Err(gone) if gone.kind() == io::ErrorKind::NotFound => Ok(Moved::Missing),
+                _ => Err(e),
+            }
+        }
+        Err(Stop::Err(other)) => Err(other.into_io()),
+        Err(Stop::Abandoned) => Err(io::Error::other("move abandoned")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::io::{Read, Write};
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use tempfile::TempDir;
 
     fn put(path: &Path, bytes: &[u8]) {
@@ -1208,7 +1303,6 @@ mod tests {
     }
 
     fn chmod(path: &Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
@@ -1544,5 +1638,212 @@ mod tests {
             open_source(&parent, OsStr::new("f")).unwrap(),
             Source::Regular(_)
         ));
+    }
+
+    // ---- Same-filesystem move ----
+
+    fn admit_all(_: &Stat) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn move_in(base: &Path, name: &str, out: &Path, faults: Faults) -> io::Result<Moved> {
+        let (s, d) = (dir(base), dir(out));
+        move_same_fs_with(
+            &s,
+            OsStr::new(name),
+            || Ok(&d),
+            OsStr::new(name),
+            admit_all,
+            faults,
+            &mut NoHook,
+        )
+    }
+
+    fn link_route() -> Faults {
+        Faults {
+            force_link_route: true,
+            ..Faults::default()
+        }
+    }
+
+    /// Plants a file at the destination name after the move found it free and before the
+    /// rename, so the rename itself has to refuse.
+    struct PlantAt(PathBuf);
+
+    impl StepHook for PlantAt {
+        fn at(&mut self, step: Step) -> HookAction {
+            if step == Step::Cleared {
+                put(&self.0, b"PLANTED");
+            }
+            HookAction::Continue
+        }
+    }
+
+    #[test]
+    fn a_same_filesystem_move_keeps_the_inode() {
+        for faults in [Faults::default(), link_route()] {
+            let t = TempDir::new().unwrap();
+            let (src, out) = (t.path().join("src"), t.path().join("out"));
+            fs::create_dir(&src).unwrap();
+            fs::create_dir(&out).unwrap();
+            put(&src.join("f"), b"BYTES");
+            fs::set_permissions(src.join("f"), fs::Permissions::from_mode(0o640)).unwrap();
+            set_times(&src.join("f"), (1_500_000_000, 11), (1_400_000_000, 22));
+            let before = fs::symlink_metadata(src.join("f")).unwrap();
+
+            let got = move_in(&src, "f", &out, faults).unwrap();
+            assert_eq!(got, Moved::Done, "{faults:?}");
+            assert!(fs::symlink_metadata(src.join("f")).is_err(), "{faults:?}");
+            let after = fs::symlink_metadata(out.join("f")).unwrap();
+            assert_eq!(
+                (after.dev(), after.ino(), after.nlink()),
+                (before.dev(), before.ino(), 1),
+                "{faults:?}"
+            );
+            assert_eq!(after.mode(), before.mode());
+            assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+            assert_eq!(
+                (after.mtime(), after.mtime_nsec()),
+                (1_400_000_000, 22),
+                "{faults:?}"
+            );
+            assert_eq!(read(&out.join("f")), b"BYTES");
+        }
+    }
+
+    #[test]
+    fn a_same_filesystem_move_never_replaces() {
+        // Taken before the move looks.
+        let t = TempDir::new().unwrap();
+        let (src, out) = (t.path().join("src"), t.path().join("out"));
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&out).unwrap();
+        put(&src.join("f"), b"NEW");
+        put(&out.join("f"), b"OLD");
+        assert_eq!(
+            move_in(&src, "f", &out, Faults::default()).unwrap(),
+            Moved::Existing
+        );
+        assert_eq!(read(&src.join("f")), b"NEW");
+        assert_eq!(read(&out.join("f")), b"OLD");
+
+        // Taken after the move looked and before it renamed: the rename itself refuses.
+        put(&src.join("g"), b"NEW");
+        let (s, d) = (dir(&src), dir(&out));
+        let got = move_same_fs_with(
+            &s,
+            OsStr::new("g"),
+            || Ok(&d),
+            OsStr::new("g"),
+            admit_all,
+            Faults::default(),
+            &mut PlantAt(out.join("g")),
+        )
+        .unwrap();
+        assert_eq!(got, Moved::Existing);
+        assert_eq!(read(&src.join("g")), b"NEW");
+        assert_eq!(read(&out.join("g")), b"PLANTED");
+    }
+
+    #[test]
+    fn a_same_filesystem_move_by_the_link_route_never_replaces() {
+        let t = TempDir::new().unwrap();
+        let (src, out) = (t.path().join("src"), t.path().join("out"));
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&out).unwrap();
+        put(&src.join("f"), b"NEW");
+        put(&out.join("f"), b"OLD");
+        assert_eq!(
+            move_in(&src, "f", &out, link_route()).unwrap(),
+            Moved::Existing
+        );
+        assert_eq!(read(&src.join("f")), b"NEW");
+        assert_eq!(read(&out.join("f")), b"OLD");
+
+        put(&src.join("g"), b"NEW");
+        let (s, d) = (dir(&src), dir(&out));
+        let got = move_same_fs_with(
+            &s,
+            OsStr::new("g"),
+            || Ok(&d),
+            OsStr::new("g"),
+            admit_all,
+            link_route(),
+            &mut PlantAt(out.join("g")),
+        )
+        .unwrap();
+        assert_eq!(got, Moved::Existing);
+        assert_eq!(read(&src.join("g")), b"NEW");
+        assert_eq!(read(&out.join("g")), b"PLANTED");
+        assert_eq!(fs::metadata(src.join("g")).unwrap().nlink(), 1);
+        assert_eq!(fs::metadata(out.join("g")).unwrap().nlink(), 1);
+    }
+
+    /// Without any caller check, only a regular file moves: a directory would carry its
+    /// subtree, and a FIFO or a symlink would move as itself. None is touched, the caller's
+    /// check never sees them, and the destination directory is never reached.
+    #[test]
+    fn a_same_filesystem_move_skips_a_non_regular_object() {
+        for faults in [Faults::default(), link_route()] {
+            let t = TempDir::new().unwrap();
+            let (src, out) = (t.path().join("src"), t.path().join("out"));
+            fs::create_dir(&src).unwrap();
+            fs::create_dir(&out).unwrap();
+            put(&src.join("target"), b"T");
+            mkfifo(&src.join("fifo"));
+            fs::create_dir(src.join("subdir")).unwrap();
+            put(&src.join("subdir/inner"), b"I");
+            std::os::unix::fs::symlink(src.join("target"), src.join("link")).unwrap();
+
+            let s = dir(&src);
+            for name in ["fifo", "subdir", "link"] {
+                let mut reached = false;
+                let got = move_same_fs_with(
+                    &s,
+                    OsStr::new(name),
+                    || {
+                        reached = true;
+                        Err(io::Error::other("the destination was reached"))
+                    },
+                    OsStr::new(name),
+                    |_: &Stat| panic!("{name}: the caller's check saw a non-regular object"),
+                    faults,
+                    &mut NoHook,
+                )
+                .unwrap();
+                assert_eq!(got, Moved::NotRegular, "{name}: {faults:?}");
+                assert!(!reached, "{name}");
+                assert!(fs::symlink_metadata(src.join(name)).is_ok(), "{name}");
+                assert!(fs::symlink_metadata(out.join(name)).is_err(), "{name}");
+            }
+            assert_eq!(read(&src.join("subdir/inner")), b"I");
+            assert!(
+                fs::symlink_metadata(src.join("link"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(read(&src.join("target")), b"T");
+            assert_eq!(
+                move_in(&src, "absent", &out, faults).unwrap(),
+                Moved::Missing
+            );
+
+            // A regular file the caller's check turns down stays too.
+            let d = dir(&out);
+            let got = move_same_fs_with(
+                &s,
+                OsStr::new("target"),
+                || Ok(&d),
+                OsStr::new("target"),
+                |_: &Stat| Err("no longer matches --min-size"),
+                faults,
+                &mut NoHook,
+            )
+            .unwrap();
+            assert_eq!(got, Moved::Rejected("no longer matches --min-size"));
+            assert_eq!(read(&src.join("target")), b"T");
+            assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
+        }
     }
 }

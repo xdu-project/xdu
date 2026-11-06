@@ -6,7 +6,7 @@ appetite: big
 status: in_progress
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
-current_phase: P3
+current_phase: P4
 last_updated: '2026-11-06'
 phases:
 - id: P1
@@ -98,7 +98,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P2-GATE-GREEN'
 - id: P3
   name: xdu-mv relocates on one filesystem with a no-replace rename
-  status: pending
+  status: done
   satisfies:
   - R3
   - R4
@@ -397,22 +397,46 @@ filter against the live object; the summary counts every outcome separately.
 cross-device rename is reported per file and the source kept; that is the shipped behaviour if
 the cut applies.
 
-- [ ] `src/cli.rs`: `XduMvArgs` (flatten `SelectArgs`, `--into`, `--root`, `version`).
-- [ ] `atomic_fs`: `move_same_fs` (PLAN §2.5): **always** `fstatat(src_parent, name, NOFOLLOW)`
+- [x] `src/cli.rs`: `XduMvArgs` (flatten `SelectArgs`, `--into`, `--root`, `version`).
+- [x] `atomic_fs`: `move_same_fs` (PLAN §2.5): **always** `fstatat(src_parent, name, NOFOLLOW)`
   and skip anything but `S_ISREG`; `holds_live` on it under `--safe`; the existing-destination
   pre-check; `rename_noreplace`.
-- [ ] `relocate`: `run_mv` with a `CrossFs` policy enum, `Refuse | Copy`. This phase ships
+- [x] `relocate`: `run_mv` with a `CrossFs` policy enum, `Refuse | Copy`. This phase ships
   `Refuse`: `CrossDevice` fails the file with "SRC: crossing filesystems is not supported by this
   build" on stderr, the source kept. `Copy` arrives in P5; `Refuse` stays as the cut's behaviour
   and is unit-tested either way.
-- [ ] `src/bin/xdu-mv.rs`, `Cargo.toml` `[[bin]]`, `gen-completions`, `tests/common` arm and
+- [x] `src/bin/xdu-mv.rs`, `Cargo.toml` `[[bin]]`, `gen-completions`, `tests/common` arm and
   `run_mv`.
-- [ ] `doc/xdu-mv.1.scd` (same coverage as `xdu-cp.1`, the R10 sentences, its own worked mapping
+- [x] `doc/xdu-mv.1.scd` (same coverage as `xdu-cp.1`, the R10 sentences, its own worked mapping
   example with paths distinct from `xdu-cp.1`'s), including the swap note for the
   same-filesystem rename.
-- [ ] Tests named in the `verify:` (directory and FIFO cases run **without** `--safe`).
+- [x] Tests named in the `verify:` (directory and FIFO cases run **without** `--safe`).
 - **Verify:** see frontmatter (named lib and `mv_tests` tests; `cp_tests` still green; grep bans;
   a `temp_index` drive: dry-run moves nothing, the real run moves `bob`).
+- **Build notes (2026-11-06).** Red first: `move_same_fs` was written without its `S_ISREG`
+  guard and the tests run against it: `a_same_filesystem_move_skips_a_non_regular_object`,
+  `mv_skips_a_directory_at_the_source_path`, `mv_skips_a_fifo_at_the_source_path`,
+  `mv_skips_a_symlink_at_the_source_path` and `mv_summary_counts_and_exit_status` failed (the
+  directory and the FIFO were renamed into `--into`), then the guard went in. Deviations from
+  PLAN, none touching a GOAL R-ID: `CrossFs` has the one variant `Refuse` until P5 adds `Copy`,
+  with `CROSS_FS` naming the shipped policy and `CROSSING_REFUSED` the message;
+  `move_same_fs` takes the destination directory as a closure and the `--safe` check as an
+  `admit` closure, so `atomic_fs` stays free of `select` and no destination directory is
+  created for a file that is skipped (one refused as crossing filesystems does leave its
+  directories, which `xdu-mv(1)` says); `Step` gains `Cleared` (after the existing-destination
+  pre-check, before the rename) so a test plants a name in that window and proves the rename
+  itself refuses on both routes; `Faults` gains `force_cross_device`; a rename's `ENOENT` counts
+  as missing only when the source name is gone. `run_cp` and `run_mv` share one private `run`
+  (`Action`, `Verbs`); `xdu-cp`'s output is unchanged and `cp_tests` passes unedited. The
+  inode carries owner, group, mode and times, so a move never counts ownership not preserved.
+  `mv_safe_skips_a_changed_file_and_leaves_it` covers `--min-size`, `--older-than`,
+  `--mtime-older-than` and `--mode`; the other filters share `holds_live` with `xdu-cp`, whose
+  P2 tests and boundary grid cover them. `scdoc` is not installed on the build host, so
+  `doc/xdu-mv.1.scd` was not rendered locally.
+- **CI must show (not provable on this host):** the Linux leg compiles and passes
+  `move_same_fs` through the `SYS_renameat2` arm and every named `atomic_fs` and `mv_tests`
+  test, with Linux clippy clean; the man-page render step renders `doc/xdu-mv.1.scd` (it globs
+  `doc/*.scd`; literal counts arrive in P4).
 - **Touches:** `src/cli.rs` (high-blast, additive), `src/atomic_fs.rs`, `src/relocate.rs`,
   `src/bin/xdu-mv.rs`, `src/bin/gen-completions.rs`, `Cargo.toml`, `tests/common/mod.rs`,
   `tests/mv_tests.rs`, `doc/xdu-mv.1.scd`.
