@@ -97,8 +97,9 @@ cargo install --git https://github.com/xdu-project/xdu.git
 ```
 
 Requires [Rust](https://rustup.rs) nightly toolchain. A `cargo install` build carries no DuckDB
-extensions, so a feature that needs one fails naming the path it looked in; copy the files from a
-release tarball's `lib/xdu/extensions/` there, or point `XDU_EXTENSION_DIR` at them.
+extensions, so a feature that needs one, such as querying an index in S3 (it needs `httpfs`), fails
+naming the path it looked in; copy the files from a release tarball's `lib/xdu/extensions/` there,
+or point `XDU_EXTENSION_DIR` at them.
 
 ### Containers
 
@@ -113,7 +114,7 @@ tree — for unreleased commits, build from source instead.
 ### Building an Index
 
 ```bash
-xdu /home -o /var/lib/xdu/home -j 16 -b 100000
+xdu /home -o /var/lib/xdu/home -j 16 -B 100000
 ```
 
 | Option | Description | Default |
@@ -375,6 +376,71 @@ xdu-rm -i /var/lib/xdu/home --older-than 60 --min-size 1G --dry-run | head -20
 xdu-rm -i /var/lib/xdu/home --older-than 60 --min-size 1G --dry-run | tail -1
 # 847,231 file(s) would be deleted.
 ```
+
+### Indexes in S3
+
+`xdu` builds an index straight into an S3 bucket, on AWS or on an S3-compatible store: give `-o`
+an `s3://bucket/prefix` locator instead of a directory. Each chunk is uploaded to its final key as
+the crawl encodes it, and nothing of the index is staged on local disk. The completion marker
+works as it does locally: the run lists the prefix first, so an unreachable endpoint, refused
+credentials or a missing bucket fail it with any existing index untouched, then removes the marker,
+and writes it again only when every partition has finished. A re-run leaves no stale chunk behind.
+A top-level directory whose name would change on its way into a key or a glob (non-ASCII, or a
+character such as `~`, `%`, `#` or `*`) is refused before anything is written.
+
+```bash
+export AWS_PROFILE=research
+xdu /data/scratch -o s3://indexes/scratch -j 8
+```
+
+The index in the bucket is then queried in place: give
+`xdu-find` or `xdu-view` an `s3://bucket/prefix` locator wherever it takes an index directory,
+through `-i` or `XDU_INDEX`. Each query reads the Parquet footers and only the parts of each chunk it needs, with
+HTTP range requests, so a `--count` costs the footers, a small fraction of the index. Nothing is copied
+to local disk and nothing is downloaded at run time; the `httpfs` extension a release ships beside
+the binaries does the reading.
+
+```bash
+# Credentials, region and endpoint come from where the AWS tools look for them:
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN), or a profile in
+# ~/.aws/credentials and ~/.aws/config selected by AWS_PROFILE.
+export AWS_PROFILE=research
+
+# An S3-compatible store: name its endpoint (or set endpoint_url in the profile).
+export AWS_ENDPOINT_URL=https://store.example.org:9000
+
+xdu-find -i s3://indexes/scratch --count
+xdu-find -i s3://indexes/scratch -u alice --min-size 1G -f size
+xdu-view -i s3://indexes/scratch -u alice
+
+# Or once for the session
+export XDU_INDEX=s3://indexes/scratch
+xdu-find --top 10
+```
+
+The proxy variables (`HTTP_PROXY` and friends) are not used by `xdu` or the readers: requests go
+straight to the endpoint. Building needs no DuckDB extension; querying does. `xdu-rm` refuses an
+`s3://` index. Unreachable endpoints, refused credentials, a missing
+bucket or prefix, and an index without a readable completion marker each fail with the cause on
+stderr and print no rows. The bucket must have a name S3 allows (3 to 63 lowercase letters, digits,
+dots and hyphens, beginning and ending with a letter or digit); any other, and a locator carrying
+credentials, is refused before a request is sent, without the locator being repeated.
+
+Every `https` connection, the writer's and the readers', authenticates the server against one CA
+file: the one `AWS_CA_BUNDLE` names, else the platform's bundle (the first of
+`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`,
+`/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem` and `/etc/ssl/cert.pem` present).
+`SSL_CERT_FILE` and the macOS keychain are not read, nothing turns verification off, and a
+self-signed or unknown-CA endpoint is refused by all three tools; a store with a private CA needs
+`AWS_CA_BUNDLE` set to that CA's file. That file must include the root certificate the chain ends
+at (a file with no self-signed root, such as an intermediate CA alone, is refused before any
+request), and the endpoint's certificate must name its host in the subject alternative name (SAN).
+That root must be self-signed with SHA-256 or stronger, since a file whose only roots are
+SHA-1-signed is refused the same way, and an intermediate must ship with its own root: beside an
+unrelated root, `xdu` writes an index the readers refuse. Known limitation: `xdu-find` and `xdu-view` also accept a certificate whose subject common name
+(CN) names the host when its SAN does not, which `xdu` refuses; a follow-up
+([`issues/s3-reader-tls-hostname.md`](issues/s3-reader-tls-hostname.md)) will make the readers
+check the SAN alone.
 
 ### Querying with DuckDB
 

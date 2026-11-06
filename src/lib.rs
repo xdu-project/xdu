@@ -3,6 +3,10 @@
 pub mod cli;
 pub mod crawl;
 pub mod engine;
+pub mod s3;
+pub mod view_query;
+
+pub use s3::{IndexLocator, S3Locator, S3Settings};
 
 use std::ffi::CString;
 use std::fmt;
@@ -58,8 +62,9 @@ pub const RESERVED_INDEX_NAMES: &[(&str, &str)] = &[
 
 /// Most a reader will ever read from a completion marker. The writer emits ~100 bytes; the
 /// cap exists so a reader cannot be made to pull an arbitrarily large file into memory by
-/// whatever left a file of that name in a group-writable index directory.
-const MARKER_READ_LIMIT: u64 = 64 * 1024;
+/// whatever left a file of that name in a group-writable index directory, or an object of
+/// that key in a bucket.
+pub const MARKER_READ_LIMIT: u64 = 64 * 1024;
 
 /// The tolerated-error count a completion marker records, if its body states one.
 ///
@@ -83,13 +88,18 @@ pub fn completion_marker_errors(body: &str) -> Option<u64> {
 /// The marker lives in a directory operators share, so whatever sits at that path is
 /// untrusted: a FIFO or device node would block a reader that opened it blindly, and an
 /// enormous file would be pulled into memory. One `stat` decides all three cases before
-/// anything is opened.
-enum MarkerRead {
+/// anything is opened. Over S3 the size comes from a `HEAD` instead, and an object over the
+/// cap is never fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkerRead {
     /// No entry at the marker path: an interrupted run, or an index predating the marker.
     Absent,
     /// An entry that must not be read: not a regular file, over `MARKER_READ_LIMIT`, or
     /// unreadable since the stat. Attests nothing, and is never opened.
     Unreadable,
+    /// An S3 marker object of this many bytes, over `MARKER_READ_LIMIT`. Attests nothing,
+    /// and was never fetched.
+    Oversized(u64),
     /// A regular file of sane size, read — possibly as empty when it vanished mid-read.
     Body(String),
 }
@@ -138,16 +148,175 @@ pub fn completion_marker_format(body: &str) -> Option<u32> {
     None
 }
 
+/// The part of an index glob below the index root: `<partition>/*.parquet`, with `*` for
+/// every partition. Both transports share it, so the layout is written once.
+fn index_glob_tail(partition: Option<&str>) -> String {
+    format!("{}/*.parquet", partition.unwrap_or("*"))
+}
+
 /// The `read_parquet` glob for an index, optionally scoped to a single partition.
 ///
-/// Every reader goes through here, so the index layout (`<index>/<partition>/*.parquet`)
-/// is expressed once. It is also the single seam where index paths and partition names
+/// Every local reader goes through here, so the index layout (`<index>/<partition>/*.parquet`)
+/// is expressed once. It is also the single seam where local index paths and partition names
 /// reach SQL, which is where escaping belongs when it is added.
 pub fn index_glob(index: &Path, partition: Option<&str>) -> String {
-    match partition {
-        Some(partition) => format!("{}/{}/*.parquet", index.display(), partition),
-        None => format!("{}/*/*.parquet", index.display()),
+    format!("{}/{}", index.display(), index_glob_tail(partition))
+}
+
+/// The `read_parquet` glob for an index under an S3 prefix, optionally scoped to a single
+/// partition: `s3://<bucket>/<prefix>/<partition>/*.parquet`.
+///
+/// It reaches SQL only as a bound parameter (`parquet_source`), never as text.
+pub fn index_glob_s3(index: &S3Locator, partition: Option<&str>) -> String {
+    format!("{index}/{}", index_glob_tail(partition))
+}
+
+/// The `read_parquet(...)` call a reader puts in its `FROM` clause, and the values it binds.
+///
+/// For a local index the glob is written into the text as it always was, and nothing is
+/// bound. For an S3 index the text is `read_parquet(?)` and the glob, which carries the bucket,
+/// the prefix and any partition name, is the one bound value. `filename` adds the
+/// `filename=true` column a per-partition query groups by.
+pub fn parquet_source(
+    index: &IndexLocator,
+    partition: Option<&str>,
+    filename: bool,
+) -> (String, Vec<String>) {
+    let option = if filename { ", filename=true" } else { "" };
+    match index {
+        IndexLocator::Local(path) => (
+            format!("read_parquet('{}'{option})", index_glob(path, partition)),
+            Vec::new(),
+        ),
+        IndexLocator::S3(locator) => (
+            format!("read_parquet(?{option})"),
+            vec![index_glob_s3(locator, partition)],
+        ),
     }
+}
+
+/// Why an S3 request failed, as far as the reader can tell from DuckDB's error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3Cause {
+    /// The endpoint's TLS certificate does not chain to a CA in the trust source.
+    Untrusted,
+    /// No connection to the endpoint could be established.
+    Unreachable,
+    /// The endpoint refused the request's credentials or signature (HTTP 403).
+    Forbidden,
+    /// The endpoint answered 404: no such bucket for a listing, no such key for an object.
+    NotFound,
+    /// Anything else, carrying DuckDB's text unchanged.
+    Other(String),
+}
+
+/// Name the cause of a failed S3 request from DuckDB's error text.
+///
+/// `httpfs` reports causes only in prose, so this matches the texts it is known to produce: a
+/// refused certificate is httplib's `SSL server verification failed` (or curl's `SSL peer
+/// certificate`, should anything select curl); a dead endpoint is `Could not establish
+/// connection`; a rejected signature carries `HTTP 403`,
+/// or `403 (Forbidden)` in the form an object request takes; and a missing bucket or key
+/// carries `HTTP 404` or `404 (Not Found)` (a missing key's text says `Unable to connect`,
+/// though the endpoint answered). The fallback keeps DuckDB's text, which names the URL but
+/// never a credential.
+pub fn classify_s3_error(error: &duckdb::Error) -> S3Cause {
+    classify_s3_text(&error.to_string())
+}
+
+fn classify_s3_text(text: &str) -> S3Cause {
+    if text.contains("SSL server verification failed") || text.contains("SSL peer certificate") {
+        S3Cause::Untrusted
+    } else if text.contains("Could not establish connection") {
+        S3Cause::Unreachable
+    } else if text.contains("HTTP 403") || text.contains("403 (Forbidden)") {
+        S3Cause::Forbidden
+    } else if text.contains("HTTP 404") || text.contains("404 (Not Found)") {
+        S3Cause::NotFound
+    } else {
+        S3Cause::Other(text.to_string())
+    }
+}
+
+/// The error for a failed S3 request that is not a missing object, naming the cause.
+fn s3_request_error(index: &S3Locator, what: &str, error: &duckdb::Error) -> anyhow::Error {
+    match classify_s3_error(error) {
+        S3Cause::Untrusted => anyhow::anyhow!(
+            "the S3 endpoint's TLS certificate is not trusted while {what} for {index}; it must \
+             chain to a CA in the file AWS_CA_BUNDLE names, else the platform's CA bundle \
+             ({error})"
+        ),
+        S3Cause::Unreachable => anyhow::anyhow!(
+            "cannot reach the S3 endpoint while {what} for {index}: no connection could be \
+             established; check AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL or the profile's \
+             endpoint, and the network"
+        ),
+        S3Cause::Forbidden => anyhow::anyhow!(
+            "the S3 endpoint refused the credentials while {what} for {index} (HTTP 403); \
+             check the access key, secret and region"
+        ),
+        S3Cause::NotFound => anyhow::anyhow!(
+            "bucket '{}' does not exist at the S3 endpoint (HTTP 404 while {what} for {index})",
+            index.bucket()
+        ),
+        S3Cause::Other(text) => {
+            anyhow::anyhow!("S3 request failed while {what} for {index}: {text}")
+        }
+    }
+}
+
+/// Read an S3 index's completion marker without fetching more than `MARKER_READ_LIMIT`.
+///
+/// Three statements, each a step that can fail on its own terms. A listing of everything under
+/// the prefix proves the endpoint is reachable with accepted credentials and that the bucket
+/// exists, and an empty one means no index is there at all; both are errors naming the cause.
+/// Then the marker's size, which costs a `HEAD` and no `GET`: a missing key is `Absent`, and a
+/// size over the cap is `Oversized` without the object being fetched. Only then the content,
+/// read whole in one ranged `GET`. Bytes that are not UTF-8 read as an empty body, as they do
+/// for a local marker.
+pub fn read_completion_marker_s3(
+    conn: &duckdb::Connection,
+    index: &S3Locator,
+) -> anyhow::Result<MarkerRead> {
+    let listed: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM glob(?) LIMIT 1)",
+            [index.object_url("**")],
+            |row| row.get(0),
+        )
+        .map_err(|e| s3_request_error(index, "listing the index", &e))?;
+    if listed == 0 {
+        anyhow::bail!("no index at {index}: the prefix holds no objects");
+    }
+
+    let marker = index.object_url(COMPLETION_MARKER);
+    let size: i64 =
+        match conn.query_row("SELECT size FROM read_blob(?)", [&marker], |row| row.get(0)) {
+            Ok(size) => size,
+            Err(e) => {
+                return match classify_s3_error(&e) {
+                    S3Cause::NotFound => Ok(MarkerRead::Absent),
+                    _ => Err(s3_request_error(
+                        index,
+                        "reading the completion marker's size",
+                        &e,
+                    )),
+                };
+            }
+        };
+    let size = u64::try_from(size).unwrap_or(0);
+    if size > MARKER_READ_LIMIT {
+        return Ok(MarkerRead::Oversized(size));
+    }
+
+    let content: Vec<u8> = conn
+        .query_row("SELECT content FROM read_blob(?)", [&marker], |row| {
+            row.get(0)
+        })
+        .map_err(|e| s3_request_error(index, "reading the completion marker", &e))?;
+    Ok(MarkerRead::Body(
+        String::from_utf8(content).unwrap_or_default(),
+    ))
 }
 
 /// A warning to print when an index cannot be trusted to be complete, else `None`.
@@ -164,27 +333,33 @@ pub fn index_glob(index: &Path, partition: Option<&str>) -> String {
 /// existed is still perfectly queryable, and breaking those would be worse than the risk
 /// being flagged.
 pub fn index_completion_warning(index: &Path) -> Option<String> {
-    let body = match read_completion_marker(index) {
+    marker_completion_warning(&read_completion_marker(index), &index.display().to_string())
+}
+
+/// `index_completion_warning` over a marker already read, for the index named `index`.
+///
+/// The S3 readers read the marker once, since each read is a round trip, and pass the
+/// result to both gates.
+pub fn marker_completion_warning(marker: &MarkerRead, index: &str) -> Option<String> {
+    let body = match marker {
         MarkerRead::Absent => {
             return Some(format!(
                 "warning: {} has no completion marker ({}); it may be from an interrupted \
                  run or predate the marker, so results may be incomplete",
-                index.display(),
-                COMPLETION_MARKER
+                index, COMPLETION_MARKER
             ));
         }
         // An entry that cannot be read offers no detail, so there is nothing to add —
         // which is the behavior a marker-present index had before bodies were read.
-        MarkerRead::Unreadable => return None,
+        MarkerRead::Unreadable | MarkerRead::Oversized(_) => return None,
         MarkerRead::Body(body) => body,
     };
 
-    match completion_marker_errors(&body) {
+    match completion_marker_errors(body) {
         Some(errors) if errors > 0 => Some(format!(
             "warning: {} was indexed with {} tolerated error(s) (xdu --allow-errors); the \
              affected paths were skipped, so results may be incomplete",
-            index.display(),
-            errors
+            index, errors
         )),
         _ => None,
     }
@@ -197,8 +372,20 @@ pub fn index_completion_warning(index: &Path) -> Option<String> {
 /// layout, and reading them blind is the silent misread this exists to prevent. The
 /// remedy is always a re-crawl, which is why the diagnostic says so.
 pub fn index_version_error(index: &Path) -> Option<String> {
-    let found = match read_completion_marker(index) {
-        MarkerRead::Body(body) => completion_marker_format(&body),
+    marker_version_error(&read_completion_marker(index), &index.display().to_string())
+}
+
+/// `index_version_error` over a marker already read, for the index named `index`.
+pub fn marker_version_error(marker: &MarkerRead, index: &str) -> Option<String> {
+    let found = match marker {
+        MarkerRead::Body(body) => completion_marker_format(body),
+        MarkerRead::Oversized(size) => {
+            return Some(format!(
+                "error: {} has a completion marker of {} bytes, over the {}-byte limit a \
+                 reader reads; it was not fetched, so the index format version is unknown",
+                index, size, MARKER_READ_LIMIT
+            ));
+        }
         // Absent or unreadable attestation answers nothing about the layout.
         MarkerRead::Absent | MarkerRead::Unreadable => None,
     };
@@ -208,14 +395,12 @@ pub fn index_version_error(index: &Path) -> Option<String> {
         Some(version) => Some(format!(
             "error: {} has index format version {}, but this xdu supports version {}; \
              re-index with this xdu to query it",
-            index.display(),
-            version,
-            INDEX_FORMAT_VERSION
+            index, version, INDEX_FORMAT_VERSION
         )),
         None => Some(format!(
             "error: {} carries no index format version (it predates index versioning or \
              comes from an interrupted run); re-index with this xdu to query it",
-            index.display(),
+            index,
         )),
     }
 }
@@ -1153,6 +1338,8 @@ pub fn format_log_record(level: LogLevel, message: &str) -> String {
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
+
     #[test]
     fn test_format_count_units() {
         assert_eq!(format_count(0), "0");
@@ -2028,6 +2215,149 @@ mod tests {
                 "index_completion_warning blocked on a FIFO marker — the file-type guard is gone"
             ),
         }
+    }
+
+    fn s3_locator(raw: &str) -> S3Locator {
+        S3Locator::parse(std::ffi::OsStr::new(raw)).unwrap()
+    }
+
+    #[test]
+    fn test_index_glob_s3_shares_the_layout() {
+        let index = s3_locator("s3://bucket/some/prefix/");
+        assert_eq!(
+            index_glob_s3(&index, None),
+            "s3://bucket/some/prefix/*/*.parquet"
+        );
+        assert_eq!(
+            index_glob_s3(&index, Some(ROOT_PARTITION)),
+            "s3://bucket/some/prefix/__root__/*.parquet"
+        );
+        // A bucket-root index has no empty segment before the partition.
+        assert_eq!(
+            index_glob_s3(&s3_locator("s3://bucket"), Some("alice")),
+            "s3://bucket/alice/*.parquet"
+        );
+    }
+
+    #[test]
+    fn test_parquet_source_keeps_local_sql_byte_for_byte() {
+        // The exact text every local reader statement carried before S3 indices existed.
+        let local = IndexLocator::Local(PathBuf::from("/index/scratch"));
+        assert_eq!(
+            parquet_source(&local, None, false),
+            (
+                "read_parquet('/index/scratch/*/*.parquet')".to_string(),
+                vec![]
+            )
+        );
+        assert_eq!(
+            parquet_source(&local, Some("alice"), true),
+            (
+                "read_parquet('/index/scratch/alice/*.parquet', filename=true)".to_string(),
+                vec![]
+            )
+        );
+    }
+
+    #[test]
+    fn test_parquet_source_binds_the_s3_glob() {
+        // A quote in the prefix or the partition would end a literal; bound, it never reaches
+        // the text.
+        let index = IndexLocator::S3(s3_locator("s3://bucket/it's"));
+        assert_eq!(
+            parquet_source(&index, None, false),
+            (
+                "read_parquet(?)".to_string(),
+                vec!["s3://bucket/it's/*/*.parquet".to_string()]
+            )
+        );
+        let (sql, params) = parquet_source(&index, Some("o'brien"), true);
+        assert_eq!(sql, "read_parquet(?, filename=true)");
+        assert_eq!(
+            params,
+            vec!["s3://bucket/it's/o'brien/*.parquet".to_string()]
+        );
+        assert!(!sql.contains('\''));
+    }
+
+    #[test]
+    fn test_classify_s3_text_names_each_measured_cause() {
+        assert_eq!(
+            classify_s3_text(
+                "IO Error: SSL server verification failed error for HTTP GET to \
+                 '/b/?encoding-type=url&list-type=2&prefix=p%2F'"
+            ),
+            S3Cause::Untrusted
+        );
+        assert_eq!(
+            classify_s3_text(
+                "IO Error: Could not establish connection error for HTTP GET to '/b/?list-type=2'"
+            ),
+            S3Cause::Unreachable
+        );
+        assert_eq!(
+            classify_s3_text(
+                "HTTP Error: HTTP GET error reading 's3://b/p/b/?list-type=2' in region \
+                 'us-east-1' (HTTP 403 Forbidden)"
+            ),
+            S3Cause::Forbidden
+        );
+        assert_eq!(
+            classify_s3_text(
+                "HTTP Error: HTTP GET error on 'http://h/b/p/.xdu-complete' (HTTP 403)"
+            ),
+            S3Cause::Forbidden
+        );
+        assert_eq!(
+            classify_s3_text(
+                "HTTP Error: HTTP GET error reading 's3://b/p/b/?list-type=2' in region \
+                 'us-east-1' (HTTP 404 Not Found)"
+            ),
+            S3Cause::NotFound
+        );
+        assert_eq!(
+            classify_s3_text(
+                "HTTP Error: Unable to connect to URL \"http://h/b/p/.xdu-complete\": 404 (Not \
+                 Found)."
+            ),
+            S3Cause::NotFound
+        );
+        let other = "HTTP Error: HTTP GET error on 'http://h/b/k' (HTTP 500)";
+        assert_eq!(classify_s3_text(other), S3Cause::Other(other.to_string()));
+    }
+
+    #[test]
+    fn test_marker_gates_refuse_an_oversized_s3_marker_naming_the_cap() {
+        let marker = MarkerRead::Oversized(MARKER_READ_LIMIT + 1);
+        let error = marker_version_error(&marker, "s3://bucket/idx").unwrap();
+        assert!(error.contains("s3://bucket/idx"), "{error}");
+        assert!(error.contains(&MARKER_READ_LIMIT.to_string()), "{error}");
+        assert!(
+            error.contains(&(MARKER_READ_LIMIT + 1).to_string()),
+            "{error}"
+        );
+        // An unread marker adds no detail to warn about, as locally.
+        assert_eq!(marker_completion_warning(&marker, "s3://bucket/idx"), None);
+    }
+
+    #[test]
+    fn test_marker_gates_read_a_body_as_the_local_gates_do() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let index = dir.path();
+        let body = "xdu=0\nerrors=2\nformat=2\n";
+        std::fs::write(index.join(COMPLETION_MARKER), body).unwrap();
+        let shown = index.display().to_string();
+        let read = MarkerRead::Body(body.to_string());
+        assert_eq!(
+            marker_version_error(&read, &shown),
+            index_version_error(index)
+        );
+        assert_eq!(
+            marker_completion_warning(&read, &shown),
+            index_completion_warning(index)
+        );
+        assert!(marker_completion_warning(&read, &shown).is_some());
+        assert_eq!(marker_version_error(&read, &shown), None);
     }
 
     #[test]

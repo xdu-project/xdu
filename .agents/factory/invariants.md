@@ -19,7 +19,13 @@ subsystems.
 `src/bin/xdu-rm.rs` (destructive) · `src/bin/xdu.rs` (crawl concurrency scaffold + marker sequencing) ·
 `src/crawl.rs` (atomic finalize + stale-chunk prune + reserved-index-name collision rejection) ·
 `src/lib.rs` (schema + `QueryFilters`/SQL + `index_glob` + layout constants + `RESERVED_INDEX_NAMES`) ·
-`src/cli.rs` (the one CLI definition)
+`src/cli.rs` (the one CLI definition) ·
+`src/s3.rs` (`S3Sink`'s chunk PUTs, prune and marker sequencing + the S3 partition-name refusal +
+the one credential resolver and the reader's bound `CREATE SECRET` + the one TLS trust source and
+the writer's `tls_certs_only` client) ·
+`src/view_query.rs` (every `xdu-view` statement) ·
+`src/engine.rs` (the one connection open, the extension load and `open_s3_connection`, with the
+reader's certificate-verification statements)
 
 ---
 
@@ -42,12 +48,19 @@ subsystems.
   cycle added `uid`/`gid`/`mode` (plus `mtime`/`ctime`) and bumped the version alongside,
   as required.
 
-## 2. Atomic finalization (`src/crawl.rs::PartitionBuffer::finalize`)
+## 2. Atomic finalization (`src/crawl.rs::PartitionBuffer::finalize`, through `IndexSink`)
 
-- Write each chunk to `NNNNNN.parquet.partial`, then `fs::rename` to `.parquet` **within the same
-  directory** (POSIX-atomic); prune stale higher-numbered `.parquet` chunks left by a prior larger run.
+- Locally (`crawl::LocalSink`): write each chunk to `NNNNNN.parquet.partial`, then `fs::rename` to
+  `.parquet` **within the same directory** (POSIX-atomic); prune stale higher-numbered `.parquet`
+  chunks left by a prior larger run, stopping at the first gap.
 - Never `File::create` a final `.parquet`, never cross-directory rename (breaks atomicity), never let
   a reader glob `.partial`.
+- Into S3 (`s3::S3Sink`): an object store has no rename, so each chunk is **one PUT at its final
+  key** `<prefix>/<partition>/NNNNNN.parquet`, sent as it is encoded. A single PUT is
+  all-or-nothing, so no reader sees part of a chunk. Finalize is a LIST of the partition and a
+  DELETE of **every** higher-numbered chunk, past gaps (only a foreign edit makes a gap, and a
+  re-run must leave no stale chunk). Nothing of the index is written to local disk on this path:
+  no `.partial`, no staging, no cache.
 - **Known limitation:** finalize is per-file, **not** per-partition atomic — a reader during finalize
   can see a mix of new and old chunks, and a crash mid-finalize leaves the partition inconsistent. Do
   **not** index a partition concurrently with purging it; document this rather than pretending
@@ -65,17 +78,28 @@ ordering is load-bearing:
   never written over the marker either. Both directions, or the outdir can be bricked.
 - **Cleared after pre-flight passes**, before any driver writes — so a run rejected without touching the
   index leaves an existing marker intact, while a crash mid-crawl leaves the index visibly unattested.
+  For an `s3://` output the pre-flight also holds one LIST of the prefix (reachable endpoint,
+  accepted credentials, existing bucket; an absent or empty prefix is a new index) and the refusal
+  of every top-level name that would not survive as a key and a glob
+  (`IndexSink::check_top_level`).
+  The marker DELETE is then the first write, so read-only credentials fail with the marker intact.
   **Written only on the success path**, after every partition finalized. Never write it on a failure
   path, and never move the clear earlier than the last check that can still reject the run.
 - Body is `key=value` lines (`xdu`, `completed_at`, `files`, `bytes`, `vanished`, `errors`,
   `lossy_paths`, `format`), so an `--allow-errors` run still records how much it skipped. `format`
   carries the run-level index format version (`INDEX_FORMAT_VERSION`); it is what the readers'
   version gate checks.
-- All three readers call `lib::index_version_error` before `lib::index_completion_warning`: a marker
-  stating no understood version — absent marker included — is a **refusal** (no rows, no deletions),
-  never a warning. The warning stays soft and covers only a versioned marker recording tolerated
-  errors, which remains queryable. The read is size-capped (`MARKER_READ_LIMIT`) and must not block,
-  so a FIFO or an enormous file left at that path cannot hang or exhaust a reader.
+- All three readers call `lib::index_version_error` before `lib::index_completion_warning` on a local
+  index; on an `s3://` index `xdu-find` and `xdu-view` read the marker once with
+  `lib::read_completion_marker_s3`, then call `lib::marker_version_error` before
+  `lib::marker_completion_warning` on that read (the local pair are these two over the local read).
+  A marker stating no understood version — absent marker included — is a **refusal** (no rows, no
+  deletions), never a warning. The warning stays soft and covers only a versioned marker recording
+  tolerated errors, which remains queryable. The read is size-capped (`MARKER_READ_LIMIT`) and must
+  not block, so a FIFO or an enormous file left at that path cannot hang or exhaust a reader. Locally
+  that is one `stat` before any open; over S3 it is a LIST proving the prefix holds objects, then a
+  HEAD for the marker's size (a missing key is an absent marker), and a marker over the cap is refused
+  as `MarkerRead::Oversized` without its GET.
 - **Known limitation (recorded, not fixed):** the marker describes the whole index but its counts come
   from one run, so a `--partition`-scoped run clears and rewrites it from its own stats and can retire a
   still-correct warning — `issues/marker-scoped-run-attestation.md`. Do not fix this incidentally; it
@@ -113,8 +137,10 @@ ordering is load-bearing:
     (it is a dotfile), and this guard is what stops a partition being written *over* the marker. When
     reviewing a diff that adds a reserved on-disk name, ask both questions.
 - Chunk ids are zero-padded sequential; readers glob `*/*.parquet`.
-- `lib::index_glob(index, partition)` is the **one** place this layout becomes a `read_parquet` glob;
-  all three readers go through it. Do not hand-build the glob in a reader.
+- `lib::index_glob(index, partition)`, and `lib::index_glob_s3` for an `s3://` index, are the
+  **only** places this layout becomes a `read_parquet` glob, and both write it through one shared
+  tail. Every reader goes through them; `xdu-find` and `xdu-view` by way of `lib::parquet_source`,
+  which binds the S3 glob. Do not hand-build the glob in a reader.
 
 ## 4. `xdu-rm` destructive safety — read before touching `src/bin/xdu-rm.rs`
 
@@ -134,7 +160,23 @@ ordering is load-bearing:
 
 - Every user-supplied value that reaches `read_parquet(...)` or a `WHERE`/`LIKE` clause is an
   injection surface: `--pattern`, `--partition` (`-u`), and the index path. Today only `--pattern` is
-  escaped (single-quote doubling); partition names and index paths are interpolated **raw**.
+  escaped (single-quote doubling); for a **local** index, partition names and index paths are
+  interpolated **raw**, a known exception (binding them is a follow-up seed).
+- For an **`s3://` index** nothing the locator or `-u` carries is interpolated. `lib::parquet_source`
+  returns `read_parquet(?)` (or `read_parquet(?, filename=true)`) with the whole glob as the one bound
+  value, built by `lib::index_glob_s3`, and `lib::read_completion_marker_s3` binds the URLs of its
+  `glob(?)` and `read_blob(?)` statements. The unit test
+  `tests::test_parquet_source_keeps_local_sql_byte_for_byte` pins the local text, and the wire test
+  `find_prefix_with_a_quote_matches_local` holds the S3 rule with a `'` in the prefix. Any new
+  reader statement over an S3 index takes its source from `parquet_source` on the same terms.
+- `xdu-view`'s statements live in `lib::view_query`, each built by a pure `*_sql` function. They
+  take their source from `parquet_source` too, and the S3 arm also binds the directory prefix a
+  listing matches with `path LIKE ?`; the local arm keeps the prefix in a `LIKE` literal, as
+  before.
+  The unit test `view_query::tests::local_view_sql_is_byte_for_byte_what_xdu_view_sent` pins every
+  local statement against a frozen copy of the binary's old builders, and the wire test
+  `view_quotes_in_the_prefix_and_a_directory_match_local` holds the S3 rule with a `'` in both the
+  prefix and a listed directory.
 - Route all such values through **one** validated escaping/quoting helper (or bound parameters). Numeric
   filters (`i64`) are injection-safe by type. Forbid raw `format!` of a partition name / index path
   into SQL — in the destructive `xdu-rm` a quote or `../`/glob-meta could escape the intended partition.
@@ -148,6 +190,49 @@ ordering is load-bearing:
   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold the rule; the second skips on a
   filesystem that rejects non-UTF-8 names (APFS) and runs on the Linux CI leg. Any new statement in
   `src/engine.rs` built from a path or an environment value joins this surface on the same terms.
+- `engine::open_s3_connection` is on the engine surface too. After the `LOAD` it runs one prepared
+  `CREATE TEMPORARY SECRET` (text from `S3Settings::duckdb_secret_statement`) whose every value,
+  the key pair, session token, region, endpoint, URL style, SSL flag, requester-pays flag and KMS
+  key, is a bound parameter; the text is fixed. It binds every key `httpfs` would otherwise take
+  from the `s3_*` setting it fills from the environment at load (`AWS_*`, `DUCKDB_S3_*`), the
+  endpoint included when it is AWS's own, so no stray variable can redirect or re-sign a reader:
+  `s3::tests::the_secret_statement_text_is_fixed_and_names_every_key_httpfs_would_fall_back_on` and
+  the `harness_stray_*` wire tests hold that. No credential is ever SQL text, and
+  `duckdb_secrets()` lists the secret redacted.
+- **Every S3 connection authenticates the server, against one trust source.**
+  `S3Settings::resolve` picks the source once for both directions: the file `AWS_CA_BUNDLE`
+  names, else the first of `s3::PLATFORM_CA_BUNDLES` present. A missing, unreadable or
+  certificate-free source refuses before any request, naming `AWS_CA_BUNDLE`, and so does one
+  whose certificates include no self-signed root (`is_self_signed_root` in
+  `bundle_certificates`): the writer's webpki anchors at any certificate in the file, but the
+  readers' OpenSSL needs a chain that ends at a root there.
+  - **Writer.** `S3Sink`'s client trusts only that file's certificates
+    (`tls_certs_only`): never the platform verifier, built-in roots or
+    `tls_certs_merge`.
+  - **Reader.** `engine::open_s3_connection` runs fixed text after the `LOAD`: it pins
+    `httpfs_client_implementation` to `httplib`, turns `enable_server_cert_verification` and
+    `enable_curl_server_cert_verification` on, and binds the path as `SET ca_cert_file = ?`.
+    The path is never SQL text.
+  - **Nothing disables verification:** no `danger_accept_invalid_*`, `tls_danger_*`,
+    `allow_invalid_certificates` or custom verifier; no `false` for either flag; no option
+    or variable that turns it off.
+  - **Nothing adds roots beside the one source:** no `tls_certs_merge`,
+    `add_root_certificate`, `with_root_certificate`, `webpki-roots`, `rustls-native-certs`
+    or platform verifier.
+  - **Never trust sources:** `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in
+    directory and the macOS keychain. A plain `http://` endpoint override resolves no source.
+  - **The tests that hold it:** the `tls_` wire tests. A self-signed, unknown-CA or
+    wrong-name endpoint is refused by all three tools; an endpoint the named CA signed
+    answers as plain HTTP does; an unusable `AWS_CA_BUNDLE`, or one without a root, stops
+    each tool before it connects.
+  - **One known exception: the readers' host-name check.** httpfs's httplib accepts a
+    certificate whose subject CN names the endpoint's host when its SAN does not, or when it
+    has none; the writer checks the SAN alone and refuses it. The fallback is inside the pinned
+    extension, so it is recorded, not fixed (GOAL R11). The fix is a committed follow-up fix
+    cycle, seeded as `issues/s3-reader-tls-hostname.md`, and removing this exception is its
+    acceptance. The wire test
+    `tls_a_leaf_naming_the_host_only_in_its_cn_is_refused_by_xdu_alone` pins the split as it
+    stands, so that fix must flip it. Nothing else in this rule has an exception.
 
 ## 6. Unix-only
 
@@ -161,7 +246,9 @@ ordering is load-bearing:
   `std::thread`s pull partitions from a `Mutex<VecDeque>` work queue; rayon work-stealing balances
   directory reads across active walkers so one huge partition can't starve the rest.
 - `std::thread::scope` joins the drivers; the first `Err`/panic surfaces as the process result
-  (non-zero exit). Thread budget: N pool + C drivers + 1 main. Preserve this shape.
+  (non-zero exit). Thread budget: N pool + C drivers + 1 main, plus 2 tokio workers when the output
+  is `s3://`: `S3Sink` owns that runtime, driver threads `block_on` it for each request, and rayon
+  workers never touch it. Preserve this shape.
 
 ## 8. Symlinks excluded
 

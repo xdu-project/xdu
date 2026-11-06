@@ -1,5 +1,5 @@
 ---
-status: unshaped
+status: shaped on feature/s3-index-target (2026-11-05) — see spec/s3-index-target/GOAL.md
 kind: feature
 appetite: big
 ---

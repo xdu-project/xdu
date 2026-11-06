@@ -213,6 +213,7 @@ assume `nightly` — use the pinned toolchain.
 cargo build --release                                   # all bins (bundled DuckDB C++ is the slow part)
 cargo test                                              # lib unit tests + tests/ integration
 cargo test --test rm_tests                              # one integration file
+XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 53   # S3 wire tier (see Testing)
 cargo clippy --all-targets --all-features -- -D warnings   # lint gate (must be clean)
 cargo fmt --all -- --check                              # format gate
 
@@ -274,10 +275,15 @@ been green in CI. The normalization now lives in three places that must change t
 **Presence is the wrong question for a literal that appears twice.** `grep -q` is satisfied by
 whichever copy survived, so corrupting exactly one of `doc/xdu.1.scd`'s two `.partial suffix`
 occurrences is invisible to it — which is why CI counts that one (`2x:.partial suffix`) instead. The
-same is true of every `*XDU_INDEX*` / `*XDU_JOBS*`: each appears twice on its page, once as a
-cross-reference in the flag description and once as the `ENVIRONMENT` entry, so corrupting only the
-`ENVIRONMENT` entry publishes a variable name that does not exist while a presence check stays green.
-All of them are counted for that reason. **Whether a literal is duplicated is a fact about the page,
+same is true of every `*XDU_INDEX*` / `*XDU_JOBS*` / `*XDU_EXTENSION_DIR*`: each appears twice on
+its page, once as a cross-reference (in the flag description, or for `*XDU_EXTENSION_DIR*` in
+the `S3 INDICES` section of `xdu-find.1` and `xdu-view.1`) and once as the `ENVIRONMENT` entry, so
+corrupting only the `ENVIRONMENT` entry publishes a variable name that does not exist while a
+presence check stays green.
+All of them are counted for that reason, and so are the `AWS_*` names on the pages that list them
+(`AWS_CA_BUNDLE` twice on each of `xdu.1`, `xdu-find.1` and `xdu-view.1`: the trust paragraph of the
+S3 section, then its `ENVIRONMENT` entry) and `xdu.1`'s two `s3://BUCKET/PREFIX` (under `-o` and in
+`S3 OUTPUT`). **Whether a literal is duplicated is a fact about the page,
 not about the literal** — adding one cross-reference to a `.scd` can duplicate a previously-unique
 literal — so re-count when you edit a `.scd` that carries an asserted literal; nothing re-derives it
 for you. A new page is not covered at all: the `check` list names four pages while the render step
@@ -294,24 +300,34 @@ never appeared on the page, which is harmless for presence (at worst a false gre
 ```
 src/
   lib.rs         # shared core: get_schema() (THE index schema), SizeMode, parse_size,
-                 # SortMode, QueryFilters (DuckDB WHERE/ORDER BY builders), format_{count,bytes,speed}
+                 # SortMode, QueryFilters (DuckDB WHERE/ORDER BY builders), format_{count,bytes,speed},
+                 # the index globs and parquet_source, and the readers' completion-marker read
+                 # (local, and read_completion_marker_s3) with its version gate and warning
   cli.rs         # the SINGLE clap CLI definition (XduArgs/XduFindArgs/XduViewArgs/XduRmArgs) —
                  # gen-completions + man pages describe exactly this
   crawl.rs       # index-build hot path lifted out of the bin so it is unit-testable: work-queue
                  # construction (incl. the __root__ collision rejection), per-file record building,
-                 # PartitionBuffer + atomic finalize, completion-marker read/write. Only the crawler
-                 # uses it; the reader tools never do. The concurrency scaffold stays in bin/xdu.rs.
+                 # PartitionBuffer + IndexSink/LocalSink (atomic finalize), the local completion
+                 # marker's clear/write. Only the crawler uses it; the readers' marker read and
+                 # gates live in lib.rs. The concurrency scaffold stays in bin/xdu.rs.
   engine.rs      # the ONLY place a DuckDB connection is opened: open_connection() turns extension
                  # autoinstall + autoload off; PINNED_EXTENSIONS (the shipped set), extension_dir()
                  # (XDU_EXTENSION_DIR, else <canonical exe>/../../lib/xdu/extensions) and
                  # load_extension() (load by absolute path, or fail naming it; never download)
+  s3.rs          # IndexLocator (classified on the OsStr), the ONE credential resolver (S3Settings)
+                 # both directions use, and S3Sink: the crawler's S3 destination (object_store on
+                 # ring, PUT/LIST/DELETE, partition-name refusal)
+  view_query.rs  # xdu-view's index queries (partition list, __root__ files, partition root,
+                 # directory listings) over a local or S3 index, out of the bin so tests reach them
   bin/xdu.rs     # indexer: shared-rayon-pool concurrent walk, driver threads, thread::scope error
                  # propagation, progress — the scaffold around lib::crawl
   bin/xdu-find.rs   # DuckDB query CLI
-  bin/xdu-view.rs   # 2487-line ratatui/crossterm TUI (read-only)
+  bin/xdu-view.rs   # ratatui/crossterm TUI (read-only); its queries live in view_query.rs
   bin/xdu-rm.rs     # destructive bulk delete (safe mode, confirm, dry-run, parallel)
   bin/gen-completions.rs   # emits share/ completions from cli.rs
 tests/           # crawl_tests.rs, rm_tests.rs, offline_tests.rs (integration); common/ = shared helpers
+                 # s3_tests.rs + s3-wire.sh: the S3 wire tier and its CI gate (see Testing);
+                 # common/s3.rs = the loopback S3 endpoint, counting proxy, hermetic child env
 examples/extension-probe.rs   # release-time probe, never installed: `manifest` prints engine version,
                  # platform, source_id + pinned set; `load` loads that set from the extension
                  # directory on one engine connection. Built in the same `cargo build` as the bins;
@@ -323,7 +339,9 @@ share/           # GENERATED (man + completions); git-ignored; built in CI / by 
 build.sh install.sh Dockerfile   # packaging / ops scripts
 packaging/extensions/   # footer.sh (check an extension's engine/platform footer), fetch.sh (download the
                  # probe's pinned set), check.sh (the release gate: runs every shipped binary and
-                 # loads the set from the extracted tarball under a cold HOME, before upload)
+                 # loads the set from the extracted tarball under a cold HOME, before upload),
+                 # aws-tls-probe.sh (a smoke check that the tools verify AWS's real chain against
+                 # the host's CA bundle; check.sh and the test legs run it)
 packaging/rpm/   # xdu.spec: ad-hoc / COPR-style EL build from the source tag; no workflow runs it
                  # (see issues/native-os-packages-deb-rpm.md)
 .agents/         # the spec-driven "software factory" (see below)
@@ -368,8 +386,12 @@ xdu ──walk (jwalk + shared rayon pool)──▶ PartitionBuffer ──.parti
                                     │                                                         │
                         on success  └──▶ <index>/.xdu-complete  (run-level attestation)        │
                                                      │                                         │
-xdu-find / xdu-view / xdu-rm ◀── warn if absent/errors ┘  ◀── DuckDB read_parquet('<index>/<part-or-*>/*.parquet') ◀┘
+xdu-find / xdu-view / xdu-rm ◀── refuse/warn by marker ┘  ◀── DuckDB read_parquet('<index>/<part-or-*>/*.parquet') ◀┘
 ```
+
+An `s3://` index has the same layout under its prefix. `s3::S3Sink` PUTs each chunk at its final
+key with no `.partial` stage, and `xdu-find` and `xdu-view` read the index in place through the
+pinned `httpfs`, with the glob a bound parameter (`lib::parquet_source`); `xdu-rm` refuses one.
 
 - **Index layout:** `<outdir>/<partition>/NNNNNN.parquet`, where `partition` is a top-level
   subdirectory name. Loose files directly under the indexed root go to the reserved partition
@@ -387,39 +409,58 @@ xdu-find / xdu-view / xdu-rm ◀── warn if absent/errors ┘  ◀── Duck
   the crawl is about to write, and **written only on the success path** — its presence attests to the
   whole run. Body is `key=value` lines (`xdu`, `completed_at`, `files`, `bytes`, `vanished`,
   `errors`, `lossy_paths`, `format`), so an `--allow-errors` run still records how much it skipped;
-  `format` carries the run-level index format version (`INDEX_FORMAT_VERSION`, `lib.rs`). All three
-  readers call `lib::index_version_error` first and refuse — no rows, no deletions — when the marker
-  states no version they understand, absent marker included; a versioned marker recording tolerated
-  errors still only earns a **soft stderr warning** via `lib::index_completion_warning`. Reads are
-  capped (`MARKER_READ_LIMIT`) and non-blocking, so a FIFO or huge file left at that path cannot
-  hang or exhaust a reader. **Known limitation:** the marker
+  `format` carries the run-level index format version (`INDEX_FORMAT_VERSION`, `lib.rs`). On a local
+  index all three readers call `lib::index_version_error` before `lib::index_completion_warning`; on
+  an `s3://` index `xdu-find` and `xdu-view` read the marker once with
+  `lib::read_completion_marker_s3`, then call `lib::marker_version_error` before
+  `lib::marker_completion_warning` on that read (the local pair are these two over the local read).
+  Either way a marker stating no version they understand, absent marker included, is a refusal — no
+  rows, no deletions — and a versioned marker recording tolerated errors still only earns a **soft
+  stderr warning**. Reads are capped (`MARKER_READ_LIMIT`) and non-blocking, so a FIFO or huge file
+  or object left at that path cannot hang or exhaust a reader. Locally that is one `stat` before any
+  open. Over S3 it is a LIST proving the prefix holds objects, then a HEAD for the marker's size (a
+  missing key is an absent marker), and a marker over the cap is refused as
+  `MarkerRead::Oversized` without its GET. **Known limitation:** the marker
   describes the whole index but its counts come from one run, so a `--partition`-scoped run rewrites it
   from its own stats — see `issues/marker-scoped-run-attestation.md`.
 - **Concurrency (indexer):** a **single** rayon pool (`Parallelism::RayonExistingPool`) backs **all**
   jwalk walkers; up to `--jobs` driver `std::thread`s pull partitions from a `Mutex<VecDeque>` work
   queue; rayon work-stealing balances directory reads across all active walkers so one huge partition
   can't starve the rest. `std::thread::scope` joins the drivers; the first `Err`/panic fails the run.
-  Thread budget: N pool + C drivers + 1 main.
-- **Atomic writes:** each chunk is written to `NNNNNN.parquet.partial`, then `fs::rename`d to
-  `.parquet` in `finalize()` (atomic within a dir on POSIX); stale higher-numbered chunks from a prior
-  larger run are pruned. This is **per-file** atomic, **not** per-partition atomic — see invariants.
+  Thread budget: N pool + C drivers + 1 main, plus, for an `s3://` output, the 2 worker threads of
+  `S3Sink`'s private tokio runtime, which driver threads `block_on` and rayon workers never touch.
+- **Atomic writes:** every write goes through `crawl::IndexSink`. Locally (`LocalSink`) each chunk
+  is written to `NNNNNN.parquet.partial`, then `fs::rename`d to `.parquet` in `finalize()` (atomic
+  within a dir on POSIX); stale higher-numbered chunks from a prior larger run are pruned up to the
+  first gap. Into S3 (`s3::S3Sink`) each chunk is **one PUT at its final key** as it is encoded (a
+  single PUT is all-or-nothing, and nothing is staged on local disk), and finalize is a LIST of the
+  partition and a DELETE of **every** higher-numbered chunk, past gaps. Either way this is
+  **per-file** atomic, **not** per-partition atomic — see invariants.
 - **Query:** `xdu-find`/`xdu-view`/`xdu-rm` open an in-memory DuckDB, glob the index, and apply a
   `QueryFilters` WHERE clause. `xdu-view` is a read-only TUI; `xdu-rm` unlinks the matched files.
+  For an `s3://` index, `xdu-find` and `xdu-view` open the connection with
+  `engine::open_s3_connection` (the pinned `httpfs` and one bound `CREATE SECRET`), pass the marker
+  gates above, and take their `FROM` from `lib::parquet_source`.
 
 ## CLI surface (`src/cli.rs` is the one definition)
 
-- `xdu DIR -o/--outdir DIR [-j/--jobs N (env XDU_JOBS, dflt 4)] [-B/--buffsize N (100000)]
+- `xdu DIR -o/--outdir DIR|s3://BUCKET/PREFIX [-j/--jobs N (env XDU_JOBS, dflt 4)] [-B/--buffsize N (100000)]
   [--apparent-size] [-k/--block-size SIZE] [-p/--partition NAMES] [--allow-errors]`
   — `--allow-errors` is **opt-in**: by default any walk/stat error fails the run non-zero and no
   completion marker is written; with it, unreadable entries are counted, reported on stderr, the run
   exits 0, and the marker records the tolerated `errors=N`.
-- `xdu-find -i/--index DIR (env XDU_INDEX) [-p/--pattern PATTERN] [--regex] [-u/--partition NAME]
+- `xdu-find -i/--index DIR|s3://BUCKET/PREFIX (env XDU_INDEX) [-p/--pattern PATTERN] [--regex] [-u/--partition NAME]
   [--min-size/--max-size SIZE] [--older-than/--newer-than DAYS] [-f/--format path|size|atime|csv|json]
   [-l/--limit N] [-c/--count] [--top N]`
-- `xdu-view -i/--index DIR [-u/--partition NAME] [-p/--pattern PATTERN] [--regex] [--min/max-size]
+- `xdu-view -i/--index DIR|s3://BUCKET/PREFIX (env XDU_INDEX) [-u/--partition NAME] [-p/--pattern PATTERN] [--regex] [--min/max-size]
   [--older/newer-than] [-s/--sort name|size-asc|size-desc|count-asc|count-desc|age-asc|age-desc]`
 - `xdu-rm -i/--index DIR [-p/--pattern PATTERN] [--regex] [-u/--partition] [--min/max-size]
   [--older/newer-than] [-l/--limit N] [-n/--dry-run] [--safe] [-f/--force] [-v/--verbose] [-j/--jobs (env XDU_JOBS)]`
+  — `xdu-rm` takes a local index only and refuses an `s3://` one, from `-i` or `XDU_INDEX`.
+- An `s3://` locator (lowercase scheme only) takes its credentials, region and endpoint from the
+  `AWS_*` variables and the shared credentials and config files, through `s3::S3Settings::resolve`,
+  the one resolver both directions use. The readers need the pinned `httpfs` from
+  `lib/xdu/extensions/` (or `XDU_EXTENSION_DIR`); the writer needs no extension.
 
 **Footgun:** `-p` means `--partition` in `xdu` but `--pattern` in the three query tools (where
 partition moves to `-u`). Same short flag, different meaning per binary — do not "fix" one side in
@@ -441,11 +482,15 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    change that must bump the version in the same commit (issues #2/#3 — owner/group/perms — are
    exactly this).
 2. **Atomic finalization.** Write `NNNNNN.parquet.partial` → `fs::rename` (same dir) → prune stale
-   higher chunks (`crawl.rs::PartitionBuffer::finalize()`). Never `File::create` a final `.parquet`,
-   never cross-dir rename, never let a reader glob `.partial`. **Known limitation:** finalize is
+   higher chunks (`crawl.rs::LocalSink`, driven by `PartitionBuffer::finalize()`). Never
+   `File::create` a final `.parquet`, never cross-dir rename, never let a reader glob `.partial`. An
+   `s3://` output (`s3.rs::S3Sink`) has no rename: each chunk is one PUT at its final key, and
+   finalize is a LIST plus a DELETE of every higher id, past gaps. **Known limitation:** finalize is
    per-file, not per-partition atomic — do not index a partition while purging it. Run-level
    completeness is a *separate* mechanism: the `.xdu-complete` marker (see Architecture), cleared after
-   pre-flight and written only on success. Never write it on a failure path.
+   pre-flight and written only on success. Never write it on a failure path. Over S3 the pre-flight
+   ends with one LIST of the prefix and every partition-name refusal, so the marker DELETE is the
+   run's first write.
 3. **Partition scheme.** `<index>/<partition>/NNNNNN.parquet`; `__root__` reserved for loose
    top-level files (depth-1 walk); zero-padded sequential chunk ids; readers glob `*/*.parquet`. The
    index root's namespace is a **class, not two facts**: it holds partition directories plus the
@@ -460,12 +505,31 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    `ORDER BY`** so `--dry-run` and the real run select identical rows.
 5. **DuckDB injection surface.** Every user value reaching `read_parquet(...)`/`WHERE` is an
    injection surface. Route it through one validated escaping/quoting helper (or bound parameters);
-   never raw `format!` a partition name or index path into SQL. The extension path is one too:
+   never raw `format!` a partition name or index path into SQL. For an `s3://` index the readers
+   go through `lib::parquet_source`, which binds the whole glob (bucket, prefix and any `-u`
+   partition) as the statement's one parameter, and the marker read binds its URLs too; a local
+   index keeps the raw-`format!` glob, a known exception filed as a follow-up. Credentials reach
+   DuckDB only as the bound values of `engine::open_s3_connection`'s one prepared `CREATE SECRET`,
+   never as SQL text. The extension path is one too:
    `engine::load_extension_from` puts the extension file's absolute path, from `XDU_EXTENSION_DIR`
    or the canonical exe's `../../lib/xdu/extensions`, into `LOAD '<path>'`, and refuses a path
    containing `'` or not valid UTF-8 before any SQL runs. The unit tests
    `engine::tests::quoted_directory_is_refused_before_any_sql` and
-   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold that rule.
+   `engine::tests::non_utf8_directory_is_refused_before_any_sql` hold that rule. **Every S3
+   connection authenticates the server against one trust source**, which `S3Settings::resolve`
+   picks once for both directions: the file `AWS_CA_BUNDLE` names, else the first of
+   `s3::PLATFORM_CA_BUNDLES` present; a missing, unreadable or certificate-free source, or one
+   holding no self-signed root, refuses before any request, naming `AWS_CA_BUNDLE`. The writer's client trusts only that file's
+   certificates (`tls_certs_only`). The reader's `engine::open_s3_connection` runs fixed text
+   after the `LOAD`, pinning `httpfs_client_implementation` to `httplib`, turning
+   `enable_server_cert_verification` and `enable_curl_server_cert_verification` on, and binding the
+   path as `SET ca_cert_file = ?`, never as SQL text. Nothing disables verification, nothing adds
+   roots beside the source, and `SSL_CERT_FILE`, `SSL_CERT_DIR`, OpenSSL's compiled-in directory
+   and the macOS keychain are never sources; a plain `http://` override resolves none. The `tls_`
+   wire tests hold it (`invariants.md` §5). One known exception: the readers' host-name check is
+   httpfs's httplib, which accepts a certificate whose CN names the host when its SAN does not;
+   the writer refuses it. It is recorded until the follow-up fix cycle seeded as
+   `issues/s3-reader-tls-hostname.md` lands, and nothing else in the rule has one.
 6. **Unix-only.** `MetadataExt` (atime; disk usage = `st_blocks`×512) is load-bearing; don't add
    code assuming portability. A future S3/Windows source must special-case (S3 has no atime).
 7. **Shared rayon-pool concurrency.** See Architecture. Preserve the single-pool + driver-thread +
@@ -494,12 +558,28 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   re-verify the criteria it claims to (atime/size today; min-size/newer-than/pattern are gaps); the
   confirm/dry-run/force gates are load-bearing.
 - **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
-  `index_glob` (the one place the index layout becomes SQL), and the `ROOT_PARTITION` /
-  `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list that guards both.
+  `index_glob` and `index_glob_s3` (which share the one tail that writes the index layout),
+  `parquet_source` (which puts that glob into `xdu-find`'s and `xdu-view`'s SQL, as text locally
+  and as a bound parameter for S3), the marker gates of `invariants.md` §2b on both transports
+  (`index_version_error`, `marker_version_error`, `read_completion_marker_s3`), and the
+  `ROOT_PARTITION` / `COMPLETION_MARKER` layout constants with the `RESERVED_INDEX_NAMES` list
+  that guards both.
 - **`src/engine.rs`** — the one place a DuckDB connection opens (autoload and autoinstall off), and
-  `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5).
-- **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning; the
-  reserved-index-name collision rejection in `build_work_queue`; completion-marker write/clear ordering.
+  `load_extension_from`, whose `LOAD '<path>'` is the extension-path injection surface (invariant 5);
+  `open_s3_connection` adds the reader's one bound `CREATE SECRET`, and before it the fixed statements
+  that pin httplib, turn certificate verification on and bind the trust source's path as the CA file.
+- **`src/s3.rs`** — the S3 side of invariants 2 and 2b (`S3Sink`: one PUT per chunk, the LIST and
+  DELETE prune past gaps, the marker DELETE first and PUT last), the S3 partition-name refusal, and the
+  one credential resolver. Its `CREATE SECRET` must bind every key `httpfs` would otherwise take from
+  the environment, and no request error may print a response body (one can echo the session token).
+  The resolver also picks the one TLS trust source (`AWS_CA_BUNDLE`, else the first of
+  `PLATFORM_CA_BUNDLES`) for both directions, refusing one that holds no self-signed root, and
+  `S3Sink`'s client trusts only its certificates (`tls_certs_only`); a change here can widen or
+  drop server authentication (invariant 5).
+- **`src/view_query.rs`** — every `xdu-view` statement, on the invariant 5 surface.
+- **`src/crawl.rs`** — `PartitionBuffer::finalize()` atomicity + stale-chunk pruning (through
+  `IndexSink`; `LocalSink` is the local protocol); the reserved-index-name collision rejection in
+  `build_work_queue`; completion-marker write/clear ordering.
 - **`src/bin/xdu.rs`** — the shared-pool concurrency model (driver threads, `thread::scope` error
   propagation); marker clear-after-pre-flight / write-on-success sequencing.
 - **`src/bin/xdu-view.rs`** — terminal restore on panic; multibyte-safe truncation; empty-list
@@ -529,6 +609,28 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   autoload refused that is a reader that cannot read its own index. Any other extension ships as a
   file in `lib/xdu/extensions/` and loads by path (`XDU_EXTENSION_DIR` overrides the directory);
   nothing is ever fetched at runtime.
+- **The S3 wire tier is a standing CI gate that plain `cargo test` skips.** `tests/s3_tests.rs`
+  holds two tiers. A few tests need only the binaries and run in every `cargo test`; the rest talk
+  to an in-process `s3s` endpoint on loopback through the pinned `httpfs`, so they are `#[ignore]`d
+  and plain `cargo test` lists them as ignored. To run them, fetch the pinned `httpfs` once into a
+  directory the binaries never look in by default — **never** `target/lib/xdu/extensions`, which
+  would hide a reader that wrongly loads it for a local index — and run the gate script:
+  `cargo build --locked --example extension-probe`, then
+  `sh packaging/extensions/fetch.sh target/debug/examples/extension-probe target/test-ext`, then
+  `XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" N`. The script passes only when
+  every test `-- --list --include-ignored` lists also passed and that count is at least `N`, since
+  under `--include-ignored` libtest always prints `0 ignored`. CI's `Tests` workflow fetches the
+  extension and runs the script on both test legs as the "S3 tests" step, with `N` set to the file's
+  listed count by hand: **raise it in the commit that adds a test**. A selection by prefix
+  (`harness_`, `find_`, `write_`, `view_`, `tls_`) runs one family. The `tls_` family reaches the
+  endpoint over `https` through `TestS3::tls_front`, a TLS terminator before the counting proxy,
+  with certificates `TestPki` makes per run (a test CA, an unrelated CA, a wrong-name leaf, a
+  self-signed end-entity one, an intermediate CA with a leaf it signed, and two leaves whose CN
+  alone names the host), and asserts on proxied requests, never on handshakes. Wire tests never return early (the script
+  refuses an early `return`); the fixture panics when it cannot bind or find the extension. Spawned
+  binaries run hermetic (`tests/common/s3.rs`'s `Hermetic`: no `AWS_*`, `DUCKDB_*`, `*_PROXY`,
+  `SSL_CERT_FILE` or `SSL_CERT_DIR`, empty `HOME`, `TMPDIR` and working directory, checked empty
+  afterwards).
 - **Verify by driving the CLI, not just tests.** Use `.agents/factory/bin/temp_index.sh` so a drive
   hits a throwaway index, never a real one. Exit 0 is necessary but not sufficient — assert a concrete
   post-condition (row count, a stdout token, files actually gone/kept).
@@ -562,11 +664,14 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   unless `XDU_EXTENSION_DIR` names another directory. The container image and the HPCCM recipe keep
   the same layout under their prefix. Every release leg runs `packaging/extensions/check.sh` on the
   exact tarball it uploads, under a cold `HOME`, before the upload; it executes every shipped binary
-  and loads the pinned set from the extracted layout. `cargo install` builds carry no
+  and loads the pinned set from the extracted layout, and runs `aws-tls-probe.sh`, which shows the
+  shipped tools find the platform's CA bundle and verify AWS's real chain with it (any HTTP answer
+  to AWS's documented example key passes; a platform smoke check, not acceptance). `cargo install` builds carry no
   extensions. `/xdu-release` cuts versions (bump `Cargo.toml` + `Cargo.lock`, gate, tag, publish);
   see its skill.
 - **Pre-release gate (mirrored by CI and `/xdu-release`):** `cargo fmt --all -- --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` must all pass clean.
+  `cargo test` skips the S3 wire tier; CI runs it through `tests/s3-wire.sh` (see Testing).
 
 ## Working on this codebase as an agent
 

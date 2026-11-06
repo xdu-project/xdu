@@ -25,6 +25,13 @@ struct FileInfo {
 fn main() -> Result<()> {
     let args = XduRmArgs::parse();
 
+    // Deletion through an S3 index is not built. Refuse before the pool, the index, the
+    // extension directory or any query, so nothing about the refusal depends on them.
+    if xdu::s3::is_s3_locator(args.index.as_os_str()) {
+        eprintln!("xdu-rm: S3 indices are not yet supported by xdu-rm");
+        std::process::exit(1);
+    }
+
     // Configure thread pool
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.jobs)

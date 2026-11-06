@@ -88,6 +88,37 @@ jobs:
       - name: Test
         run: cargo test --locked --all-features
 
+      # The S3 wire tests need the pinned httpfs, which nothing in the repository carries. Fetch
+      # it the way a release leg does, with the probe from this build naming engine and platform,
+      # into a directory the binaries never look in by default: a copy under
+      # target/lib/xdu/extensions would let a reader that wrongly loads httpfs for a local index
+      # pass every local test. The tests themselves touch nothing beyond loopback.
+      - name: Fetch the pinned httpfs for the S3 tests
+        run: |
+          set -eu
+          cargo build --locked --all-features --example extension-probe
+          sh packaging/extensions/fetch.sh target/debug/examples/extension-probe "$RUNNER_TEMP/xdu-ext"
+
+      # tests/s3-wire.sh runs tests/s3_tests.rs with --include-ignored and fails unless the passed
+      # count equals the listed count and reaches the minimum, so a wire test that vanished,
+      # skipped or was filtered away turns this step red. The minimum is the file's listed count;
+      # raise it in the commit that adds a test (AGENTS.md, Testing). The last line,
+      # `s3-wire: '' N of N passed`, is the record of what ran.
+      - name: S3 tests
+        env:
+          XDU_TEST_EXTENSION_DIR: ${{ runner.temp }}/xdu-ext
+        run: sh tests/s3-wire.sh "" 53
+
+      # A platform smoke check, not acceptance: the built tools find this runner's CA bundle and
+      # verify AWS's real certificate chain with it, in both TLS stacks, using AWS's documented
+      # example key pair (no account, no secret). Any HTTP answer passes; a certificate error or
+      # no answer fails. Each tool's answering line is printed. The loopback tls_ tests above
+      # are what show verification is on.
+      - name: AWS TLS probe
+        env:
+          HOME: ${{ runner.temp }}/aws-tls-probe-home
+        run: sh packaging/extensions/aws-tls-probe.sh target/debug "$RUNNER_TEMP/xdu-ext"
+
   # Mirrors HyperShell's packaging-metadata job: regenerate the shipped artifacts and fail
   # if any are missing. Because man pages come from doc/*.scd and completions come from
   # src/cli.rs, this catches CLI <-> doc/scd drift at PR time (a new/renamed binary or a
@@ -229,13 +260,34 @@ jobs:
             'OUTDIR/.xdu-complete' \
             '__root__' \
             '2x:.partial suffix' \
-            'st_blocks * 512'
+            'st_blocks * 512' \
+            '2x:s3://BUCKET/PREFIX' '1x:AWS_ACCESS_KEY_ID' '1x:AWS_SECRET_ACCESS_KEY' \
+            '1x:AWS_SESSION_TOKEN' '2x:AWS_PROFILE' '1x:AWS_SHARED_CREDENTIALS_FILE' \
+            '1x:AWS_CONFIG_FILE' '1x:AWS_REGION' '1x:AWS_DEFAULT_REGION' \
+            '1x:AWS_ENDPOINT_URL_S3' '2x:AWS_ENDPOINT_URL' '2x:AWS_CA_BUNDLE'
           # Each of these names its variable twice per page — once as a cross-reference in the
           # flag description, once as the ENVIRONMENT entry — so presence alone is satisfied by
           # whichever copy survived, and corrupting the ENVIRONMENT entry publishes a variable
           # name that does not exist. Counted for the same reason `.partial suffix` is.
-          check share/man/man1/xdu-find.1 '2x:XDU_INDEX'
-          check share/man/man1/xdu-view.1 '2x:XDU_INDEX'
+          # XDU_EXTENSION_DIR follows the same pattern on xdu-find.1 and xdu-view.1: a
+          # cross-reference in S3 INDICES, then its ENVIRONMENT entry. The AWS_* names are
+          # counted, on xdu.1 above as on both reader pages, so a later cross-reference forces a
+          # re-count; AWS_ENDPOINT_URL's count includes the AWS_ENDPOINT_URL_S3 entry, which
+          # contains it, and AWS_PROFILE's includes the example. On xdu.1, s3://BUCKET/PREFIX is
+          # counted twice: under -o and in S3 OUTPUT. AWS_CA_BUNDLE is named twice on each of the
+          # three pages: in the trust paragraph of the S3 section, then its ENVIRONMENT entry.
+          check share/man/man1/xdu-find.1 '2x:XDU_INDEX' '2x:XDU_EXTENSION_DIR' \
+            '2x:lib/xdu/extensions' '1x:cargo install' '1x:release tarball' \
+            '1x:s3://BUCKET/PREFIX' '1x:AWS_ACCESS_KEY_ID' '1x:AWS_SECRET_ACCESS_KEY' \
+            '1x:AWS_SESSION_TOKEN' '2x:AWS_PROFILE' '1x:AWS_SHARED_CREDENTIALS_FILE' \
+            '1x:AWS_CONFIG_FILE' '1x:AWS_REGION' '1x:AWS_DEFAULT_REGION' \
+            '1x:AWS_ENDPOINT_URL_S3' '2x:AWS_ENDPOINT_URL' '2x:AWS_CA_BUNDLE'
+          check share/man/man1/xdu-view.1 '2x:XDU_INDEX' '2x:XDU_EXTENSION_DIR' \
+            '2x:lib/xdu/extensions' '1x:cargo install' '1x:release tarball' \
+            '1x:s3://BUCKET/PREFIX' '1x:AWS_ACCESS_KEY_ID' '1x:AWS_SECRET_ACCESS_KEY' \
+            '1x:AWS_SESSION_TOKEN' '2x:AWS_PROFILE' '1x:AWS_SHARED_CREDENTIALS_FILE' \
+            '1x:AWS_CONFIG_FILE' '1x:AWS_REGION' '1x:AWS_DEFAULT_REGION' \
+            '1x:AWS_ENDPOINT_URL_S3' '2x:AWS_ENDPOINT_URL' '2x:AWS_CA_BUNDLE'
           check share/man/man1/xdu-rm.1   '2x:XDU_INDEX' '2x:XDU_JOBS'
           # A line starting with `.` or `'` is a roff control request: scdoc drops the period
           # silently, and the intuitive `\.` escape destroys the rest of the line. Rewrap instead.

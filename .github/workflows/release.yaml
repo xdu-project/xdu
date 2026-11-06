@@ -12,13 +12,17 @@ on:
   # Build-and-check only: every leg builds, fetches its DuckDB extensions and proves they load
   # from the assembled tarball, so a change that would break a release fails on the pull
   # request instead. Nothing is published, and no job on this path holds a write scope or
-  # reads a secret. The paths are every input that decides whether a tarball's extensions load.
+  # reads a secret. The paths are every input that decides whether a tarball's extensions load,
+  # and the trust source's code, so check.sh's AWS TLS probe re-runs on every release platform
+  # when it changes.
   pull_request:
     paths:
       - .github/workflows/release.yaml
       - packaging/extensions/**
       - examples/**
       - src/engine.rs
+      - src/s3.rs
+      - src/lib.rs
       - .cargo/**
       - Cargo.toml
       - Cargo.lock

@@ -4,12 +4,13 @@
 //! Only the crawler pulls this in; the reader tools (`xdu-find`/`xdu-view`/`xdu-rm`)
 //! never touch it. The pieces here are pure or near-pure: work-queue construction,
 //! per-file record building, and the `PartitionBuffer` that accumulates records and
-//! finalizes them atomically. The concurrency scaffold (shared rayon pool, driver
-//! threads, `thread::scope` error propagation) stays in `src/bin/xdu.rs`.
+//! hands each encoded chunk to an `IndexSink`. The concurrency scaffold (shared rayon
+//! pool, driver threads, `thread::scope` error propagation) stays in `src/bin/xdu.rs`.
 
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
-use std::fs::{self, File, Metadata};
+use std::fs::{self, Metadata};
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -94,6 +95,123 @@ pub fn write_completion_marker(index: &Path, contents: &str) -> Result<()> {
         .with_context(|| format!("Failed to write completion marker: {}", path.display()))
 }
 
+/// Where a run's chunks and its completion marker go.
+///
+/// The crawl drives every destination through these four steps, in the order the
+/// completion-marker invariant fixes: `clear_marker` once every check that can reject the
+/// run has passed, `put_chunk` as each chunk is encoded, `finalize_partition` when a
+/// partition's walk ends, and `write_marker` only on the success path.
+///
+/// `LocalSink` is the local directory, written exactly as before; `crate::s3::S3Sink` is an
+/// S3 prefix. A sink is shared by every driver thread.
+pub trait IndexSink: Send + Sync {
+    /// Check the destination after every source-side check and before anything is written,
+    /// so a destination this run cannot use rejects it with any existing marker intact.
+    fn preflight(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Refuse a top-level source directory this destination cannot hold under its own name.
+    /// Called for every top-level entry before the marker is cleared; a local directory
+    /// holds any name, so the default accepts everything.
+    fn check_top_level(&self, _entries: &[TopEntry], _top_dir: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    /// Remove the previous run's attestation. A missing marker is not an error.
+    fn clear_marker(&self) -> Result<()>;
+
+    /// Store chunk `id` of `partition`. The bytes are a complete Parquet file, moved in so a
+    /// sink that sends them on needs no copy.
+    fn put_chunk(&self, partition: &str, id: usize, bytes: Vec<u8>) -> Result<()>;
+
+    /// Make the `count` chunks this run stored for `partition` the partition's whole
+    /// contents: publish any that are not yet visible, and remove the higher-numbered chunks
+    /// a larger earlier run left. Returns how many stale chunks were removed.
+    fn finalize_partition(&self, partition: &str, count: usize) -> Result<usize>;
+
+    /// Write the completion marker. Only ever called on a run's success path.
+    fn write_marker(&self, contents: &str) -> Result<()>;
+
+    /// Where the completion marker lives, for the record that names it.
+    fn marker_location(&self) -> String;
+}
+
+/// An index in a local directory: each chunk written as `NNNNNN.parquet.partial`, renamed
+/// into place within the same directory when its partition finalizes, the stale tail pruned
+/// up to the first gap, and the marker a file at the index root.
+pub struct LocalSink {
+    outdir: PathBuf,
+}
+
+impl LocalSink {
+    pub fn new(outdir: PathBuf) -> Self {
+        Self { outdir }
+    }
+}
+
+impl IndexSink for LocalSink {
+    fn clear_marker(&self) -> Result<()> {
+        clear_completion_marker(&self.outdir)
+    }
+
+    fn put_chunk(&self, partition: &str, id: usize, bytes: Vec<u8>) -> Result<()> {
+        let partition_dir = self.outdir.join(partition);
+        fs::create_dir_all(&partition_dir).with_context(|| {
+            format!(
+                "Failed to create partition dir: {}",
+                partition_dir.display()
+            )
+        })?;
+
+        // Write to .partial file first; finalize renames it atomically.
+        let partial_path = partition_dir.join(chunk_partial_name(id));
+        fs::write(&partial_path, bytes)
+            .with_context(|| format!("Failed to create file: {}", partial_path.display()))
+    }
+
+    fn finalize_partition(&self, partition: &str, count: usize) -> Result<usize> {
+        let partition_dir = self.outdir.join(partition);
+
+        // Rename all .partial files to .parquet (atomic on POSIX).
+        for chunk_id in 0..count {
+            let partial_path = partition_dir.join(chunk_partial_name(chunk_id));
+            let final_path = partition_dir.join(chunk_final_name(chunk_id));
+            fs::rename(&partial_path, &final_path).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    partial_path.display(),
+                    final_path.display()
+                )
+            })?;
+        }
+
+        // Prune any stale chunks beyond what we just wrote (from a prior larger run).
+        let mut pruned = 0;
+        for chunk_id in count.. {
+            let stale_path = partition_dir.join(chunk_final_name(chunk_id));
+            if stale_path.exists() {
+                fs::remove_file(&stale_path).with_context(|| {
+                    format!("Failed to remove stale chunk: {}", stale_path.display())
+                })?;
+                pruned += 1;
+            } else {
+                break; // No more consecutive chunks
+            }
+        }
+
+        Ok(pruned)
+    }
+
+    fn write_marker(&self, contents: &str) -> Result<()> {
+        write_completion_marker(&self.outdir, contents)
+    }
+
+    fn marker_location(&self) -> String {
+        completion_marker_path(&self.outdir).display().to_string()
+    }
+}
+
 /// The chunk filename that is written first, before atomic finalization.
 ///
 /// Zero-padded sequential ids give a deterministic, gap-free chunk sequence that
@@ -105,6 +223,20 @@ pub fn chunk_partial_name(id: usize) -> String {
 /// The finalized chunk filename a reader globs (`*/*.parquet`).
 pub fn chunk_final_name(id: usize) -> String {
     format!("{:06}.parquet", id)
+}
+
+/// Encode one chunk's rows as a complete Parquet file into `sink`, returning the sink.
+///
+/// The one place chunk bytes are produced: every chunk of every index is written with these
+/// properties, whatever it is written to, so two copies of the encoder cannot drift into two
+/// file formats. Rows take the schema of `batch`, which callers build from `get_schema()`.
+pub fn encode_chunk<W: Write + Send>(sink: W, batch: &RecordBatch) -> Result<W> {
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(sink, batch.schema(), Some(props))?;
+    writer.write(batch)?;
+    Ok(writer.into_inner()?)
 }
 
 /// The seven integer index columns derived from a file's metadata, under the chosen
@@ -365,38 +497,41 @@ impl ChunkBuilders {
     }
 }
 
-/// Per-partition buffer that accumulates records and flushes to Parquet.
+/// Per-partition buffer that accumulates records and flushes them to its sink as Parquet.
 ///
 /// Records are appended straight into the Arrow builders as they arrive, so a path's
 /// bytes are copied once — into the column that gets written — rather than into an
-/// intermediate row struct first. `flush` then only has to `finish` the builders.
+/// intermediate row struct first. `flush` then only has to `finish` the builders, encode
+/// the chunk once into memory and hand the bytes to the sink.
 pub struct PartitionBuffer {
     partition: String,
-    outdir: PathBuf,
+    sink: Arc<dyn IndexSink>,
     builders: ChunkBuilders,
     /// Rows appended since the last flush (the builders do not expose a row count).
     buffered: usize,
     buffsize: usize,
     chunk_counter: usize,
     schema: Arc<Schema>,
-    /// Track all .partial files written for atomic finalization.
-    partial_files: Vec<PathBuf>,
     /// Track statistics for this partition.
     pub file_count: u64,
     pub byte_count: u64,
 }
 
 impl PartitionBuffer {
-    pub fn new(partition: String, outdir: PathBuf, buffsize: usize, schema: Arc<Schema>) -> Self {
+    pub fn new(
+        partition: String,
+        sink: Arc<dyn IndexSink>,
+        buffsize: usize,
+        schema: Arc<Schema>,
+    ) -> Self {
         Self {
             partition,
-            outdir,
+            sink,
             builders: ChunkBuilders::new(buffsize),
             buffered: 0,
             buffsize,
             chunk_counter: 0,
             schema,
-            partial_files: Vec::new(),
             file_count: 0,
             byte_count: 0,
         }
@@ -444,16 +579,6 @@ impl PartitionBuffer {
 
         let chunk_id = self.chunk_counter;
         self.chunk_counter += 1;
-        let partition_dir = self.outdir.join(&self.partition);
-        fs::create_dir_all(&partition_dir).with_context(|| {
-            format!(
-                "Failed to create partition dir: {}",
-                partition_dir.display()
-            )
-        })?;
-
-        // Write to .partial file first; finalize renames it atomically.
-        let partial_path = partition_dir.join(chunk_partial_name(chunk_id));
 
         // `finish` hands over the accumulated buffers and leaves the builders empty, so
         // the next chunk starts from a fresh pre-sized set.
@@ -474,53 +599,15 @@ impl PartitionBuffer {
         )?;
         self.buffered = 0;
 
-        let file = File::create(&partial_path)
-            .with_context(|| format!("Failed to create file: {}", partial_path.display()))?;
-
-        let props = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .build();
-
-        let mut writer = ArrowWriter::try_new(file, self.schema.clone(), Some(props))?;
-        writer.write(&batch)?;
-        writer.close()?;
-
-        self.partial_files.push(partial_path);
-        Ok(())
+        // One encode, into memory; the sink decides how the bytes become a chunk.
+        let bytes = encode_chunk(Vec::new(), &batch)?;
+        self.sink.put_chunk(&self.partition, chunk_id, bytes)
     }
 
-    /// Atomically finalize all .partial files by renaming them and pruning stale chunks.
+    /// Finalize every chunk this buffer flushed and prune the stale tail, through the sink.
     pub fn finalize(&self) -> Result<usize> {
-        let partition_dir = self.outdir.join(&self.partition);
-        let num_chunks = self.partial_files.len();
-
-        // Rename all .partial files to .parquet (atomic on POSIX).
-        for partial_path in &self.partial_files {
-            let final_path = partial_path.with_extension(""); // removes .partial, leaves .parquet
-            fs::rename(partial_path, &final_path).with_context(|| {
-                format!(
-                    "Failed to rename {} to {}",
-                    partial_path.display(),
-                    final_path.display()
-                )
-            })?;
-        }
-
-        // Prune any stale chunks beyond what we just wrote (from a prior larger run).
-        let mut pruned = 0;
-        for chunk_id in num_chunks.. {
-            let stale_path = partition_dir.join(chunk_final_name(chunk_id));
-            if stale_path.exists() {
-                fs::remove_file(&stale_path).with_context(|| {
-                    format!("Failed to remove stale chunk: {}", stale_path.display())
-                })?;
-                pruned += 1;
-            } else {
-                break; // No more consecutive chunks
-            }
-        }
-
-        Ok(pruned)
+        self.sink
+            .finalize_partition(&self.partition, self.chunk_counter)
     }
 }
 
@@ -528,7 +615,13 @@ impl PartitionBuffer {
 mod tests {
     use super::*;
     use crate::get_schema;
+    use std::fs::File;
     use std::io::Write;
+
+    fn local_buffer(outdir: &Path, buffsize: usize) -> PartitionBuffer {
+        let sink: Arc<dyn IndexSink> = Arc::new(LocalSink::new(outdir.to_path_buf()));
+        PartitionBuffer::new("part".to_string(), sink, buffsize, get_schema())
+    }
 
     /// One expected row in schema order: path plus the seven integer columns.
     type TestRow = (String, i64, i64, i64, i64, i64, i64, i64);
@@ -847,7 +940,7 @@ mod tests {
     fn test_finalize_renames_partials_and_prunes_stale_tail() {
         let dir = tempfile::TempDir::new().unwrap();
         let outdir = dir.path().to_path_buf();
-        let mut buf = PartitionBuffer::new("part".to_string(), outdir.clone(), 1, get_schema());
+        let mut buf = local_buffer(&outdir, 1);
 
         // buffsize 1 => each add flushes a chunk. Two records => 000000, 000001.
         buf.add("/part/a", 10, 1000, 1000, 0o644, 0, 50, 60)
@@ -886,7 +979,7 @@ mod tests {
         let outdir = dir.path().to_path_buf();
         // buffsize 2 over 5 rows exercises the auto-flush and the builder reset that
         // follows it, twice, plus a partial final chunk.
-        let mut buf = PartitionBuffer::new("part".to_string(), outdir.clone(), 2, get_schema());
+        let mut buf = local_buffer(&outdir, 2);
 
         let rows: Vec<TestRow> = (0..5)
             .map(|i| {
@@ -972,7 +1065,7 @@ mod tests {
     fn test_finalize_prune_stops_at_first_gap() {
         let dir = tempfile::TempDir::new().unwrap();
         let outdir = dir.path().to_path_buf();
-        let mut buf = PartitionBuffer::new("part".to_string(), outdir.clone(), 100, get_schema());
+        let mut buf = local_buffer(&outdir, 100);
 
         // One flush => a single chunk 000000.
         buf.add("/part/a", 10, 1000, 1000, 0o644, 0, 50, 60)

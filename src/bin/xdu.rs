@@ -18,13 +18,13 @@ use rayon::ThreadPoolBuilder;
 
 use xdu::cli::XduArgs;
 use xdu::crawl::{
-    CrawlStats, EntryError, PartitionBuffer, TopEntry, build_work_queue, classify_io_error,
-    clear_completion_marker, completion_marker_contents, file_measurements, lossy_path,
-    write_completion_marker,
+    CrawlStats, EntryError, IndexSink, LocalSink, PartitionBuffer, TopEntry, build_work_queue,
+    classify_io_error, completion_marker_contents, file_measurements, lossy_path,
 };
+use xdu::s3::{IndexLocator, ProcessEnv, S3Settings, S3Sink};
 use xdu::{
-    COMPLETION_MARKER, LogLevel, SizeMode, format_bytes, format_count, format_log_record,
-    format_partition_progress, format_speed, get_schema, parse_size,
+    LogLevel, SizeMode, format_bytes, format_count, format_log_record, format_partition_progress,
+    format_speed, get_schema, parse_size,
 };
 
 /// Crawl a directory tree using concurrent per-partition walks with a shared thread pool.
@@ -47,6 +47,7 @@ use xdu::{
 /// The run-level completion marker is cleared once pre-flight passes and written by
 /// `main` only on the success path, so an index this run abandons carries no
 /// attestation, while a run rejected before it crawls leaves the previous marker intact.
+/// Every write goes through `sink`, a local directory or an S3 prefix.
 /// Short label for the size mode in the run-start log record.
 ///
 /// Mirrors the flag that selected it (`--apparent-size`, `--block-size SIZE`), defaulting
@@ -62,7 +63,7 @@ fn size_mode_label(mode: SizeMode) -> String {
 
 fn crawl(
     top_dir: &Path,
-    outdir: &Path,
+    sink: &Arc<dyn IndexSink>,
     jobs: usize,
     buffsize: usize,
     size_mode: SizeMode,
@@ -99,6 +100,9 @@ fn crawl(
         });
     }
 
+    // A destination that cannot hold a directory's name as a partition refuses it here,
+    // still before the marker is touched.
+    sink.check_top_level(&entries, top_dir)?;
     let work_queue = build_work_queue(entries, top_dir, partition_filter)?;
     let num_items = work_queue.len();
 
@@ -108,7 +112,7 @@ fn crawl(
     // leaves an index that is visibly unattested rather than one that still claims to be
     // complete — while a run rejected without touching the index leaves an
     // already-complete index still attested.
-    clear_completion_marker(outdir)?;
+    sink.clear_marker()?;
 
     // Progress display
     let mp = MultiProgress::new();
@@ -190,7 +194,7 @@ fn crawl(
                 let schema = schema.clone();
                 let mp_ref = &mp;
                 let global_bar_ref = &global_bar;
-                let outdir = outdir.to_path_buf();
+                let sink = Arc::clone(sink);
 
                 s.spawn(move || -> Result<()> {
                     let bar_style = ProgressStyle::default_spinner()
@@ -244,7 +248,7 @@ fn crawl(
 
                             let mut buffer = PartitionBuffer::new(
                                 item.partition.clone(),
-                                outdir.clone(),
+                                Arc::clone(&sink),
                                 buffsize,
                                 schema.clone(),
                             );
@@ -610,14 +614,20 @@ fn run(is_tty: bool) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("Failed to resolve directory: {}", args.dir.display()))?;
 
-    fs::create_dir_all(&args.outdir).with_context(|| {
-        format!(
-            "Failed to create output directory: {}",
-            args.outdir.display()
-        )
-    })?;
-
-    let outdir = args.outdir.canonicalize()?;
+    // `-o` is an S3 locator only when it starts with `s3://`; anything else is the local
+    // directory it always was, non-UTF-8 bytes included. Nothing is sent to S3 yet.
+    let sink: Arc<dyn IndexSink> = match IndexLocator::parse(args.outdir.as_os_str())? {
+        IndexLocator::Local(outdir) => {
+            fs::create_dir_all(&outdir).with_context(|| {
+                format!("Failed to create output directory: {}", outdir.display())
+            })?;
+            Arc::new(LocalSink::new(outdir.canonicalize()?))
+        }
+        IndexLocator::S3(locator) => {
+            let settings = S3Settings::resolve(&ProcessEnv)?;
+            Arc::new(S3Sink::connect(&locator, &settings)?)
+        }
+    };
 
     let schema = get_schema();
 
@@ -638,9 +648,14 @@ fn run(is_tty: bool) -> Result<()> {
         }
     }
 
+    // The destination's own check, after every source-side one: an S3 prefix is listed once,
+    // which reaches the bucket with the credentials, while any existing marker is still in
+    // place. A local directory was created above and needs nothing more.
+    sink.preflight()?;
+
     let stats = crawl(
         &top_dir,
-        &outdir,
+        &sink,
         args.jobs,
         args.buffsize,
         size_mode,
@@ -710,7 +725,7 @@ fn run(is_tty: bool) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    write_completion_marker(&outdir, &completion_marker_contents(&stats, completed_at))?;
+    sink.write_marker(&completion_marker_contents(&stats, completed_at))?;
 
     // The run is attested; say so on the record. The `Completed` summary above already
     // carried the counts, but only this line names the marker — without it a script
@@ -719,7 +734,7 @@ fn run(is_tty: bool) -> Result<()> {
     if !is_tty {
         let msg = format!(
             "Marker {} written ({} files, {}{})",
-            outdir.join(COMPLETION_MARKER).display(),
+            sink.marker_location(),
             format_count(stats.files),
             format_bytes(stats.bytes),
             summary_info
