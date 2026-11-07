@@ -60,7 +60,7 @@
   `version`") or point at `AGENTS.md` instead of restating it.
 - **Confidence:** high · **Effort:** small
 
-## F4 — `temp_index.sh` drives `<cwd>/target/release` while its build honours `CARGO_TARGET_DIR`
+## F4 — `temp_index.sh` drives `<cwd>/target/release` while its build honours `CARGO_TARGET_DIR` · seen again
 `origin=xdu-review:step2 severity=medium category=tooling status=open target=.agents/factory/bin/temp_index.sh`
 - **What happened:** the review gives each agent its own `CARGO_TARGET_DIR`. With that set, run
   from the worktree root, `temp_index.sh`'s `cargo build --release --bins` finished in 0.66 s
@@ -75,7 +75,7 @@
   `xdu` is missing there.
 - **Confidence:** high · **Effort:** small
 
-## F5 — Three restated copies of the high-blast path list lag `invariants.md`
+## F5 — Three restated copies of the high-blast path list lag `invariants.md` · seen again
 `origin=xdu-review:step3 severity=low category=instruction status=open target=.agents/skills/xdu-review/SKILL.md`
 - **What happened:** this branch widened `invariants.md`'s high-blast list with `src/select.rs`,
   `src/atomic_fs.rs`, `src/relocate.rs` and `src/bin/xdu-mv.rs`. The list restated in
@@ -90,3 +90,18 @@
   that header into the skill at load (`!` command). This widens the effective gate and never
   weakens it.
 - **Confidence:** high · **Effort:** small
+
+## F6 — A later cycle's reviewers get the remediation commit subjects, which name the prior findings
+`origin=xdu-review:step2 severity=medium category=instruction status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** cycle 2 ran the skill's default for a later cycle, a fresh blind pass. Step 2
+  still gives each reviewer `git log --oneline main..HEAD`. On a remediated branch those subjects
+  read "F3 — Hive partitioning off in the selection", "F4 — search-only ancestors", and so on,
+  and include "Review …: cycle 1 — changes-requested". The REVIEW.md they were barred from is
+  restated in the log they were handed.
+- **Skill cause:** Step 2's curated inputs predate later cycles, and Step 3's "fresh blind pass"
+  does not reconcile with them. `xdu-build` tags remediation commits with the finding ids, so
+  every later cycle leaks this way.
+- **Recommended fix:** from `review.cycle` ≥ 1, pass the log as hashes only
+  (`git log --format=%h main..HEAD`), or strip remediation subjects, and say why in Step 2. This
+  strengthens blindness and weakens no gate.
+- **Confidence:** med · **Effort:** small
