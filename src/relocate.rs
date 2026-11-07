@@ -14,8 +14,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 
 use crate::atomic_fs::{
-    self, Access, Crossed, DirHandle, Faults, Moved, NoHook, ParentCache, Placed, Source, Stat,
-    Stop, components, copy_atomic, is_not_a_directory,
+    self, Access, CreatedDirs, Crossed, DirHandle, Faults, Moved, NoHook, ParentCache, Placed,
+    Source, Stat, Stop, components, copy_atomic, is_not_a_directory,
 };
 use crate::cli::{SelectArgs, XduCpArgs, XduMvArgs};
 use crate::select::{Live, Row, Verdict, holds_live, select};
@@ -210,6 +210,9 @@ struct Worker {
 struct Anchors {
     root: DirHandle,
     into: DirHandle,
+    /// The destination directories this run is creating and has not yet flushed, shared by
+    /// every worker (the pool's threads, all in this process).
+    created: CreatedDirs,
 }
 
 /// What `--safe` re-checks each file against: the filters the rows were selected by, and the
@@ -280,7 +283,12 @@ fn copy_one(
     }
     let rel_parent = item.rel.parent().unwrap_or(Path::new(""));
     let walked = worker.dest_parent.get(rel_parent, || {
-        atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent), Access::Read)
+        atomic_fs::walk_create_nofollow(
+            &anchors.into,
+            &components(rel_parent),
+            Access::Read,
+            &anchors.created,
+        )
     });
     let dest_dir = match walked {
         Ok(dir) => dir,
@@ -346,7 +354,12 @@ fn move_one(
     let dest = move || {
         let cache = dest_cache;
         cache.get(rel_parent, || {
-            atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent), Access::Read)
+            atomic_fs::walk_create_nofollow(
+                &anchors.into,
+                &components(rel_parent),
+                Access::Read,
+                &anchors.created,
+            )
         })
     };
     let admit = |stat: &Stat| match safe {
@@ -371,6 +384,7 @@ fn move_one(
                         &anchors.into,
                         &components(rel_parent),
                         Access::Read,
+                        &anchors.created,
                     )
                 });
                 let dest_dir = match walked {
@@ -466,6 +480,7 @@ fn execute(
         root: DirHandle::open_as(Path::new("/"), Access::Search).context("cannot open /")?,
         into: DirHandle::open_as(map.into_dir(), Access::Search)
             .with_context(|| format!("cannot open --into {}", map.into_dir().display()))?,
+        created: CreatedDirs::default(),
     };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)
@@ -724,6 +739,7 @@ mod tests {
         let anchors = Anchors {
             root: DirHandle::open(Path::new("/")).unwrap(),
             into: DirHandle::open(&into).unwrap(),
+            created: CreatedDirs::default(),
         };
         let item = Planned {
             source: source.clone(),
@@ -797,6 +813,7 @@ mod tests {
             let anchors = Anchors {
                 root: DirHandle::open(Path::new("/")).unwrap(),
                 into: DirHandle::open(&into).unwrap(),
+                created: CreatedDirs::default(),
             };
             let item = Planned {
                 source: source.clone(),

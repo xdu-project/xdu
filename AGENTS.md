@@ -622,6 +622,10 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   first, or the file fails before anything is created) before the walk returns, so before a copy
   publishes into it and before a move removes its source. Held by
   `atomic_fs::tests::a_created_directory_is_flushed_into_its_parent_before_the_source_is_removed`.
+  The run's workers are threads of one process sharing one `atomic_fs::CreatedDirs`: a creator
+  registers a path before `mkdirat` and clears it after its flush, and a worker whose plain open
+  finds a registered path flushes the parent itself; a directory that existed before the run is
+  never registered, so its open flushes nothing.
 - **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
   `index_glob` and `index_glob_s3` (which share the one tail that writes the index layout),
   `parquet_source` (which puts that glob into `xdu-find`'s and `xdu-view`'s SQL, as text locally

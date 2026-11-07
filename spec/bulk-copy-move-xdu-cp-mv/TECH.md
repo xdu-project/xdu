@@ -234,7 +234,8 @@ phases:
     relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source
     atomic_fs::tests::a_created_directory_is_flushed_into_its_parent_before_the_source_is_removed
     atomic_fs::tests::a_directory_is_not_created_where_its_parent_cannot_be_flushed
-    atomic_fs::tests::a_directory_another_worker_created_is_flushed_before_the_source_is_removed;
+    atomic_fs::tests::a_directory_another_worker_created_is_flushed_before_the_source_is_removed
+    atomic_fs::tests::a_directory_another_worker_has_not_yet_flushed_is_flushed_before_the_source_is_removed;
     do grep -qF "test $t ... ok" target/p5-lib.log || { echo "P5: $t did not pass"
     >&2; exit 1; }; done; test -f tests/xfs-wire.sh; test -f tests/mv_xfs_tests.rs;
     cargo test --locked --test mv_xfs_tests -- --list >target/p5-xfs-list.log 2>&1;
@@ -812,11 +813,18 @@ is, with one sentence in each PERMISSIONS section. P5 reopens (R5's guarantee).
   creates the directory as a racer would; the test asserts `ParentSynced` precedes
   `SourceUnlinked` on both publish routes. Red with the `EEXIST` arm returning before the flush,
   green with it.
-- **Still open (by the ruling, no flush on a plain open):** a worker whose first open *succeeds*
-  on a directory another worker created moments earlier, and has not yet flushed, does not
-  flush it; the walk cannot tell such a directory from one that existed before the run. Its own
-  file's placement is flushed; the parent chain rests on the creator's flush, which follows its
-  `mkdirat` directly.
+- [x] Foreman ruling, same day, closing the plain-open window: the run's workers are rayon
+  threads of one local pool in one process (`relocate::execute`), so they share one
+  `atomic_fs::CreatedDirs` (`Mutex<HashSet<PathBuf>>`, paths relative to `--into`) in
+  `Anchors`. A creator inserts the path before `mkdirat` and removes it only after its parent
+  flush returns (a failed flush leaves it pending; a failed `mkdirat` removes it). A worker
+  whose plain open succeeds on a pending path flushes the parent itself before returning. A
+  directory that existed before the run is never pending, so its open flushes nothing.
+  `Step::DirCreated` marks the point between `mkdirat` and the flush.
+  `atomic_fs::tests::a_directory_another_worker_has_not_yet_flushed_is_flushed_before_the_source_is_removed`
+  pauses worker A there while worker B opens and moves through the same registry, on both
+  publish routes, and asserts B's `ParentSynced` precedes its `SourceUnlinked`, and that a later
+  open flushes nothing. Red with the pending check disabled, green with it.
 
 ### Remediation gates and notes for the foreman (2026-11-07)
 
