@@ -747,8 +747,8 @@ mod tests {
         }
     }
 
-    /// The review's probe: indexed with `--block-size 1M` at 900 KiB (one 1 MiB block, so
-    /// selected by `--max-size 1500K`), then grown to 1.2 MB (two blocks by that measure).
+    /// A file indexed with `--block-size 1M` at 900 KiB (one 1 MiB block, so selected by
+    /// `--max-size 1500K`), then grown to 1.2 MB (two blocks by that measure).
     /// Both live measures are still under the bound, so only the moved mtime shows the change.
     #[test]
     fn an_unstated_size_measure_also_requires_the_indexed_mtime() {

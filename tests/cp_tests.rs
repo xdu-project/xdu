@@ -1022,7 +1022,7 @@ fn cp_safe_skips_a_file_that_no_longer_matches_each_filter() {
     }
 }
 
-/// The review's probe. An index built with `--block-size 1M` does not record that measure,
+/// An index built with `--block-size 1M` does not record that measure,
 /// so `--safe` cannot recompute it: a file indexed at 900 KiB (one block, under
 /// `--max-size 1500K`) and since grown to 1.2 MB (two blocks) passes both live measures. Its
 /// mtime, moved since the crawl, is what skips it.

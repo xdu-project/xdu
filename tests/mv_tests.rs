@@ -595,7 +595,7 @@ fn mv_safe_skips_a_changed_file_and_leaves_it() {
     }
 }
 
-/// The review's probe, for a move: on a `--block-size 1M` index a file indexed at 900 KiB and
+/// On a `--block-size 1M` index, a file indexed at 900 KiB and
 /// grown to 1.2 MB passes both live measures of `--max-size 1500K`. Its moved mtime keeps it
 /// at its source.
 #[test]
