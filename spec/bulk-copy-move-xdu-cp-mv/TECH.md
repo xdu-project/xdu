@@ -3,11 +3,11 @@ slug: bulk-copy-move-xdu-cp-mv
 title: 'Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine'
 kind: feature
 appetite: big
-status: in_review
+status: blocked
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
 current_phase: done
-last_updated: '2026-11-06'
+last_updated: '2026-11-07'
 phases:
 - id: P1
   name: Selection engine and xdu-cp's atomic, no-replace copy
@@ -220,10 +220,11 @@ phases:
     doc/xdu-rm.1.scd; cargo clippy --locked --all-targets --all-features -- -D warnings;
     cargo fmt --all -- --check; echo P5-GATE-GREEN'
 review:
-  last_reviewed_commit: ''
-  verdict: none
-  blocked_reason: ''
-  cycle: 0
+  last_reviewed_commit: 5c7f2b5
+  verdict: changes-requested
+  blocked_reason: 'review cycle 1: 4 CONFIRMED (invariants §4 drift; --safe block-size;
+    Hive partition; search-only ancestor); human gate'
+  cycle: 1
 ---
 # TECH.md — Bulk copy and move: `xdu-cp` and `xdu-mv` over a shared select-act engine
 

@@ -13,6 +13,12 @@
 
 - **slug:** bulk-copy-move-xdu-cp-mv
 
+## What worked well
+
+- `xdu-review` debate mode: the two blind reviewers' product findings did not overlap. "Block"
+  found the Hive-partition and search-only-ancestor defects, and "ship" found the block-rounded
+  `--safe` gap while proving every R-ID. One reviewer would likely have missed one side.
+
 ## Friction findings
 
 <!-- Real findings are appended below this line by the lifecycle skills. -->
@@ -52,4 +58,35 @@
   so every new binary must also edit a harness file, which a product branch must not do.
 - **Recommended fix:** Drop the number ("every `#[command(...)]` block in `src/cli.rs` sets
   `version`") or point at `AGENTS.md` instead of restating it.
+- **Confidence:** high · **Effort:** small
+
+## F4 — `temp_index.sh` drives `<cwd>/target/release` while its build honours `CARGO_TARGET_DIR`
+`origin=xdu-review:step2 severity=medium category=tooling status=open target=.agents/factory/bin/temp_index.sh`
+- **What happened:** the review gives each agent its own `CARGO_TARGET_DIR`. With that set, run
+  from the worktree root, `temp_index.sh`'s `cargo build --release --bins` finished in 0.66 s
+  into that dir. Then `command -v xdu-cp` inside the drive named
+  `<worktree>/target/release/xdu-cp`, a build from Nov 6 17:57 that predates the merge of `main`.
+  The reviewers were only safe because the brief made their target dir `<export>/target`.
+- **Skill cause:** the skill makes `temp_index.sh` the one way to drive the CLI. The script's own
+  comment says a stale binary is worse than no drive, yet it hard-codes
+  `bindir="$root/target/release"` apart from the target dir cargo builds into.
+- **Recommended fix:** take `bindir` from `${CARGO_TARGET_DIR:-$root/target}/release`, made
+  absolute, or from `cargo metadata --no-deps --format-version 1`'s `target_directory`. Fail if
+  `xdu` is missing there.
+- **Confidence:** high · **Effort:** small
+
+## F5 — Three restated copies of the high-blast path list lag `invariants.md`
+`origin=xdu-review:step3 severity=low category=instruction status=open target=.agents/skills/xdu-review/SKILL.md`
+- **What happened:** this branch widened `invariants.md`'s high-blast list with `src/select.rs`,
+  `src/atomic_fs.rs`, `src/relocate.rs` and `src/bin/xdu-mv.rs`. The list restated in
+  `review-rubric.md` (human sign-off gate), this skill's Safety Principles and
+  `templates/REVIEW.md` still has eight paths. Both blind reviewers flagged it, and the
+  orchestrator had to apply `invariants.md`'s list to see that findings in `select.rs` and
+  `atomic_fs.rs` trigger the gate.
+- **Skill cause:** the list is restated in three harness files. Only a code *move* obliges
+  re-deriving the copies, and a product branch must not edit skill text (F3), so every new
+  high-blast file leaves three stale copies. Same root as F3.
+- **Recommended fix:** replace each copy with a pointer to `invariants.md`'s header, or inject
+  that header into the skill at load (`!` command). This widens the effective gate and never
+  weakens it.
 - **Confidence:** high · **Effort:** small
