@@ -212,9 +212,14 @@ its owner. It never lists or flushes a source directory, so the directory
 holding a source needs search permission too, and the file itself read
 permission. Each directory a copy lands in is flushed to stable storage after
 the copy is given its final name, and a flush needs read permission, so
-*xdu-cp* opens that directory for reading. Where that open is refused, every
-file bound for the directory fails with the directory named on standard
-error, nothing is written in it, and the run exits non-zero.
+*xdu-cp* opens that directory for reading. A directory *xdu-cp* creates is
+flushed into its parent before anything is placed in it, so that parent must
+be readable too. Where such an open is refused, every file bound for the
+directory fails with the directory named on standard error, nothing is
+written or created in it, and the run exits non-zero. *--into* itself is
+opened for search only, so an *--into* this user cannot read is not refused
+up front: only the files placed directly in it, or in a directory created
+directly in it, fail.
 
 # REFUSALS
 

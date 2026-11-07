@@ -231,7 +231,9 @@ phases:
     atomic_fs::tests::move_across_keeps_a_source_whose_mtime_was_restored atomic_fs::tests::move_across_keeps_a_source_swapped_before_the_unlink
     atomic_fs::tests::move_across_rolls_back_when_the_source_unlink_fails atomic_fs::tests::move_across_counts_an_existing_destination_without_copying
     atomic_fs::tests::move_across_carries_metadata relocate::tests::the_production_policy_routes_exdev_to_the_copy_path
-    relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source;
+    relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source
+    atomic_fs::tests::a_created_directory_is_flushed_into_its_parent_before_the_source_is_removed
+    atomic_fs::tests::a_directory_is_not_created_where_its_parent_cannot_be_flushed;
     do grep -qF "test $t ... ok" target/p5-lib.log || { echo "P5: $t did not pass"
     >&2; exit 1; }; done; test -f tests/xfs-wire.sh; test -f tests/mv_xfs_tests.rs;
     cargo test --locked --test mv_xfs_tests -- --list >target/p5-xfs-list.log 2>&1;
@@ -251,9 +253,16 @@ phases:
     src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs src/bin/xdu-mv.rs
     | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//"; then echo "P5: a replacing rename,
     copy or truncating open is in the new code" >&2; exit 1; fi; cargo test --locked
-    >target/p5-all.log 2>&1; git diff --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs
-    doc/xdu-rm.1.scd; cargo clippy --locked --all-targets --all-features -- -D warnings;
-    cargo fmt --all -- --check; echo P5-GATE-GREEN'
+    >target/p5-all.log 2>&1; for t in cp_fails_closed_creating_a_directory_it_cannot_flush
+    mv_fails_closed_creating_a_directory_it_cannot_flush; do grep -qF "test $t ...
+    ok" target/p5-all.log || { echo "P5: $t did not pass" >&2; exit 1; }; done; for
+    f in doc/xdu-cp.1.scd doc/xdu-mv.1.scd; do grep -qF "flushed into its parent"
+    "$f"; grep -qF "is not refused" "$f"; done; grep -qF ''and `xdu-cp` destructive
+    safety.**'' AGENTS.md; if grep -nE "libc::mkdirat" src/atomic_fs.rs | grep -vE
+    "^[0-9]+:[[:space:]]*//" | grep -c . | grep -qvx 1; then echo "P5: mkdirat outside
+    the one flushed create" >&2; exit 1; fi; git diff --quiet edcc163 -- src/bin/xdu-rm.rs
+    tests/rm_tests.rs doc/xdu-rm.1.scd; cargo clippy --locked --all-targets --all-features
+    -- -D warnings; cargo fmt --all -- --check; echo P5-GATE-GREEN'
 review:
   last_reviewed_commit: 5c7f2b5
   verdict: changes-requested
@@ -769,6 +778,35 @@ P2 takes two findings in two commits; it is `done` only after the second.
   above, the unchanged `xdu-rm` gap sentence, and at least six items. It is red on the cycle-1
   §4 (no `xdu-mv`, no `relocate::confirm`) and green now.
 
+### P5 — foreman ruling on the first unfixed note: created directories are flushed
+The foreman ruled (2026-11-07, after `9c8cc32` was pushed) that the parent-flush gap ships fixed
+in this remediation, since `xdu-mv` exists never to leave a file at neither name; that
+`AGENTS.md` invariant 4's title covers all three tools; and that the unreadable `--into` stays as
+is, with one sentence in each PERMISSIONS section. P5 reopens (R5's guarantee).
+- [x] `atomic_fs::walk_create_nofollow` flushes each directory it creates into its parent: the
+  parent is reopened for reading before `mkdirat` (a refusal fails the file with the PERMISSIONS
+  message, naming the parent, before anything is created), then flushed after it, also after a
+  racing worker's `EEXIST`. The walk returns only after every flush, so a move across
+  filesystems removes its source, and a copy publishes, only after the whole created path is
+  durable. `Step::ParentSynced` marks each flush on the existing step seam
+  (`walk_create_nofollow_with`).
+- [x] Tests, red with the flush removed and green with it:
+  `atomic_fs::tests::a_created_directory_is_flushed_into_its_parent_before_the_source_is_removed`
+  (both publish routes: every `ParentSynced` precedes `SourceUnlinked`, and a copy's
+  `Published`; a second walk flushes nothing),
+  `atomic_fs::tests::a_directory_is_not_created_where_its_parent_cannot_be_flushed`,
+  `cp_fails_closed_creating_a_directory_it_cannot_flush`,
+  `mv_fails_closed_creating_a_directory_it_cannot_flush`.
+- [x] Man pages: PERMISSIONS states the created-directory flush and the unreadable `--into`.
+  `AGENTS.md` records the rule and its test; invariant 4 is retitled for all three tools.
+- **Verify:** P5's gate plus the two lib tests, the two integration tests from the full run,
+  both pages' new sentences, the retitled invariant 4, and the predicate that `atomic_fs.rs`
+  has one `mkdirat`, the flushed one. Green on its first run (full suite 343 passed, 0 failed,
+  53 ignored as designed; clippy and fmt clean).
+- **Residual:** a worker that finds a directory another worker has just created, but not yet
+  flushed, does not flush it itself; that file's own placement is flushed, but its parent
+  chain rests on the creating worker's flush, which follows within microseconds.
+
 ### Remediation gates and notes for the foreman (2026-11-07)
 
 - **Gates, local (macOS, APFS, not root):** P1, P2 and P4 gates green. The P4 gate's full
@@ -781,20 +819,16 @@ P2 takes two findings in two commits; it is `done` only after the second.
   was rendered or its literals counted here; the CI packaging step renders both and asserts the
   literals, which this remediation did not change. The Linux `O_PATH` arm was not compiled here.
 - **Found, not fixed (outside the four rulings):**
-  - `walk_create_nofollow` never flushes the parent of a directory it creates. A copy published
-    into a new destination directory is flushed with that directory, but the new directory's own
-    entry in its parent is not, so after a power loss the copy can be unreachable. For a move
-    across filesystems the source is already removed by then, which strains "never at neither
-    name". Pre-existing in cycle 1, not introduced here; a fix flushes each parent after
-    `mkdirat` (needing it opened for reading too).
+  - ~~`walk_create_nofollow` never flushes the parent of a directory it creates.~~ Fixed at
+    the foreman's ruling; see the P5 subsection above.
   - With every anchor now search-only, an `--into` its user cannot read no longer refuses the
-    run up front; each file placed directly in it fails with the PERMISSIONS message instead,
-    while files placed in its subdirectories succeed.
+    run up front; each file placed directly in it fails with the PERMISSIONS message instead.
+    Ruled acceptable; both PERMISSIONS sections now say so.
   - `www/index.html` calls the layout "Hive-partitioned" (a description; `www/` is frozen here),
     and `view_query.rs`'s `partitions_sql` comment says Hive detection yields no column; both
     are named in the new seed.
-  - `AGENTS.md` invariant 4 is still titled "`xdu-rm` destructive safety", though its body
-    covers `xdu-cp` and `xdu-mv`; `invariants.md` §4's title now names all three.
+  - ~~`AGENTS.md` invariant 4 is still titled for `xdu-rm` alone.~~ Retitled at the
+    foreman's ruling.
 
 ---
 

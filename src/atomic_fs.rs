@@ -109,9 +109,7 @@ impl DirHandle {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
-        owned(fd)
-            .map(|fd| DirHandle::new(fd, Access::Read))
-            .map_err(|e| unreadable(e, None, access))
+        owned(fd).map(|fd| DirHandle::new(fd, Access::Read))
     }
 
     /// Fail unless this handle can be flushed, before anything is written that would need it.
@@ -228,7 +226,7 @@ pub fn components(path: &Path) -> Vec<&OsStr> {
 /// fails the walk with a message saying so.
 pub fn walk_nofollow(base: &DirHandle, names: &[&OsStr], last: Access) -> io::Result<DirHandle> {
     let Some((end, above)) = names.split_last() else {
-        return base.reopen(last);
+        return base.reopen(last).map_err(|e| unreadable(e, None, last));
     };
     let mut held: Option<DirHandle> = None;
     for name in above {
@@ -250,39 +248,77 @@ pub fn walk_nofollow(base: &DirHandle, names: &[&OsStr], last: Access) -> io::Re
 /// directory is the only safe answer. Created directories take mode `0777` less the umask; a
 /// racing worker's `EEXIST` is success. As in `walk_nofollow`, the directories on the way are
 /// opened for search only and the last one with `last`.
+///
+/// A created directory is durable only once its entry in its parent is, so each `mkdirat` is
+/// followed by a flush of the parent, which is opened for reading first: a parent that cannot
+/// be read fails the walk before anything is created in it. The walk returns only once every
+/// directory it created is flushed into its parent, so a file placed under it, and a move's
+/// removal of its source, come after.
 pub fn walk_create_nofollow(
     base: &DirHandle,
     names: &[&OsStr],
     last: Access,
 ) -> io::Result<DirHandle> {
-    let Some((end, above)) = names.split_last() else {
-        return base.reopen(last);
-    };
-    let mut held: Option<DirHandle> = None;
-    for name in above {
-        held = Some(open_or_create(
-            held.as_ref().unwrap_or(base),
-            name,
-            Access::Search,
-        )?);
-    }
-    open_or_create(held.as_ref().unwrap_or(base), end, last)
+    walk_create_nofollow_with(base, names, last, &mut NoHook)
 }
 
-/// One step of `walk_create_nofollow`: open `name` in `parent`, creating it first if missing.
-fn open_or_create(parent: &DirHandle, name: &OsStr, access: Access) -> io::Result<DirHandle> {
+pub(crate) fn walk_create_nofollow_with(
+    base: &DirHandle,
+    names: &[&OsStr],
+    last: Access,
+    hook: &mut dyn StepHook,
+) -> io::Result<DirHandle> {
+    let Some((end, above)) = names.split_last() else {
+        return base.reopen(last).map_err(|e| unreadable(e, None, last));
+    };
+    let mut held: Option<DirHandle> = None;
+    let mut parent_name: Option<&OsStr> = None;
+    for name in above {
+        let parent = held.as_ref().unwrap_or(base);
+        held = Some(open_or_create(
+            parent,
+            parent_name,
+            name,
+            Access::Search,
+            hook,
+        )?);
+        parent_name = Some(name);
+    }
+    open_or_create(held.as_ref().unwrap_or(base), parent_name, end, last, hook)
+}
+
+/// One step of `walk_create_nofollow`: open `name` in `parent` (itself named `parent_name`, or
+/// the walk's base when `None`), creating it first if missing and flushing the parent after.
+fn open_or_create(
+    parent: &DirHandle,
+    parent_name: Option<&OsStr>,
+    name: &OsStr,
+    access: Access,
+    hook: &mut dyn StepHook,
+) -> io::Result<DirHandle> {
     let refused = |e: io::Error| unreadable(not_a_directory(e, name), Some(name), access);
     match open_dir_nofollow(parent, name, access) {
         Ok(dir) => Ok(dir),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let flushable = parent
+                .reopen(Access::Read)
+                .map_err(|e| unreadable(e, parent_name, Access::Read))?;
             let c = c_name(name)?;
             let mode: libc::mode_t = 0o777;
             // SAFETY: `parent` is open and `c` a valid C string for the call.
             let made = check(unsafe { libc::mkdirat(parent.raw(), c.as_ptr(), mode) });
             match made {
                 Ok(()) => {}
+                // A racing worker made it; flushing again costs little and means no file is
+                // placed under it before its entry is durable.
                 Err(e) if errno_is(&e, &[libc::EEXIST]) => {}
                 Err(e) => return Err(e),
+            }
+            flushable.sync()?;
+            match hook.at(Step::ParentSynced) {
+                HookAction::Continue => {}
+                HookAction::Fail(e) => return Err(e),
+                HookAction::Abandon => return Err(io::Error::other("walk abandoned")),
             }
             open_dir_nofollow(parent, name, access).map_err(refused)
         }
@@ -542,6 +578,8 @@ pub enum Step {
     /// A cross-filesystem move removed the source name; only the best-effort flush of the
     /// source directory is left.
     SourceUnlinked,
+    /// A destination walk created a directory and flushed its entry into its parent.
+    ParentSynced,
 }
 
 /// Every step `copy_atomic` passes on the native route, in order.
@@ -2107,6 +2145,112 @@ mod tests {
             "only w: no copy and no temp file"
         );
         assert_eq!(read(&base.join("src/w/f")), b"F");
+    }
+
+    /// Records every step, in order.
+    #[derive(Default)]
+    struct Steps(Vec<Step>);
+
+    impl StepHook for Steps {
+        fn at(&mut self, step: Step) -> HookAction {
+            self.0.push(step);
+            HookAction::Continue
+        }
+    }
+
+    /// A directory a walk creates is durable only once its entry in its parent is. Each one
+    /// is flushed into its parent before the walk returns, so before a move across
+    /// filesystems removes its source and before a copy publishes into it.
+    #[test]
+    fn a_created_directory_is_flushed_into_its_parent_before_the_source_is_removed() {
+        let names = [OsStr::new("new"), OsStr::new("deeper")];
+        for (faults, _) in across_routes() {
+            let a = Across::new();
+            let anchor = DirHandle::open_as(&a.out, Access::Search).unwrap();
+            let mut steps = Steps::default();
+            let made =
+                walk_create_nofollow_with(&anchor, &names, Access::Read, &mut steps).unwrap();
+            assert_eq!(steps.0, [Step::ParentSynced, Step::ParentSynced]);
+            let got = move_across_with(
+                &dir(&a.src),
+                OsStr::new("f"),
+                &made,
+                OsStr::new("f"),
+                admit_all,
+                faults,
+                &mut steps,
+            );
+            assert!(
+                matches!(got, Ok(Crossed::Done { .. })),
+                "{faults:?}: {got:?}"
+            );
+            let unlinked = steps
+                .0
+                .iter()
+                .position(|s| *s == Step::SourceUnlinked)
+                .unwrap();
+            let flushed = steps
+                .0
+                .iter()
+                .rposition(|s| *s == Step::ParentSynced)
+                .unwrap();
+            assert!(flushed < unlinked, "{faults:?}: {:?}", steps.0);
+            assert_eq!(read(&a.out.join("new/deeper/f")), a.bytes);
+
+            // The directories now exist: a later walk creates and flushes nothing.
+            let mut again = Steps::default();
+            walk_create_nofollow_with(&anchor, &names, Access::Read, &mut again).unwrap();
+            assert!(again.0.is_empty(), "{:?}", again.0);
+        }
+
+        let a = Across::new();
+        let anchor = DirHandle::open_as(&a.out, Access::Search).unwrap();
+        let mut steps = Steps::default();
+        let made = walk_create_nofollow_with(&anchor, &names, Access::Read, &mut steps).unwrap();
+        let src = open_regular(&a.src, "f");
+        let placed = copy_atomic_with(&src, &made, OsStr::new("f"), Faults::default(), &mut steps);
+        assert!(matches!(placed, Ok(Placed::Done { .. })), "{placed:?}");
+        let published = steps.0.iter().position(|s| *s == Step::Published).unwrap();
+        assert_eq!(&steps.0[..2], [Step::ParentSynced, Step::ParentSynced]);
+        assert!(2 < published);
+    }
+
+    /// The parent of a directory to create must open for reading, to be flushed after. One the
+    /// caller may write but not read (0311) fails the walk, naming it, before anything is
+    /// created in it; so does an `--into` reached with nothing above the new directory.
+    #[test]
+    fn a_directory_is_not_created_where_its_parent_cannot_be_flushed() {
+        if running_as_root() {
+            eprintln!("skipped: root ignores permission bits; this runs as any other user");
+            return;
+        }
+        let t = TempDir::new().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        fs::create_dir_all(base.join("into/w")).unwrap();
+        let unlock = Unlock(vec![base.join("into/w"), base.join("into")]);
+        chmod(&base.join("into/w"), 0o311);
+        let into = DirHandle::open_as(&base.join("into"), Access::Search).unwrap();
+        let mut steps = Steps::default();
+        let names = [OsStr::new("w"), OsStr::new("new")];
+        let err = walk_create_nofollow_with(&into, &names, Access::Read, &mut steps).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("cannot open directory w for reading ("),
+            "{err}"
+        );
+        assert!(steps.0.is_empty());
+
+        chmod(&base.join("into"), 0o311);
+        let err = walk_create_nofollow_with(&into, &[OsStr::new("top")], Access::Read, &mut steps)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("cannot open the directory for reading ("),
+            "{err}"
+        );
+        drop(unlock);
+        assert_eq!(fs::read_dir(base.join("into/w")).unwrap().count(), 0);
+        assert!(!base.join("into/top").exists());
     }
 
     // ---- Same-filesystem move ----

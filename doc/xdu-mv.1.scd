@@ -268,10 +268,14 @@ directory holding a source needs write and search permission, to remove the
 name, and read permission as well: after a move to another filesystem
 *xdu-mv* flushes that directory to stable storage, and a flush needs read
 permission, so it opens every source directory for reading. Each directory a
-file lands in is opened for reading for the same reason. Where such an open
-is refused, every file in or bound for that directory fails with the
+file lands in is opened for reading for the same reason, and a directory
+*xdu-mv* creates is flushed into its parent, which must then be readable,
+before any file moves into it, so before any source is removed. Where such an
+open is refused, every file in or bound for that directory fails with the
 directory named on standard error and stays at its source, and the run exits
-non-zero.
+non-zero. *--into* itself is opened for search only, so an *--into* this user
+cannot read is not refused up front: only the files placed directly in it, or
+in a directory created directly in it, fail.
 
 # REFUSALS
 

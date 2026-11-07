@@ -537,12 +537,13 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    filter would exclude it, because the collision is with the layout, not with the selection. Reserving
    a new name at the index root means adding it to that list in the same commit; the guard iterates the
    list, so the rejection follows by construction.
-4. **`xdu-rm` destructive safety.** Default requires interactive `y/N` (anything but `y`/`yes`
-   aborts); `--dry-run` deletes nothing; `--force` skips the prompt; `--safe` re-stats each file
-   immediately before unlink. **Any deletion combined with `--limit` MUST carry a deterministic
-   `ORDER BY`** so `--dry-run` and the real run select identical rows. `xdu-cp` and `xdu-mv` carry
-   the same gates through the engine, with `ORDER BY path` always and a `--safe` that re-checks
-   every filter; `xdu-mv` removes the source name, so it is destructive at the source.
+4. **`xdu-rm`, `xdu-mv` and `xdu-cp` destructive safety.** Default requires interactive `y/N`
+   (anything but `y`/`yes` aborts); `--dry-run` deletes nothing; `--force` skips the prompt;
+   `--safe` re-stats each file immediately before unlink. **Any deletion combined with `--limit`
+   MUST carry a deterministic `ORDER BY`** so `--dry-run` and the real run select identical rows.
+   `xdu-cp` and `xdu-mv` carry the same gates through the engine, with `ORDER BY path` always and a
+   `--safe` that re-checks every filter; `xdu-mv` removes the source name, so it is destructive at
+   the source.
 5. **DuckDB injection surface.** Every user value reaching `read_parquet(...)`/`WHERE` is an
    injection surface. Route it through one validated escaping/quoting helper (or bound parameters);
    never raw `format!` a partition name or index path into SQL. For an `s3://` index the readers
@@ -617,6 +618,10 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   search-only handle on every platform, because Linux's `fsync` on an `O_PATH` descriptor fails
   and macOS's does not. Held by
   `atomic_fs::tests::a_directory_that_must_be_flushed_is_opened_for_reading_or_fails_closed`.
+  Each directory `walk_create_nofollow` creates is flushed into its parent (opened for reading
+  first, or the file fails before anything is created) before the walk returns, so before a copy
+  publishes into it and before a move removes its source. Held by
+  `atomic_fs::tests::a_created_directory_is_flushed_into_its_parent_before_the_source_is_removed`.
 - **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
   `index_glob` and `index_glob_s3` (which share the one tail that writes the index layout),
   `parquet_source` (which puts that glob into `xdu-find`'s and `xdu-view`'s SQL, as text locally

@@ -1378,3 +1378,31 @@ fn cp_fails_closed_on_a_destination_directory_it_cannot_read() {
     assert_eq!(fx.copied(), ["v/b.dat"]);
     assert_eq!(fs::read_dir(fx.dest("u")).unwrap().count(), 0);
 }
+
+/// A directory `xdu-cp` creates is flushed into its parent before anything is placed in it,
+/// which needs read permission on the parent. Under a destination directory the caller may
+/// write but not read (0311), the file needing a new directory fails, naming the parent, and
+/// nothing is created there.
+#[test]
+fn cp_fails_closed_creating_a_directory_it_cannot_flush() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores permission bits; this runs as any other user");
+        return;
+    }
+    let fx = Fixture::new(&[("u/new/a.dat", 1), ("v/b.dat", 2)]).build();
+    fs::create_dir(fx.dest("u")).unwrap();
+    let unlock = Unlock(vec![fx.dest("u")]);
+    chmod(&fx.dest("u"), 0o311);
+
+    let (out, err, ok) = run_cp(&fx.args(&["--force"]));
+    assert!(!ok, "a failed file exits non-zero");
+    let line = format!(
+        "xdu-cp: {}: cannot open directory u for reading (",
+        fx.src("u/new/a.dat").display()
+    );
+    assert!(err.contains(&line), "{err}");
+    assert_eq!(summary(&out), ["Copied: 1", "Failed: 1"], "{out}");
+    drop(unlock);
+    assert_eq!(fx.copied(), ["v/b.dat"]);
+    assert_eq!(fs::read_dir(fx.dest("u")).unwrap().count(), 0);
+}

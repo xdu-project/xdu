@@ -949,3 +949,31 @@ fn mv_fails_closed_on_a_source_directory_it_cannot_read() {
         "nothing was created for the failed file"
     );
 }
+
+/// A directory `xdu-mv` creates is flushed into its parent before the file moves, so before
+/// any source is removed. Under a destination directory the caller may write but not read
+/// (0311), the file needing a new directory fails, naming the parent, and stays at its source.
+#[test]
+fn mv_fails_closed_creating_a_directory_it_cannot_flush() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores permission bits; this runs as any other user");
+        return;
+    }
+    let fx = Fixture::new(&[("u/new/a.dat", 1), ("v/b.dat", 2)]).build();
+    fs::create_dir(fx.dest("u")).unwrap();
+    let unlock = Unlock(vec![fx.dest("u")]);
+    chmod(&fx.dest("u"), 0o311);
+
+    let (out, err, ok) = run_mv(&fx.args(&["--force"]));
+    assert!(!ok, "a failed file exits non-zero");
+    let line = format!(
+        "xdu-mv: {}: cannot open directory u for reading (",
+        fx.src("u/new/a.dat").display()
+    );
+    assert!(err.contains(&line), "{err}");
+    assert_eq!(summary(&out), ["Moved: 1", "Failed: 1"], "{out}");
+    drop(unlock);
+    assert_eq!(fx.left(), ["u/new/a.dat"]);
+    assert_eq!(fx.moved(), ["v/b.dat"]);
+    assert_eq!(fs::read_dir(fx.dest("u")).unwrap().count(), 0);
+}
