@@ -203,6 +203,19 @@ indexed file /scratch/alice/logs/app.log is copied to
 and with the default *--root* of / the same file is copied to
 /cold/scratch/alice/logs/app.log instead.
 
+# PERMISSIONS
+
+*xdu-cp* reaches each source and each destination one directory at a time,
+and needs only search (execute) permission on a directory it passes through,
+as *cp*(1) does: a directory of mode 0711 is no obstacle to a user other than
+its owner. It never lists or flushes a source directory, so the directory
+holding a source needs search permission too, and the file itself read
+permission. Each directory a copy lands in is flushed to stable storage after
+the copy is given its final name, and a flush needs read permission, so
+*xdu-cp* opens that directory for reading. Where that open is refused, every
+file bound for the directory fails with the directory named on standard
+error, nothing is written in it, and the run exits non-zero.
+
 # REFUSALS
 
 The run stops with a message on standard error, having written nothing, when:

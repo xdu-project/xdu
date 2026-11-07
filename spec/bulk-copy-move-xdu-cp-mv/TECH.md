@@ -6,7 +6,7 @@ appetite: big
 status: in_progress
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
-current_phase: P2
+current_phase: P4
 last_updated: '2026-11-07'
 phases:
 - id: P1
@@ -74,7 +74,7 @@ phases:
     P1-GATE-GREEN'
 - id: P2
   name: xdu-cp carries metadata, re-checks with --safe and counts every outcome
-  status: in_progress
+  status: done
   satisfies:
   - R1
   - R2
@@ -85,25 +85,43 @@ phases:
   parallel: false
   hammerable: false
   hill: uphill
+  attempts: 1
   verify: 'set -eu; mkdir -p target; cargo test --locked --lib >target/p2-lib.log
     2>&1; for t in select::tests::the_live_check_agrees_with_the_sql_on_every_boundary
     select::tests::size_uses_the_measure_that_matches_the_indexed_size select::tests::a_file_that_shrank_below_min_size_fails_the_live_check
     select::tests::a_non_regular_file_never_holds atomic_fs::tests::a_source_written_during_the_copy_is_skipped_and_nothing_published
     atomic_fs::tests::a_refused_chown_is_counted_and_drops_the_set_id_bits atomic_fs::tests::a_refused_owner_still_carries_the_group
-    atomic_fs::tests::metadata_is_set_owner_then_mode_then_times; do grep -qF "test
+    atomic_fs::tests::metadata_is_set_owner_then_mode_then_times select::tests::an_unstated_size_measure_also_requires_the_indexed_mtime
+    atomic_fs::tests::a_walk_passes_a_search_only_ancestor atomic_fs::tests::a_directory_that_must_be_flushed_is_opened_for_reading_or_fails_closed
+    atomic_fs::tests::a_symlinked_source_parent_is_not_followed; do grep -qF "test
     $t ... ok" target/p2-lib.log || { echo "P2: $t did not pass" >&2; exit 1; }; done;
     cargo test --locked --test cp_tests >target/p2-cp.log 2>&1; for t in cp_carries_bytes_mode_atime_and_mtime
     cp_carries_owner_and_group_when_permitted cp_safe_skips_a_file_that_no_longer_matches_each_filter
     cp_safe_keeps_a_file_that_still_matches cp_safe_skips_a_file_replaced_by_a_symlink
     cp_summary_counts_each_outcome_separately cp_never_modifies_a_source cp_keeps_diagnostics_off_stdout
-    cp_verbose_lists_in_path_order; do grep -qF "test $t ... ok" target/p2-cp.log
-    || { echo "P2: $t did not pass" >&2; exit 1; }; done; if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
+    cp_verbose_lists_in_path_order cp_safe_skips_a_file_that_grew_past_the_bound_by_the_index_block_size
+    cp_copies_through_search_only_ancestors cp_fails_closed_on_a_destination_directory_it_cannot_read;
+    do grep -qF "test $t ... ok" target/p2-cp.log || { echo "P2: $t did not pass"
+    >&2; exit 1; }; done; if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
     src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//";
     then echo "P2: a replacing rename, copy or truncating open is in the new code"
-    >&2; exit 1; fi; grep -qF -- "--safe" doc/xdu-cp.1.scd; grep -qiF "indexed size"
-    doc/xdu-cp.1.scd; .agents/factory/bin/temp_index.sh sh -c "set -eu; mkdir dest;
-    r=\$(cd tree && pwd -P); xdu-cp --into dest --root \"\$r\" --safe --force >out.txt;
-    grep -qE \"^Copied: 4\$\" out.txt; cmp tree/alice/data.bin dest/alice/data.bin";
+    >&2; exit 1; fi; cargo test --locked --test mv_tests >target/p2-mv.log 2>&1; for
+    t in mv_safe_skips_a_file_that_grew_past_the_bound_by_the_index_block_size mv_moves_through_search_only_ancestors
+    mv_fails_closed_on_a_source_directory_it_cannot_read; do grep -qF "test $t ...
+    ok" target/p2-mv.log || { echo "P2: $t did not pass" >&2; exit 1; }; done; test
+    "$(id -u)" -ne 0 || echo "P2: running as root, so the permission cases skipped;
+    they run on any other user" >&2; if grep -nE "sync_durable\(" src/atomic_fs.rs
+    src/relocate.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//" | grep -vE "fn sync_durable|sync_durable\((out|self\.fd)\.as_fd\(\)\)";
+    then echo "P2: a directory is flushed without DirHandle::sync" >&2; exit 1; fi;
+    for f in doc/xdu-cp.1.scd doc/xdu-mv.1.scd; do grep -qF "skipped as changed since
+    the index" "$f"; grep -qF "both live measures" "$f"; grep -qF "# PERMISSIONS"
+    "$f"; grep -qF "0711" "$f"; done; grep -qF -- "--safe" doc/xdu-cp.1.scd; grep
+    -qiF "indexed size" doc/xdu-cp.1.scd; .agents/factory/bin/temp_index.sh sh -c
+    "set -eu; mkdir dest; r=\$(cd tree && pwd -P); xdu-cp --into dest --root \"\$r\"
+    --safe --force >out.txt; grep -qE \"^Copied: 4\$\" out.txt; cmp tree/alice/data.bin
+    dest/alice/data.bin; mkdir dest2; chmod 111 tree/alice; rc=0; xdu-cp --into dest2
+    --root \"\$r\" -u alice --force >out2.txt || rc=\$?; chmod 755 tree/alice; test
+    \$rc -eq 0; grep -qE \"^Copied: 2\$\" out2.txt; cmp tree/alice/logs/app.log dest2/alice/logs/app.log";
     cargo test --locked --test rm_tests >target/p2-rm.log 2>&1; git diff --quiet edcc163
     -- src/bin/xdu-rm.rs tests/rm_tests.rs; cargo clippy --locked --all-targets --all-features
     -- -D warnings; cargo fmt --all -- --check; echo P2-GATE-GREEN'
@@ -697,20 +715,40 @@ P2 takes two findings in two commits; it is `done` only after the second.
   `build_index_block_size` and `append_bytes`.
 
 ### P2 — finding 4: search-only ancestors
-- [ ] `atomic_fs`: a directory handle records whether it was opened for reading. Walks open every
-  intermediate component search-only (`O_SEARCH`/`O_PATH`) and the last one as the caller
-  needs; the flush refuses a search-only handle on every platform, so a test on macOS fails as
-  Linux's `fsync` on an `O_PATH` descriptor would.
-- [ ] `xdu-cp` walks its source search-only to the end (it never flushes a source directory);
+- [x] `atomic_fs`: `DirHandle` records whether it was opened for reading (`Access::Search` or
+  `Access::Read`). Walks open every intermediate component search-only (`O_SEARCH` on macOS,
+  `O_PATH` on Linux, read elsewhere) and the last one with the caller's `Access`; a walk with no
+  component reopens its base as `.`. `DirHandle::sync` and `require_flushable` refuse a
+  search-only handle on every platform, so macOS tests fail as Linux's `fsync` on an `O_PATH`
+  descriptor would; `copy_placed` checks before its temp file and `move_across` before copying.
+- [x] `xdu-cp` walks its source search-only to the end (it never flushes a source directory);
   `xdu-mv` opens the source directory for reading (it flushes it after a move across
   filesystems); both open each destination directory for reading (flushed after the publish).
-  The `/` and `--into` anchors are opened search-only. A refused read open fails that file
-  with a message naming the directory and why it must be readable.
-- [ ] Man pages: the permissions each tool needs (search on every ancestor; read on the
-  directories it flushes).
-- [ ] Tests: a 0111 ancestor (what 0711 grants everyone but the owner) for `xdu-cp` and
-  `xdu-mv`, red before and green after; a non-readable flushed directory fails closed with the
-  message. Skipped as root, where permission bits do not apply.
+  The `/` and `--into` anchors are opened search-only. A refused read open fails that file with
+  `cannot open directory NAME for reading (…), which flushing it to stable storage needs`.
+- [x] Man pages: a PERMISSIONS section in each (search on every directory passed; read on the
+  directories flushed; the failure). `AGENTS.md` records the rule and the test that holds it.
+- [x] Tests: `atomic_fs::tests::a_walk_passes_a_search_only_ancestor`,
+  `atomic_fs::tests::a_directory_that_must_be_flushed_is_opened_for_reading_or_fails_closed`,
+  `cp_copies_through_search_only_ancestors` (0111 source and destination ancestors, a 0311
+  source directory), `cp_fails_closed_on_a_destination_directory_it_cannot_read`,
+  `mv_moves_through_search_only_ancestors`,
+  `mv_fails_closed_on_a_source_directory_it_cannot_read`. The four integration tests were red
+  with `atomic_fs.rs` and `relocate.rs` at the F2 commit and green after; the unit tests need
+  the new API. Each skips cleanly as root. `a_symlinked_source_parent_is_not_followed` now
+  walks both ways.
+- **Verify:** P2's gate retuned to every test above, the predicate that no directory is flushed
+  except through `DirHandle::sync` (every other `sync_durable` call flushes a file), the man-page
+  literals of both findings, and a `temp_index` drive copying `-u alice` through a 0111 `alice`.
+- **Build notes (2026-11-07).** The retuned gate went red once (attempt 1): its man-page literal
+  `changed since the index was built` straddles a line break in the source, so the gate now
+  greps `skipped as changed since the index`. Then green. The flush predicate was seen red with
+  one `dest.sync()` put back as `sync_durable(dest.as_fd())`. Not root here, so no permission
+  case skipped. `scdoc` is not installed, so neither page was rendered locally; CI renders.
+- **CI must show (not provable on this host):** the Linux leg compiling the `O_PATH` arm and
+  passing every test above, in particular `a_symlinked_source_parent_is_not_followed` (an
+  `O_PATH|O_NOFOLLOW|O_DIRECTORY` open of a symlink must fail `ENOTDIR`) and the flush of every
+  destination directory (a search-only handle there would fail with `EBADF` only on Linux).
 
 ### P4 — finding 1: invariant §4 covers the new destructive gates
 - [ ] `.agents/factory/invariants.md` §4 names `xdu-cp` and `xdu-mv` and the gates

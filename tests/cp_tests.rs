@@ -1304,3 +1304,77 @@ fn cp_verbose_lists_in_path_order() {
     }
     assert_eq!(summary(&out), ["Copied: 30"]);
 }
+
+// ---- Directory permissions ----
+
+/// Permission bits bind every caller but root, so these cases run as any other user.
+fn running_as_root() -> bool {
+    // SAFETY: geteuid cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Gives each directory back mode 0755 when dropped, so a failed assertion still lets the
+/// temp directory be removed.
+struct Unlock(Vec<PathBuf>);
+
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+/// Mode 0111 gives its owner what 0711 gives every other user: search, no listing. `cp`(1)
+/// copies through such an ancestor, and so does `xdu-cp`, on both sides. A copy never flushes
+/// its source directory, so that one need not be readable either (0311).
+#[test]
+fn cp_copies_through_search_only_ancestors() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores permission bits; this runs as any other user");
+        return;
+    }
+    let fx = Fixture::new(&[("u/sub/a.dat", 1), ("u/sub/b.dat", 2)]).build();
+    fs::create_dir_all(fx.dest("u/sub")).unwrap();
+    let unlock = Unlock(vec![fx.src("u"), fx.src("u/sub"), fx.dest("u")]);
+    chmod(&fx.src("u"), 0o111);
+    chmod(&fx.src("u/sub"), 0o311);
+    chmod(&fx.dest("u"), 0o111);
+
+    let (out, err, ok) = run_cp(&fx.args(&["--force"]));
+    assert!(ok, "{err}");
+    assert_eq!(summary(&out), ["Copied: 2"], "{out}");
+    drop(unlock);
+    assert_eq!(fx.copied(), ["u/sub/a.dat", "u/sub/b.dat"]);
+}
+
+/// A destination directory is flushed after each publish, which needs read permission. One
+/// the caller may write but not read (0311) fails each file bound there, naming the
+/// directory, and nothing is written in it; the other files are copied.
+#[test]
+fn cp_fails_closed_on_a_destination_directory_it_cannot_read() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores permission bits; this runs as any other user");
+        return;
+    }
+    let fx = Fixture::new(&[("u/a.dat", 1), ("v/b.dat", 2)]).build();
+    fs::create_dir(fx.dest("u")).unwrap();
+    let unlock = Unlock(vec![fx.dest("u")]);
+    chmod(&fx.dest("u"), 0o311);
+
+    let (out, err, ok) = run_cp(&fx.args(&["--force"]));
+    assert!(!ok, "a failed file exits non-zero");
+    let line = format!(
+        "xdu-cp: {}: cannot open directory u for reading (",
+        fx.src("u/a.dat").display()
+    );
+    assert!(err.contains(&line), "{err}");
+    assert!(
+        err.contains("which flushing it to stable storage needs"),
+        "{err}"
+    );
+    assert_eq!(summary(&out), ["Copied: 1", "Failed: 1"], "{out}");
+    drop(unlock);
+    assert_eq!(fx.copied(), ["v/b.dat"]);
+    assert_eq!(fs::read_dir(fx.dest("u")).unwrap().count(), 0);
+}

@@ -19,38 +19,140 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// An open directory, the anchor for every `*at` call.
 #[derive(Debug)]
-pub struct DirHandle(OwnedFd);
+pub struct DirHandle {
+    fd: OwnedFd,
+    /// Opened for reading, so it can be flushed. A search-only handle serves every `*at` call
+    /// but not a flush.
+    readable: bool,
+}
+
+/// How a directory is opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Search permission only, which is all that resolving and acting on names under it
+    /// needs, so a directory mode `0711` passes for every user.
+    Search,
+    /// Read permission too, which a flush needs: Linux refuses `fsync` on an `O_PATH`
+    /// descriptor.
+    Read,
+}
+
+/// The open flag for a search-only directory descriptor.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const SEARCH_ONLY: libc::c_int = libc::O_PATH;
+#[cfg(target_os = "macos")]
+const SEARCH_ONLY: libc::c_int = libc::O_SEARCH;
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+const SEARCH_ONLY: libc::c_int = libc::O_RDONLY;
+
+impl Access {
+    fn flag(self) -> libc::c_int {
+        match self {
+            Access::Search => SEARCH_ONLY,
+            Access::Read => libc::O_RDONLY,
+        }
+    }
+}
 
 impl DirHandle {
+    /// Open a directory the operator named for reading, following symlinks in it as the shell
+    /// would.
+    pub fn open(path: &Path) -> io::Result<DirHandle> {
+        DirHandle::open_as(path, Access::Read)
+    }
+
     /// Open a directory the operator named, following symlinks in it as the shell would.
     ///
     /// Only the operator's own `--into` and `/` are opened this way; everything beneath them is
     /// reached through `open_dir_nofollow`.
-    pub fn open(path: &Path) -> io::Result<DirHandle> {
+    pub fn open_as(path: &Path, access: Access) -> io::Result<DirHandle> {
         let c = c_name(path.as_os_str())?;
         // SAFETY: `c` is a valid NUL-terminated string for the duration of the call.
         let fd = unsafe {
             libc::open(
                 c.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                access.flag() | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
-        Ok(DirHandle(owned(fd)?))
+        Ok(DirHandle::new(owned(fd)?, access))
+    }
+
+    fn new(fd: OwnedFd, access: Access) -> DirHandle {
+        DirHandle {
+            fd,
+            readable: access == Access::Read,
+        }
     }
 
     fn raw(&self) -> RawFd {
-        self.0.as_raw_fd()
+        self.fd.as_raw_fd()
     }
 
     fn try_clone(&self) -> io::Result<DirHandle> {
-        Ok(DirHandle(self.0.try_clone()?))
+        Ok(DirHandle {
+            fd: self.fd.try_clone()?,
+            readable: self.readable,
+        })
+    }
+
+    /// This same directory with at least `access`: a clone when it already has it, else a
+    /// fresh open of `.` relative to it, which names the same directory without a path.
+    fn reopen(&self, access: Access) -> io::Result<DirHandle> {
+        if access == Access::Search || self.readable {
+            return self.try_clone();
+        }
+        // SAFETY: `self` is open and the literal a valid C string for the call.
+        let fd = unsafe {
+            libc::openat(
+                self.raw(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        owned(fd)
+            .map(|fd| DirHandle::new(fd, Access::Read))
+            .map_err(|e| unreadable(e, None, access))
+    }
+
+    /// Fail unless this handle can be flushed, before anything is written that would need it.
+    pub fn require_flushable(&self) -> io::Result<()> {
+        if self.readable {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "a directory opened for search only cannot be flushed to stable storage",
+            ))
+        }
+    }
+
+    /// Flush this directory to stable storage. A search-only handle refuses on every
+    /// platform, so a caller that forgets to open for reading fails here as it would on Linux.
+    pub fn sync(&self) -> io::Result<()> {
+        self.require_flushable()?;
+        sync_durable(self.fd.as_fd())
     }
 }
 
 impl AsFd for DirHandle {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
+        self.fd.as_fd()
     }
+}
+
+/// The error for a directory that must be read (to be flushed) and could not be opened for
+/// reading; any other error passes through with its errno intact.
+fn unreadable(e: io::Error, name: Option<&OsStr>, access: Access) -> io::Error {
+    if access != Access::Read || !errno_is(&e, &[libc::EACCES, libc::EPERM]) {
+        return e;
+    }
+    let which = match name {
+        Some(name) => format!("directory {}", name.to_string_lossy()),
+        None => "the directory".to_string(),
+    };
+    io::Error::new(
+        e.kind(),
+        format!("cannot open {which} for reading ({e}), which flushing it to stable storage needs"),
+    )
 }
 
 fn c_name(name: &OsStr) -> io::Result<CString> {
@@ -88,18 +190,22 @@ pub fn is_not_a_directory(e: &io::Error) -> bool {
     errno_is(e, &[libc::ENOTDIR, libc::ELOOP])
 }
 
-/// Open `name` in `parent` as a directory, refusing a symlink.
-pub fn open_dir_nofollow(parent: &DirHandle, name: &OsStr) -> io::Result<DirHandle> {
+/// Open `name` in `parent` as a directory with `access`, refusing a symlink.
+pub fn open_dir_nofollow(
+    parent: &DirHandle,
+    name: &OsStr,
+    access: Access,
+) -> io::Result<DirHandle> {
     let c = c_name(name)?;
     // SAFETY: `parent` is an open descriptor and `c` a valid C string for the call.
     let fd = unsafe {
         libc::openat(
             parent.raw(),
             c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            access.flag() | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
-    Ok(DirHandle(owned(fd)?))
+    Ok(DirHandle::new(owned(fd)?, access))
 }
 
 /// The `Normal` components of a path; a root, `.` or `..` contributes nothing.
@@ -115,12 +221,25 @@ pub fn components(path: &Path) -> Vec<&OsStr> {
 }
 
 /// Descend from `base` through `names` without following any symlink or creating anything.
-pub fn walk_nofollow(base: &DirHandle, names: &[&OsStr]) -> io::Result<DirHandle> {
-    let mut current = base.try_clone()?;
-    for name in names {
-        current = open_dir_nofollow(&current, name)?;
+///
+/// Every directory on the way is opened for search only, so an ancestor its user may search
+/// but not list (mode `0711`) passes, as it does for `cp`(1). The directory the walk ends at is
+/// opened with `last`: `Read` when the caller will flush it, and then a refusal to read it
+/// fails the walk with a message saying so.
+pub fn walk_nofollow(base: &DirHandle, names: &[&OsStr], last: Access) -> io::Result<DirHandle> {
+    let Some((end, above)) = names.split_last() else {
+        return base.reopen(last);
+    };
+    let mut held: Option<DirHandle> = None;
+    for name in above {
+        held = Some(open_dir_nofollow(
+            held.as_ref().unwrap_or(base),
+            name,
+            Access::Search,
+        )?);
     }
-    Ok(current)
+    open_dir_nofollow(held.as_ref().unwrap_or(base), end, last)
+        .map_err(|e| unreadable(e, Some(end), last))
 }
 
 /// Descend from `base` through `names`, creating each missing directory, never following a
@@ -129,29 +248,46 @@ pub fn walk_nofollow(base: &DirHandle, names: &[&OsStr]) -> io::Result<DirHandle
 /// A component that exists as anything but a directory fails the walk: a symlink there could
 /// point a privileged run at any directory on the host, and refusing to create the replica's
 /// directory is the only safe answer. Created directories take mode `0777` less the umask; a
-/// racing worker's `EEXIST` is success.
-pub fn walk_create_nofollow(base: &DirHandle, names: &[&OsStr]) -> io::Result<DirHandle> {
-    let mut current = base.try_clone()?;
-    for name in names {
-        let next = match open_dir_nofollow(&current, name) {
-            Ok(dir) => dir,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let c = c_name(name)?;
-                let mode: libc::mode_t = 0o777;
-                // SAFETY: `current` is open and `c` a valid C string for the call.
-                let made = check(unsafe { libc::mkdirat(current.raw(), c.as_ptr(), mode) });
-                match made {
-                    Ok(()) => {}
-                    Err(e) if errno_is(&e, &[libc::EEXIST]) => {}
-                    Err(e) => return Err(e),
-                }
-                open_dir_nofollow(&current, name).map_err(|e| not_a_directory(e, name))?
-            }
-            Err(e) => return Err(not_a_directory(e, name)),
-        };
-        current = next;
+/// racing worker's `EEXIST` is success. As in `walk_nofollow`, the directories on the way are
+/// opened for search only and the last one with `last`.
+pub fn walk_create_nofollow(
+    base: &DirHandle,
+    names: &[&OsStr],
+    last: Access,
+) -> io::Result<DirHandle> {
+    let Some((end, above)) = names.split_last() else {
+        return base.reopen(last);
+    };
+    let mut held: Option<DirHandle> = None;
+    for name in above {
+        held = Some(open_or_create(
+            held.as_ref().unwrap_or(base),
+            name,
+            Access::Search,
+        )?);
     }
-    Ok(current)
+    open_or_create(held.as_ref().unwrap_or(base), end, last)
+}
+
+/// One step of `walk_create_nofollow`: open `name` in `parent`, creating it first if missing.
+fn open_or_create(parent: &DirHandle, name: &OsStr, access: Access) -> io::Result<DirHandle> {
+    let refused = |e: io::Error| unreadable(not_a_directory(e, name), Some(name), access);
+    match open_dir_nofollow(parent, name, access) {
+        Ok(dir) => Ok(dir),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let c = c_name(name)?;
+            let mode: libc::mode_t = 0o777;
+            // SAFETY: `parent` is open and `c` a valid C string for the call.
+            let made = check(unsafe { libc::mkdirat(parent.raw(), c.as_ptr(), mode) });
+            match made {
+                Ok(()) => {}
+                Err(e) if errno_is(&e, &[libc::EEXIST]) => {}
+                Err(e) => return Err(e),
+            }
+            open_dir_nofollow(parent, name, access).map_err(refused)
+        }
+        Err(e) => Err(refused(e)),
+    }
 }
 
 fn not_a_directory(e: io::Error, name: &OsStr) -> io::Error {
@@ -645,7 +781,7 @@ fn link_route(
 
     let verified = (|| -> Result<(), Stop<NoReplace>> {
         step::<NoReplace>(hook, Step::Linked)?;
-        sync_durable(dp.as_fd())?;
+        dp.sync()?;
         let now = fstatat_nofollow(sp, sn);
         let still = matches!(&now, Ok(s) if s.same_object(&recorded));
         if !still {
@@ -867,6 +1003,7 @@ fn copy_placed(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(Stop::Err(e)),
     }
+    dest.require_flushable()?;
 
     let temp = temp_name();
     let c = c_name(&temp)?;
@@ -908,7 +1045,7 @@ fn copy_placed(
         }
         published = Some(written);
         step::<io::Error>(hook, Step::Published)?;
-        sync_durable(dest.as_fd())?;
+        dest.sync()?;
         step::<io::Error>(hook, Step::DirSynced)?;
         Ok(Placed::Done {
             owner_kept: carried.owner && carried.group,
@@ -1157,7 +1294,7 @@ pub(crate) fn move_across_with(
     if let HookAction::Abandon = hook.at(Step::SourceUnlinked) {
         return Err(Stop::Abandoned);
     }
-    let _ = sync_durable(sp.as_fd());
+    let _ = sp.sync();
     Ok(Crossed::Done { owner_kept })
 }
 
@@ -1170,8 +1307,10 @@ fn vanished() -> io::Error {
 }
 
 /// Fail before copying when this user may not remove a name from the source directory, since
-/// the move's last step would then fail after the whole copy.
+/// the move's last step would then fail after the whole copy, or when the directory was opened
+/// for search only, since its removal could then not be flushed.
 fn source_removable(sp: &DirHandle) -> io::Result<()> {
+    sp.require_flushable()?;
     // SAFETY: `sp` is open and the literal a valid C string for the call.
     let ret = unsafe {
         libc::faccessat(
@@ -1793,7 +1932,7 @@ mod tests {
         let base = dir(&into);
         for names in [["planted", "deeper"], ["plain", "deeper"]] {
             let names: Vec<&OsStr> = names.iter().map(OsStr::new).collect();
-            let err = walk_create_nofollow(&base, &names).unwrap_err();
+            let err = walk_create_nofollow(&base, &names, Access::Read).unwrap_err();
             assert!(err.to_string().contains("is not a directory"), "{err}");
         }
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
@@ -1804,7 +1943,8 @@ mod tests {
                 .is_symlink()
         );
 
-        let made = walk_create_nofollow(&base, &[OsStr::new("a"), OsStr::new("b")]).unwrap();
+        let made =
+            walk_create_nofollow(&base, &[OsStr::new("a"), OsStr::new("b")], Access::Read).unwrap();
         assert!(into.join("a/b").is_dir());
         let src = t.path().join("src");
         fs::create_dir(&src).unwrap();
@@ -1821,15 +1961,152 @@ mod tests {
         put(&base.join("real/f"), b"F");
         std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
 
-        let root = DirHandle::open(Path::new("/")).unwrap();
-        let err = walk_nofollow(&root, &components(&base.join("link"))).unwrap_err();
-        assert!(is_not_a_directory(&err), "{err}");
+        let root = DirHandle::open_as(Path::new("/"), Access::Search).unwrap();
+        for access in [Access::Search, Access::Read] {
+            let err = walk_nofollow(&root, &components(&base.join("link")), access).unwrap_err();
+            assert!(is_not_a_directory(&err), "{access:?}: {err}");
 
-        let parent = walk_nofollow(&root, &components(&base.join("real"))).unwrap();
-        assert!(matches!(
-            open_source(&parent, OsStr::new("f")).unwrap(),
-            Source::Regular(_)
-        ));
+            let parent = walk_nofollow(&root, &components(&base.join("real")), access).unwrap();
+            assert!(matches!(
+                open_source(&parent, OsStr::new("f")).unwrap(),
+                Source::Regular(_)
+            ));
+        }
+    }
+
+    // ---- Directory permissions ----
+
+    /// Permission bits bind every caller but root, so these cases run as any other user.
+    fn running_as_root() -> bool {
+        // SAFETY: geteuid cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    /// Gives each directory back mode 0755 when dropped, so a failed assertion still lets the
+    /// temp directory be removed.
+    struct Unlock(Vec<PathBuf>);
+
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
+    /// Mode 0111 gives its owner what 0711 gives every other user: search, no listing.
+    #[test]
+    fn a_walk_passes_a_search_only_ancestor() {
+        if running_as_root() {
+            eprintln!("skipped: root ignores permission bits; this runs as any other user");
+            return;
+        }
+        let t = TempDir::new().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        fs::create_dir_all(base.join("src/x/sub")).unwrap();
+        put(&base.join("src/x/sub/f"), b"F");
+        fs::create_dir_all(base.join("into/y/sub")).unwrap();
+        let unlock = Unlock(vec![base.join("src/x"), base.join("into/y")]);
+        chmod(&base.join("src/x"), 0o111);
+        chmod(&base.join("into/y"), 0o111);
+
+        let root = DirHandle::open_as(Path::new("/"), Access::Search).unwrap();
+        let into = DirHandle::open_as(&base.join("into"), Access::Search).unwrap();
+        for access in [Access::Search, Access::Read] {
+            let parent = walk_nofollow(&root, &components(&base.join("src/x/sub")), access)
+                .unwrap_or_else(|e| panic!("{access:?}: {e}"));
+            assert!(matches!(
+                open_source(&parent, OsStr::new("f")).unwrap(),
+                Source::Regular(_)
+            ));
+        }
+        let names = [OsStr::new("y"), OsStr::new("sub"), OsStr::new("new")];
+        let made = walk_create_nofollow(&into, &names, Access::Read).unwrap();
+        let placed = copy_atomic(
+            &open_regular(&base.join("src/x/sub"), "f"),
+            &made,
+            OsStr::new("f"),
+        );
+        assert!(matches!(placed, Ok(Placed::Done { .. })), "{placed:?}");
+        drop(unlock);
+        assert_eq!(read(&base.join("into/y/sub/new/f")), b"F");
+    }
+
+    /// Mode 0311 lets its owner create and remove names but not read the directory, which a
+    /// flush needs. Opening it to flush fails, naming it, and nothing is written there.
+    #[test]
+    fn a_directory_that_must_be_flushed_is_opened_for_reading_or_fails_closed() {
+        if running_as_root() {
+            eprintln!("skipped: root ignores permission bits; this runs as any other user");
+            return;
+        }
+        let t = TempDir::new().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        fs::create_dir_all(base.join("src/w")).unwrap();
+        put(&base.join("src/w/f"), b"F");
+        fs::create_dir_all(base.join("into/w")).unwrap();
+        let src = open_regular(&base.join("src/w"), "f");
+        let unlock = Unlock(vec![
+            base.join("src/w"),
+            base.join("into/w"),
+            base.join("into"),
+        ]);
+        chmod(&base.join("src/w"), 0o311);
+        chmod(&base.join("into/w"), 0o311);
+
+        let root = DirHandle::open_as(Path::new("/"), Access::Search).unwrap();
+        let w_path = base.join("src/w");
+        let w = components(&w_path);
+        let err = walk_nofollow(&root, &w, Access::Read).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("cannot open directory w for reading ("),
+            "{err}"
+        );
+        assert!(err.to_string().contains("flushing it to stable storage"));
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        // Search-only, it serves every `*at` call but refuses to be flushed, on every platform.
+        let sp = walk_nofollow(&root, &w, Access::Search).unwrap();
+        assert!(sp.sync().is_err());
+        let into = DirHandle::open_as(&base.join("into"), Access::Search).unwrap();
+        let err = walk_create_nofollow(&into, &[OsStr::new("w")], Access::Read).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("cannot open directory w for reading (")
+        );
+        let search_dest = walk_create_nofollow(&into, &[OsStr::new("w")], Access::Search).unwrap();
+        assert!(copy_atomic(&src, &search_dest, OsStr::new("f")).is_err());
+        // A move whose source directory cannot be flushed fails before copying anything.
+        let readable_dest = dir(&base.join("into"));
+        assert!(
+            move_across(
+                &sp,
+                OsStr::new("f"),
+                &readable_dest,
+                OsStr::new("f"),
+                admit_all
+            )
+            .is_err()
+        );
+
+        // `--into` itself, reached with no component to walk, is reopened for reading.
+        chmod(&base.join("into"), 0o311);
+        let err = walk_create_nofollow(&into, &[], Access::Read).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("cannot open the directory for reading ("),
+            "{err}"
+        );
+
+        drop(unlock);
+        assert_eq!(fs::read_dir(base.join("into/w")).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_dir(base.join("into")).unwrap().count(),
+            1,
+            "only w: no copy and no temp file"
+        );
+        assert_eq!(read(&base.join("src/w/f")), b"F");
     }
 
     // ---- Same-filesystem move ----

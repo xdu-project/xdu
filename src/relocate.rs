@@ -14,8 +14,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 
 use crate::atomic_fs::{
-    self, Crossed, DirHandle, Faults, Moved, NoHook, ParentCache, Placed, Source, Stat, Stop,
-    components, copy_atomic, is_not_a_directory,
+    self, Access, Crossed, DirHandle, Faults, Moved, NoHook, ParentCache, Placed, Source, Stat,
+    Stop, components, copy_atomic, is_not_a_directory,
 };
 use crate::cli::{SelectArgs, XduCpArgs, XduMvArgs};
 use crate::select::{Live, Row, Verdict, holds_live, select};
@@ -204,6 +204,9 @@ struct Worker {
 }
 
 /// The descriptors every worker shares: `/` for source walks and the canonical `--into`.
+///
+/// Both are opened for search only, so neither needs read permission unless a file lands
+/// directly in it, and then the walk reopens it for reading to flush it.
 struct Anchors {
     root: DirHandle,
     into: DirHandle,
@@ -234,6 +237,10 @@ fn live(stat: &Stat) -> Live {
 /// Copy one planned file: walk to its source without following a symlink, open it only if it
 /// is a regular file, re-check it under `--safe` against the `fstat` of the very descriptor
 /// the copy reads, walk to (creating) its destination directory, and place it atomically.
+///
+/// A copy never flushes its source directory, so the source walk needs only search
+/// permission all the way down, as `cp`(1) does. The destination directory is flushed after
+/// the publish, so it is opened for reading.
 fn copy_one(
     anchors: &Anchors,
     worker: &mut Worker,
@@ -244,7 +251,7 @@ fn copy_one(
         return Outcome::Failed("not a file path".to_string());
     };
     let walked = worker.source_parent.get(parent, || {
-        atomic_fs::walk_nofollow(&anchors.root, &components(parent))
+        atomic_fs::walk_nofollow(&anchors.root, &components(parent), Access::Search)
     });
     let source_dir = match walked {
         Ok(dir) => dir,
@@ -273,7 +280,7 @@ fn copy_one(
     }
     let rel_parent = item.rel.parent().unwrap_or(Path::new(""));
     let walked = worker.dest_parent.get(rel_parent, || {
-        atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent))
+        atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent), Access::Read)
     });
     let dest_dir = match walked {
         Ok(dir) => dir,
@@ -310,6 +317,10 @@ pub const CROSSING_REFUSED: &str = "crossing filesystems is not supported by thi
 /// `lstat`, create its destination directory, and rename it. A rename the kernel answers
 /// with `EXDEV` goes where `cross` says: under `Copy`, to `move_across`, which re-checks
 /// `--safe` against the `fstat` of the descriptor it copies from.
+///
+/// The source directory is opened for reading: a move across filesystems flushes it after
+/// removing the source name. So is the destination directory, flushed after a copy's publish.
+/// Every directory above either needs only search permission.
 fn move_one(
     anchors: &Anchors,
     worker: &mut Worker,
@@ -322,7 +333,7 @@ fn move_one(
         return Outcome::Failed("not a file path".to_string());
     };
     let walked = worker.source_parent.get(parent, || {
-        atomic_fs::walk_nofollow(&anchors.root, &components(parent))
+        atomic_fs::walk_nofollow(&anchors.root, &components(parent), Access::Read)
     });
     let source_dir = match walked {
         Ok(dir) => dir,
@@ -335,7 +346,7 @@ fn move_one(
     let dest = move || {
         let cache = dest_cache;
         cache.get(rel_parent, || {
-            atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent))
+            atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent), Access::Read)
         })
     };
     let admit = |stat: &Stat| match safe {
@@ -356,7 +367,11 @@ fn move_one(
             CrossFs::Refuse => Outcome::Failed(CROSSING_REFUSED.to_string()),
             CrossFs::Copy => {
                 let walked = worker.dest_parent.get(rel_parent, || {
-                    atomic_fs::walk_create_nofollow(&anchors.into, &components(rel_parent))
+                    atomic_fs::walk_create_nofollow(
+                        &anchors.into,
+                        &components(rel_parent),
+                        Access::Read,
+                    )
                 });
                 let dest_dir = match walked {
                     Ok(dir) => dir,
@@ -448,8 +463,8 @@ fn execute(
     act: impl Fn(&Anchors, &mut Worker, &Planned) -> Outcome + Sync,
 ) -> Result<Summary> {
     let anchors = Anchors {
-        root: DirHandle::open(Path::new("/")).context("cannot open /")?,
-        into: DirHandle::open(map.into_dir())
+        root: DirHandle::open_as(Path::new("/"), Access::Search).context("cannot open /")?,
+        into: DirHandle::open_as(map.into_dir(), Access::Search)
             .with_context(|| format!("cannot open --into {}", map.into_dir().display()))?,
     };
     let pool = rayon::ThreadPoolBuilder::new()

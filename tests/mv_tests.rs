@@ -876,3 +876,76 @@ fn mv_accepts_every_xdu_find_filter() {
     assert_eq!(fx.moved(), ["alice/old.log"]);
     assert_eq!(fx.left().len(), 4);
 }
+
+// ---- Directory permissions ----
+
+/// Permission bits bind every caller but root, so these cases run as any other user.
+fn running_as_root() -> bool {
+    // SAFETY: geteuid cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Gives each directory back mode 0755 when dropped, so a failed assertion still lets the
+/// temp directory be removed.
+struct Unlock(Vec<PathBuf>);
+
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+/// Mode 0111 gives its owner what 0711 gives every other user: search, no listing. `xdu-mv`
+/// walks through such an ancestor on both sides; only the directories it flushes, the one
+/// holding each source and the one each file lands in, must be readable.
+#[test]
+fn mv_moves_through_search_only_ancestors() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores permission bits; this runs as any other user");
+        return;
+    }
+    let fx = Fixture::new(&[("u/sub/a.dat", 1), ("u/sub/b.dat", 2)]).build();
+    fs::create_dir_all(fx.dest("u/sub")).unwrap();
+    let unlock = Unlock(vec![fx.src("u"), fx.dest("u")]);
+    chmod(&fx.src("u"), 0o111);
+    chmod(&fx.dest("u"), 0o111);
+
+    let (out, err, ok) = run_mv(&fx.args(&["--force"]));
+    assert!(ok, "{err}");
+    assert_eq!(summary(&out), ["Moved: 2"], "{out}");
+    drop(unlock);
+    assert_eq!(fx.moved(), ["u/sub/a.dat", "u/sub/b.dat"]);
+    assert!(fx.left().is_empty());
+}
+
+/// A move across filesystems flushes the source directory after removing the name, so
+/// `xdu-mv` opens every source directory for reading. One the caller may write but not read
+/// (0311) fails each file in it, naming the directory; the files stay where they are.
+#[test]
+fn mv_fails_closed_on_a_source_directory_it_cannot_read() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores permission bits; this runs as any other user");
+        return;
+    }
+    let fx = Fixture::new(&[("u/sub/a.dat", 1), ("v/b.dat", 2)]).build();
+    let unlock = Unlock(vec![fx.src("u/sub")]);
+    chmod(&fx.src("u/sub"), 0o311);
+
+    let (out, err, ok) = run_mv(&fx.args(&["--force"]));
+    assert!(!ok, "a failed file exits non-zero");
+    let line = format!(
+        "xdu-mv: {}: cannot open directory sub for reading (",
+        fx.src("u/sub/a.dat").display()
+    );
+    assert!(err.contains(&line), "{err}");
+    assert_eq!(summary(&out), ["Moved: 1", "Failed: 1"], "{out}");
+    drop(unlock);
+    assert_eq!(fx.left(), ["u/sub/a.dat"]);
+    assert_eq!(fx.moved(), ["v/b.dat"]);
+    assert!(
+        !fx.dest("u").exists(),
+        "nothing was created for the failed file"
+    );
+}

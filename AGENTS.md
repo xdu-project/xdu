@@ -322,7 +322,8 @@ src/
                  # and partition refusals, ONE bound statement (read_parquet(?) with Hive
                  # partitioning off, ORDER BY path), and
                  # holds_live, the --safe re-check of every filter against live metadata
-  atomic_fs.rs   # the filesystem primitives: O_NOFOLLOW component walks, open-only-regular-files,
+  atomic_fs.rs   # the filesystem primitives: O_NOFOLLOW component walks (search-only above the
+                 # directory a call flushes), open-only-regular-files,
                  # rename_noreplace (renameat2/renameatx_np, else a re-checked linkat), copy_atomic
                  # (.xdu-*.part temp, flush, no-replace publish), move_same_fs, move_across (the
                  # cross-filesystem copy, re-check, then unlink), the Faults/StepHook seam
@@ -609,7 +610,13 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   (`atomic_fs::move_across`, taken only when the rename answers `EXDEV`) the source is removed
   only after the copy and its directory are flushed and the source name re-checked against the
   opened file (dev, ino, type, size, mtime, ctime); any earlier exit withdraws the copy, so a file
-  is never at neither name. Never write the source's times there: that moves its ctime.
+  is never at neither name. Never write the source's times there: that moves its ctime. Walks
+  open each directory they pass search-only (`O_PATH` on Linux, `O_SEARCH` on macOS), so a 0711
+  ancestor passes as it does for `cp`(1); a directory that is flushed (each destination directory,
+  and `xdu-mv`'s source directory) is opened `Access::Read`, and `DirHandle::sync` refuses a
+  search-only handle on every platform, because Linux's `fsync` on an `O_PATH` descriptor fails
+  and macOS's does not. Held by
+  `atomic_fs::tests::a_directory_that_must_be_flushed_is_opened_for_reading_or_fails_closed`.
 - **`src/lib.rs`** — `get_schema()` (schema stability), `QueryFilters` (the reader-query injection surface),
   `index_glob` and `index_glob_s3` (which share the one tail that writes the index layout),
   `parquet_source` (which puts that glob into `xdu-find`'s and `xdu-view`'s SQL, as text locally

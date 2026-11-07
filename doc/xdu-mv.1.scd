@@ -259,6 +259,20 @@ the indexed file /projects/carol/runs/r1.h5 is moved to
 and with the default *--root* of / the same file is moved to
 /archive/projects/carol/runs/r1.h5 instead.
 
+# PERMISSIONS
+
+*xdu-mv* reaches each source and each destination one directory at a time,
+and needs only search (execute) permission on a directory it passes through:
+a directory of mode 0711 is no obstacle to a user other than its owner. The
+directory holding a source needs write and search permission, to remove the
+name, and read permission as well: after a move to another filesystem
+*xdu-mv* flushes that directory to stable storage, and a flush needs read
+permission, so it opens every source directory for reading. Each directory a
+file lands in is opened for reading for the same reason. Where such an open
+is refused, every file in or bound for that directory fails with the
+directory named on standard error and stays at its source, and the run exits
+non-zero.
+
 # REFUSALS
 
 The run stops with a message on standard error, having moved nothing and
