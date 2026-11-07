@@ -3,10 +3,10 @@ slug: bulk-copy-move-xdu-cp-mv
 title: 'Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine'
 kind: feature
 appetite: big
-status: in_progress
+status: in_review
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
-current_phase: P4
+current_phase: done
 last_updated: '2026-11-07'
 phases:
 - id: P1
@@ -169,7 +169,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P3-GATE-GREEN'
 - id: P4
   name: Man pages, README and packaging in lockstep
-  status: in_progress
+  status: done
   satisfies:
   - R10
   depends_on:
@@ -197,8 +197,14 @@ phases:
     ./target/release/gen-completions target/p4-comp/bash target/p4-comp/zsh 2>>target/p4-gen.log;
     test -s target/p4-comp/bash/xdu-cp.bash; test -s target/p4-comp/bash/xdu-mv.bash;
     test -s target/p4-comp/zsh/_xdu-cp; test -s target/p4-comp/zsh/_xdu-mv; grep -qF
-    "xdu-cp" AGENTS.md; grep -qF "xdu-mv" .agents/factory/invariants.md; grep -qF
-    "src/atomic_fs.rs" .agents/factory/invariants.md; grep -qF "xdu-cp" issues/manpage-gate-coverage-gaps.md;
+    "xdu-cp" AGENTS.md; sed -n ''/^## 4\./,/^## 5\./p'' .agents/factory/invariants.md
+    >target/p4-s4.txt; for lit in "xdu-mv" "xdu-cp" "y/N" "--dry-run" "--force" "ORDER
+    BY path" "select::holds_live" "deterministic_limit_clause" "relocate::confirm"
+    "destructive at the source" "indexed one" "src/relocate.rs" "today it checks only
+    atime"; do grep -qF -- "$lit" target/p4-s4.txt || { echo "P4: invariants §4 does
+    not name $lit" >&2; exit 1; }; done; test "$(grep -c "^- " target/p4-s4.txt)"
+    -ge 6; grep -qF "xdu-mv" .agents/factory/invariants.md; grep -qF "src/atomic_fs.rs"
+    .agents/factory/invariants.md; grep -qF "xdu-cp" issues/manpage-gate-coverage-gaps.md;
     test -f issues/www-cp-mv-at-release.md; grep -qF "www-cp-mv-at-release" ROADMAP.md;
     grep -qF "xdu-rm.1" issues/xdu-rm-on-shared-engine.md; git diff --quiet edcc163
     -- doc/xdu-rm.1.scd www/; if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
@@ -751,10 +757,44 @@ P2 takes two findings in two commits; it is `done` only after the second.
   destination directory (a search-only handle there would fail with `EBADF` only on Linux).
 
 ### P4 — finding 1: invariant §4 covers the new destructive gates
-- [ ] `.agents/factory/invariants.md` §4 names `xdu-cp` and `xdu-mv` and the gates
-  `AGENTS.md` invariant 4 gives them (prompt, dry run, `--force`, the empty set, `--safe` over
-  every filter, `ORDER BY path` always), parallel to the `xdu-rm` items, with the files that
-  hold them.
+- [x] `.agents/factory/invariants.md` §4 is headed for all three tools and gains three items
+  parallel to the `xdu-rm` ones: the prompt (`relocate::confirm`), the zero-write and
+  zero-removal dry run, `--force`, the empty set and the whole-set refusals before any write;
+  `--safe` over every filter (`select::holds_live`), the regular-file rule, and the size rule of
+  finding 2; and `ORDER BY path` always, `--limit` through `deterministic_limit_clause`. It names
+  `xdu-mv` destructive at the source and the files that hold the gates. The `xdu-rm` items are
+  unchanged. `AGENTS.md` invariant 4 already named these gates and is unchanged; the three stale
+  high-blast copies stay with META F5.
+- **Verify:** P4's gate plus a predicate over the extracted §4 text: every gate and file named
+  above, the unchanged `xdu-rm` gap sentence, and at least six items. It is red on the cycle-1
+  §4 (no `xdu-mv`, no `relocate::confirm`) and green now.
+
+### Remediation gates and notes for the foreman (2026-11-07)
+
+- **Gates, local (macOS, APFS, not root):** P1, P2 and P4 gates green. The P4 gate's full
+  `cargo test --locked`: lib 213, `cp_tests` 32, `mv_tests` 19, `rm_tests` 19, crawl 25,
+  find 9, s3 non-wire 4, every other suite green; ignored 53 (50 S3 wire, 3 `mv_xfs_tests`),
+  as designed. `cargo clippy --all-targets --all-features -D warnings` and `cargo fmt --check`
+  clean.
+- **Not run locally:** the S3 wire tier (no pinned `httpfs` here) and the cross-filesystem tier
+  (the sandbox refuses `hdiutil`); CI covers both. `scdoc` is not installed, so neither man page
+  was rendered or its literals counted here; the CI packaging step renders both and asserts the
+  literals, which this remediation did not change. The Linux `O_PATH` arm was not compiled here.
+- **Found, not fixed (outside the four rulings):**
+  - `walk_create_nofollow` never flushes the parent of a directory it creates. A copy published
+    into a new destination directory is flushed with that directory, but the new directory's own
+    entry in its parent is not, so after a power loss the copy can be unreachable. For a move
+    across filesystems the source is already removed by then, which strains "never at neither
+    name". Pre-existing in cycle 1, not introduced here; a fix flushes each parent after
+    `mkdirat` (needing it opened for reading too).
+  - With every anchor now search-only, an `--into` its user cannot read no longer refuses the
+    run up front; each file placed directly in it fails with the PERMISSIONS message instead,
+    while files placed in its subdirectories succeed.
+  - `www/index.html` calls the layout "Hive-partitioned" (a description; `www/` is frozen here),
+    and `view_query.rs`'s `partitions_sql` comment says Hive detection yields no column; both
+    are named in the new seed.
+  - `AGENTS.md` invariant 4 is still titled "`xdu-rm` destructive safety", though its body
+    covers `xdu-cp` and `xdu-mv`; `invariants.md` §4's title now names all three.
 
 ---
 

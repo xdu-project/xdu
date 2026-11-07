@@ -149,7 +149,7 @@ ordering is load-bearing:
   tail. Every reader goes through them; `xdu-find` and `xdu-view` by way of `lib::parquet_source`,
   which binds the S3 glob. Do not hand-build the glob in a reader.
 
-## 4. `xdu-rm` destructive safety — read before touching `src/bin/xdu-rm.rs`
+## 4. `xdu-rm`, `xdu-mv` and `xdu-cp` destructive safety — read before touching their bins
 
 - Default requires an interactive `y/N` confirmation (anything but `y`/`yes` aborts, deleting nothing);
   `--dry-run` performs **zero** deletions; `--force` skips the prompt; empty match set prints a
@@ -162,6 +162,21 @@ ordering is load-bearing:
 - **Any deletion (or previewable action) combined with `--limit` MUST carry a deterministic
   `ORDER BY`** so `--dry-run` and the real run select **identical** rows. A `LIMIT` without `ORDER BY`
   returns an arbitrary/unstable subset.
+- **`xdu-mv` and `xdu-cp` carry the same gates through the shared engine** (`src/relocate.rs`,
+  `src/select.rs`, `src/bin/xdu-mv.rs`, `src/bin/xdu-cp.rs`). `xdu-mv` removes the source name, so
+  it is destructive at the source; `xdu-cp` writes only under `--into` and never modifies or removes
+  a source. Default requires an interactive `y/N` confirmation on stderr (`relocate::confirm`:
+  anything but `y`/`yes` aborts, moving and writing nothing); `--dry-run` performs **zero** writes
+  and **zero** removals (no file, directory or temp file under `--into`); `--force` skips the
+  prompt; empty match set prints a message and exits 0. The whole selected set is mapped and its
+  refusals checked before the first write, dry run included.
+- Their `--safe` re-checks **every** filter against the live metadata immediately before acting
+  (`select::holds_live`) and skips the file when any no longer holds; without `--safe` too, only a
+  regular file is acted on. A size filter on an index that does not record its size measure must
+  hold under both live measures **and** the live mtime must equal the indexed one. Narrowing any of
+  these checks is a violation.
+- Their selection is **always** `ORDER BY path`, with or without `--limit`, and a limit reuses
+  `deterministic_limit_clause`, so `--dry-run` and the real run select **identical** rows.
 
 ## 5. DuckDB injection surface (all readers and the extension loader)
 
