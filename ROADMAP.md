@@ -274,6 +274,17 @@ it closes the window; the man page lists the race until then.
 *Horizon: near-term · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P5)*
 **Seed:** [`issues/xdu-mv-quarantine-unlink.md`](issues/xdu-mv-quarantine-unlink.md)
 
+## Bulk operations: `xdu-find` and `xdu-rm` read only the columns the crawler wrote
+
+DuckDB turns a `key=value` directory name in every globbed path into a column that shadows the
+row's own. A partition named `size=0`, or an index stored under a `mtime=0` directory, makes every
+row read 0 there, so `xdu-find` lists and `xdu-rm` deletes files their size or time filter should
+have kept. The select-act engine turns the detection off; the other readers should too. High
+priority, because `xdu-rm` deletes what it selects.
+
+*Horizon: near-term, high priority · Depends on: — · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (REVIEW cycle 1 finding 3)*
+**Seed:** [`issues/hive-partition-columns-find-rm.md`](issues/hive-partition-columns-find-rm.md)
+
 ## Permission-aware, access-scoped queries
 
 Once ownership and permissions are indexed, the index itself becomes a way to leak information: a

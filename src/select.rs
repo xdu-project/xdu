@@ -246,6 +246,14 @@ pub fn checked_glob(index: &Path, partition: Option<&str>) -> Result<String, Str
     Ok(index_glob(index, partition))
 }
 
+/// The table function a selection reads: the bound glob, with Hive partitioning off.
+///
+/// DuckDB otherwise detects `key=value` directory names in the paths it globs and turns each
+/// into a column that shadows the file's own: a partition named `size=0`, or an index stored
+/// under `…/mtime=0/`, would make every row's `size` or `mtime` read 0, and the filters would
+/// select files other than the ones the index describes.
+const SELECTION_SOURCE: &str = "read_parquet(?, hive_partitioning = false)";
+
 /// The selection statement and its bound values, as a pure function of the filters.
 ///
 /// The glob is the first bound value and the pattern, when set, the second; every other
@@ -271,7 +279,7 @@ pub fn selection_sql(
     conditions.extend(rest.to_conditions());
 
     let mut sql =
-        String::from("SELECT path, size, uid, gid, mode, atime, mtime FROM read_parquet(?)");
+        format!("SELECT path, size, uid, gid, mode, atime, mtime FROM {SELECTION_SOURCE}");
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
@@ -361,7 +369,8 @@ mod tests {
         let (sql, params) = selection_sql(glob, &filters, None);
         assert_eq!(
             sql,
-            "SELECT path, size, uid, gid, mode, atime, mtime FROM read_parquet(?) \
+            "SELECT path, size, uid, gid, mode, atime, mtime \
+             FROM read_parquet(?, hive_partitioning = false) \
              WHERE regexp_matches(path, ?) ORDER BY path"
         );
         assert_eq!(params, vec![glob.to_string(), "it's$".to_string()]);
@@ -370,7 +379,8 @@ mod tests {
         let (sql, params) = selection_sql(glob, &QueryFilters::default(), None);
         assert_eq!(
             sql,
-            "SELECT path, size, uid, gid, mode, atime, mtime FROM read_parquet(?) ORDER BY path"
+            "SELECT path, size, uid, gid, mode, atime, mtime \
+             FROM read_parquet(?, hive_partitioning = false) ORDER BY path"
         );
         assert_eq!(params, vec![glob.to_string()]);
     }

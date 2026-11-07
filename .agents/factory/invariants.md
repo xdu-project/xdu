@@ -171,8 +171,12 @@ ordering is load-bearing:
   interpolated **raw**, a known exception (binding them is a follow-up seed).
 - The select-act engine behind `xdu-cp` and `xdu-mv` is not under that exception.
   `select::selection_sql` is pure and writes one statement whose local glob is a bound parameter
-  (`read_parquet(?)`), as is a `--regex` pattern (`regexp_matches(path, ?)`); the other predicates
-  come from `QueryFilters::to_conditions` and the order tail is `ORDER BY path`, always. A bound glob
+  (`read_parquet(?, hive_partitioning = false)`), as is a `--regex` pattern
+  (`regexp_matches(path, ?)`). Hive detection is off because a `key=value` name that every globbed
+  path carries (a partition `size=0`, an index under `…/mtime=0/`) would otherwise become a column
+  shadowing the row's own; `cp_tests`' two `hive_style` cases and `mv_tests`' one hold it. The
+  other predicates come from `QueryFilters::to_conditions` and the order tail is `ORDER BY path`,
+  always. A bound glob
   still globs, so `select::checked_glob` refuses, before any SQL, an index path holding a glob
   metacharacter (`*`, `?`, `[`, `\`) and a partition name that is empty, `.` or `..`, or holds `/`
   or a metacharacter. The unit tests `select::tests::the_selection_sql_binds_the_glob_and_the_pattern`,

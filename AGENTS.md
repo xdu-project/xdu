@@ -18,9 +18,13 @@ this file.**
 administration (HPC / enterprise: hundreds of millions to billions of files) where `du`(1) and
 `find`(1) are too slow for regular auditing. You point it at a directory tree; it builds a
 persistent, queryable **Parquet index partitioned by top-level subdirectory** once, then answers
-size/age/pattern questions instantly. The directory names are bare, not Hive `key=value` pairs, so
-DuckDB derives no partition column from them and partition scoping comes from the glob
-(`lib::index_glob`) rather than from partition metadata.
+size/age/pattern questions instantly. The directory names are bare, not Hive `key=value` pairs, and
+partition scoping comes from the glob (`lib::index_glob`) rather than from partition metadata. Bare
+names are a convention, not a guarantee: DuckDB's Hive auto-detection still turns a `key=value` name
+that every globbed path carries (a partition named `size=0`, an index under `…/mtime=0/`) into a
+column that shadows the row's own. The select-act engine reads with `hive_partitioning = false`
+(`src/select.rs`, held by `cp_tests`/`mv_tests`); `xdu-find`, `xdu-rm` and `xdu-view` do not yet
+(`issues/hive-partition-columns-find-rm.md`).
 
 Seven binaries (`Cargo.toml [[bin]]`), six user-facing plus one build helper:
 
@@ -315,7 +319,8 @@ src/
                  # SelectArgs flattened into XduCpArgs/XduMvArgs) — gen-completions + man pages
                  # describe exactly this
   select.rs      # the select-act engine's selection: S3 refusal, marker gates, the glob-metachar
-                 # and partition refusals, ONE bound statement (read_parquet(?), ORDER BY path), and
+                 # and partition refusals, ONE bound statement (read_parquet(?) with Hive
+                 # partitioning off, ORDER BY path), and
                  # holds_live, the --safe re-check of every filter against live metadata
   atomic_fs.rs   # the filesystem primitives: O_NOFOLLOW component walks, open-only-regular-files,
                  # rename_noreplace (renameat2/renameatx_np, else a re-checked linkat), copy_atomic
@@ -544,8 +549,8 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
    partition) as the statement's one parameter, and the marker read binds its URLs too; a local
    index keeps the raw-`format!` glob, a known exception filed as a follow-up. The select-act engine
    (`select::selection_sql`, used by `xdu-cp` and `xdu-mv`) has no such exception: its one
-   statement binds the local glob (`read_parquet(?)`) and the regex, and `select::checked_glob`
-   refuses, before any SQL, an index path holding a glob metacharacter and a partition name that is
+   statement binds the local glob (`read_parquet(?, hive_partitioning = false)`) and the regex,
+   and `select::checked_glob` refuses, before any SQL, an index path holding a glob metacharacter and a partition name that is
    empty, `.` or `..`, or holds `/` or a metacharacter. Credentials reach
    DuckDB only as the bound values of `engine::open_s3_connection`'s one prepared `CREATE SECRET`,
    never as SQL text. The extension path is one too:

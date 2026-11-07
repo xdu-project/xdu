@@ -326,6 +326,24 @@ fn mv_dry_run_and_the_real_run_select_identical_rows_under_limit() {
 /// The S3 refusal precedes everything: a garbage `httpfs` in `XDU_EXTENSION_DIR` would have
 /// printed its own failure had any extension loaded, and a selection would have printed to
 /// stdout. The one refusal line, and nothing written, is the proof none ran.
+/// A partition called `size=0` is a name, not every row's size: a size filter scoped to it
+/// moves the files whose indexed size matches, and no other.
+#[test]
+fn mv_moves_only_the_true_rows_under_a_hive_style_partition() {
+    let fx = Fixture::new(&[("size=0/big.dat", 5_000_000), ("alice/small.dat", 1)]).build();
+    let (out, err, ok) = run_mv(&fx.args(&["-u", "size=0", "--max-size", "1K", "--force"]));
+    assert!(ok, "{err}");
+    assert!(out.contains("No matching files found."), "{out}");
+    assert!(fx.nothing_under_into());
+    assert_eq!(fx.left(), ["alice/small.dat", "size=0/big.dat"]);
+
+    let (out, err, ok) = run_mv(&fx.args(&["-u", "size=0", "--min-size", "1M", "--force"]));
+    assert!(ok, "{err}");
+    assert_eq!(summary(&out), ["Moved: 1"], "{out}");
+    assert_eq!(fx.moved(), ["size=0/big.dat"]);
+    assert_eq!(meta(&fx.dest("size=0/big.dat")).len(), 5_000_000);
+}
+
 #[test]
 fn mv_refuses_an_s3_index_before_anything() {
     let extensions = TempDir::new().unwrap();

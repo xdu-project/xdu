@@ -390,6 +390,43 @@ fn cp_selects_the_right_rows_with_a_quote_in_the_index_and_partition() {
     );
 }
 
+/// A `key=value` directory name is a name like any other: a partition called `size=0` must
+/// not stand in for its rows' sizes, or a size filter selects files the index does not describe.
+#[test]
+fn cp_selects_the_true_rows_under_a_hive_style_partition() {
+    let fx = Fixture::new(&[("size=0/big.dat", 5_000_000), ("alice/small.dat", 1)]).build();
+    let big = fx.src("size=0/big.dat").display().to_string();
+    let (out, err, ok) = run_cp(&fx.args(&["-u", "size=0", "--max-size", "1K", "-n"]));
+    assert!(ok, "{err}");
+    assert!(out.contains("No matching files found."), "{out}");
+    let (out, err, ok) = run_cp(&fx.args(&["-u", "size=0", "--min-size", "1M", "-n"]));
+    assert!(ok, "{err}");
+    assert_eq!(dry_run_sources(&out), [big], "{out}");
+    let (out, err, ok) = run_cp(&fx.args(&["-u", "size=0", "--max-size", "1K", "--force"]));
+    assert!(ok, "{err}");
+    assert!(out.contains("No matching files found."), "{out}");
+    assert!(fx.nothing_under_into());
+}
+
+/// An index stored under a `mtime=0` directory must not give every row an mtime of 0. The
+/// files were written moments ago, so none is older than ten years by mtime.
+#[test]
+fn cp_selects_the_true_rows_from_an_index_under_a_hive_style_directory() {
+    let fx = Fixture::with_index_name(&[("alice/a.dat", 10), ("bob/b.dat", 20)], "mtime=0/index");
+    fs::create_dir_all(fx.index.parent().unwrap()).unwrap();
+    let fx = fx.build();
+    let (out, err, ok) = run_cp(&fx.args(&["--mtime-older-than", "3650", "-n"]));
+    assert!(ok, "{err}");
+    assert!(out.contains("No matching files found."), "{out}");
+    let (out, err, ok) = run_cp(&fx.args(&["--mtime-newer-than", "1", "--min-size", "15", "-n"]));
+    assert!(ok, "{err}");
+    assert_eq!(
+        dry_run_sources(&out),
+        [fx.src("bob/b.dat").display().to_string()],
+        "{out}"
+    );
+}
+
 /// A bound glob still globs: an index at `idx[ab]` would read a sibling `idxa`. The engine
 /// refuses the path rather than act on another index's files.
 #[test]

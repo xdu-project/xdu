@@ -3,10 +3,10 @@ slug: bulk-copy-move-xdu-cp-mv
 title: 'Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine'
 kind: feature
 appetite: big
-status: blocked
+status: in_progress
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
-current_phase: done
+current_phase: P2
 last_updated: '2026-11-07'
 phases:
 - id: P1
@@ -23,7 +23,7 @@ phases:
   parallel: false
   hammerable: false
   hill: downhill
-  attempts: 1
+  attempts: 2
   verify: 'set -eu; mkdir -p target; cargo test --locked --lib >target/p1-lib.log
     2>&1; for t in select::tests::the_selection_sql_binds_the_glob_and_the_pattern
     select::tests::the_selection_always_orders_by_path_once select::tests::the_selection_reuses_query_filters_predicates
@@ -43,9 +43,10 @@ phases:
     cp_counts_an_existing_destination_and_exits_non_zero cp_declined_prompt_writes_nothing
     cp_accepted_prompt_copies cp_empty_match_exits_zero cp_skips_a_symlink_at_the_source_path
     cp_skips_a_fifo_and_a_directory_at_the_source_path cp_accepts_every_xdu_find_filter
-    cp_reports_failures_on_stderr_and_exits_non_zero; do grep -qF "test $t ... ok"
-    target/p1-cp.log || { echo "P1: $t did not pass" >&2; exit 1; }; done; if grep
-    -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
+    cp_reports_failures_on_stderr_and_exits_non_zero cp_selects_the_true_rows_under_a_hive_style_partition
+    cp_selects_the_true_rows_from_an_index_under_a_hive_style_directory; do grep -qF
+    "test $t ... ok" target/p1-cp.log || { echo "P1: $t did not pass" >&2; exit 1;
+    }; done; if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
     src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//";
     then echo "P1: a replacing rename, copy or truncating open is in the new code"
     >&2; exit 1; fi; if grep -nE "read_parquet\([^?]|rayon::|crate::(atomic_fs|relocate)"
@@ -58,12 +59,22 @@ phases:
     ! -e dest/bob; test -f tree/alice/data.bin; if xdu-cp --into dest --root \"\$r\"
     -u alice --force >/dev/null; then echo existing must exit non-zero >&2; exit 1;
     fi; test \"\$(xdu-cp --into dest --root \"\$r\" -n | grep -c -- \" -> \")\" -eq
-    4"; cargo test --locked --test rm_tests >target/p1-rm.log 2>&1; git diff --quiet
-    edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs; cargo clippy --locked --all-targets
-    --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN'
+    4"; cargo test --locked --test mv_tests >target/p1-mv.log 2>&1; grep -qF "test
+    mv_moves_only_the_true_rows_under_a_hive_style_partition ... ok" target/p1-mv.log;
+    if grep -n "read_parquet(" src/select.rs src/relocate.rs src/bin/xdu-cp.rs src/bin/xdu-mv.rs
+    | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//" | grep -vF "hive_partitioning = false";
+    then echo "P1: a select-act read_parquet leaves Hive partitioning on" >&2; exit
+    1; fi; if grep -nF "derives no partition column" AGENTS.md .agents/factory/invariants.md;
+    then echo "P1: the false no-partition-column claim is live" >&2; exit 1; fi; grep
+    -qF "hive_partitioning = false" AGENTS.md; test -f issues/hive-partition-columns-find-rm.md;
+    grep -qF "Priority: high" issues/hive-partition-columns-find-rm.md; grep -qF "hive-partition-columns-find-rm"
+    ROADMAP.md; cargo test --locked --test rm_tests >target/p1-rm.log 2>&1; git diff
+    --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs; cargo clippy --locked
+    --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo
+    P1-GATE-GREEN'
 - id: P2
   name: xdu-cp carries metadata, re-checks with --safe and counts every outcome
-  status: done
+  status: in_progress
   satisfies:
   - R1
   - R2
@@ -140,7 +151,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P3-GATE-GREEN'
 - id: P4
   name: Man pages, README and packaging in lockstep
-  status: done
+  status: in_progress
   satisfies:
   - R10
   depends_on:
@@ -625,6 +636,81 @@ quarantine hardening) with a `ROADMAP.md` entry; run the deferral ledger above w
 `relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source`, `grep -qiF
 "crossing filesystems" doc/xdu-mv.1.scd`, `test -f issues/xdu-mv-cross-filesystem.md`, its
 ROADMAP grep, and the `rm_tests`/diff/clippy/fmt tail.
+
+---
+
+## Remediation — review cycle 1 (foreman rulings, 2026-11-07)
+
+[`REVIEW.md`](REVIEW.md) cycle 1 returned changes-requested with four CONFIRMED findings and
+triggered the human gate (findings in `src/select.rs` and `src/atomic_fs.rs`, and invariant §4).
+The foreman signed the gate off and ruled on each fix's shape. This is the remediation plan; each
+finding reopens the phase whose `satisfies` covers it, and each fix carries a test that was red
+before it and green after. No `GOAL.md` R-ID changes. META F5 (three stale copies of the
+high-blast list) stays open for `/xdu-harness` and is not touched here.
+
+| Finding | Ruling | Phase |
+|---------|--------|-------|
+| 1 (HIGH) §4 covers only `xdu-rm` | Widen `invariants.md` §4 to the gates `AGENTS.md` invariant 4 now names for `xdu-cp` and `xdu-mv`, worded parallel to the `xdu-rm` items | P4 |
+| 2 (MEDIUM) `--safe` size on an index of unknown size mode | No index-format change (§1 untouched). When the index does not record its size mode and a size filter is given, `--safe` also requires the live mtime to equal the indexed mtime; a file changed since the crawl fails closed as changed. The both-measures check stays. Both man pages state exactly this | P2 |
+| 3 (MEDIUM) Hive `key=value` names rewrite columns | Turn DuckDB's Hive detection off in the select-act reader only; correct `AGENTS.md`'s false sentence; seed `xdu-find`/`xdu-rm`'s share (high priority), touching neither them nor `view_query.rs` | P1 |
+| 4 (MEDIUM) search-only ancestor fails every file | Walk intermediate source and destination components without read permission (`O_SEARCH` on macOS, `O_PATH` on Linux). §2 does not weaken: a directory that is flushed is still opened so that the flush works, and where that open is refused the file fails closed with a clear message, stated in the man pages | P2 |
+
+P2 takes two findings in two commits; it is `done` only after the second.
+
+### P1 — finding 3: Hive partitioning off in the selection reader
+- [x] `src/select.rs`: the selection reads `read_parquet(?, hive_partitioning = false)`
+  (`SELECTION_SOURCE`); the SQL-text tests pin it.
+- [x] `cp_selects_the_true_rows_under_a_hive_style_partition` (`-u size=0` with `--max-size 1K`
+  selects nothing, `--min-size 1M` the 5 MB file),
+  `cp_selects_the_true_rows_from_an_index_under_a_hive_style_directory` (an index under
+  `mtime=0/` selects nothing by `--mtime-older-than 3650`), and
+  `mv_moves_only_the_true_rows_under_a_hive_style_partition`. All three were red with the
+  option removed and green with it.
+- [x] Sweep: `AGENTS.md`'s project paragraph claimed DuckDB "derives no partition column" from
+  the layout; it now says bare names are a convention, names the engine as covered and the other
+  readers as not. No other live site made the claim; `www/` calls the layout "Hive-partitioned",
+  a description rather than a reader claim, and is frozen on this branch (P4's diff gate).
+- [x] Seed `issues/hive-partition-columns-find-rm.md` (high priority: destructive in `xdu-rm`;
+  names `view_query.rs` for the same pass) with its `ROADMAP.md` entry.
+- **Verify:** the P1 gate plus the three tests, the predicate that every non-comment
+  `read_parquet(` in the engine's files carries `hive_partitioning = false`, the false phrase
+  absent from `AGENTS.md` and `invariants.md`, and the seed and ROADMAP pair.
+- **Build notes (2026-11-07).** The retuned gate went red once on a clippy
+  `cloned_ref_to_slice_refs` in the new `cp_tests` case (attempt 2), then green. The predicate
+  was seen red with the option removed. The same sweep updated `AGENTS.md`'s module map and
+  invariant 5 text and `invariants.md` §5, which quoted the statement as `read_parquet(?)`.
+
+### P2 — finding 2: `--safe` size with an unrecorded size mode
+- [ ] `select::holds_live` takes the row's indexed mtime. With no recorded size mode and a
+  `--min-size` or `--max-size` filter, a live mtime other than the indexed one fails as
+  `changed since the index was built`, after the both-measures size checks.
+- [ ] `relocate::Planned` carries the row's indexed mtime to both workers.
+- [ ] `doc/xdu-cp.1.scd` and `doc/xdu-mv.1.scd` SAFE MODE state the rule and its one-second
+  resolution.
+- [ ] Tests: the library's size cases with a moved mtime, and the review's `--block-size`
+  grew-past-the-bound probe for `xdu-cp` and `xdu-mv`, red before and green after.
+
+### P2 — finding 4: search-only ancestors
+- [ ] `atomic_fs`: a directory handle records whether it was opened for reading. Walks open every
+  intermediate component search-only (`O_SEARCH`/`O_PATH`) and the last one as the caller
+  needs; the flush refuses a search-only handle on every platform, so a test on macOS fails as
+  Linux's `fsync` on an `O_PATH` descriptor would.
+- [ ] `xdu-cp` walks its source search-only to the end (it never flushes a source directory);
+  `xdu-mv` opens the source directory for reading (it flushes it after a move across
+  filesystems); both open each destination directory for reading (flushed after the publish).
+  The `/` and `--into` anchors are opened search-only. A refused read open fails that file
+  with a message naming the directory and why it must be readable.
+- [ ] Man pages: the permissions each tool needs (search on every ancestor; read on the
+  directories it flushes).
+- [ ] Tests: a 0111 ancestor (what 0711 grants everyone but the owner) for `xdu-cp` and
+  `xdu-mv`, red before and green after; a non-readable flushed directory fails closed with the
+  message. Skipped as root, where permission bits do not apply.
+
+### P4 — finding 1: invariant §4 covers the new destructive gates
+- [ ] `.agents/factory/invariants.md` §4 names `xdu-cp` and `xdu-mv` and the gates
+  `AGENTS.md` invariant 4 gives them (prompt, dry run, `--force`, the empty set, `--safe` over
+  every filter, `ORDER BY path` always), parallel to the `xdu-rm` items, with the files that
+  hold them.
 
 ---
 
