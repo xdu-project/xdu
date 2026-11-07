@@ -454,3 +454,187 @@ cycle-1 ruling required. No scope creep.
 - **STOP for foreman sign-off before `/xdu-build`; nothing was remediated.** Cycle 3 is the last
   review the loop allows, so the foreman's choice for finding 1 is to remediate it as described
   above, or to rule the documented behaviour acceptable.
+
+## Review cycle 3 — changes-requested (2026-11-07)
+
+- **Reviewed commit:** `2acf8aa` (pushed head; remediation `8a870f5..2acf8aa`)  ·  **Base:** `main`
+  ·  **Date:** 2026-11-07
+- **Verdict:** changes-requested (1 CONFIRMED: LOW; 0 PLAUSIBLE). **Human gate triggered.**
+- **Cycle:** 3 of ≤3, the last review the loop allows. The verdict is not approved, so the foreman
+  takes it to the human.
+
+Mode: **scoped to verifying the remediation**, not a fresh pass over the full diff. The foreman,
+acting for the human, set this scope, as the skill allows for a later cycle. One fresh blind
+reviewer (A) got GOAL.md inline in full, the remediation diff command
+`git diff 8a870f5..2acf8aa -- . ':(exclude)spec/'` with its log, and its own `git archive` export of
+`2acf8aa` without `spec/`. The export was refreshed in place over the warm `target/` and checked blob
+by blob: 166 blobs, 0 mismatches, no extra files. `review-rubric.md` and `invariants.md` were passed
+by path inside the export, `cmp`-identical to HEAD's copies. A was told cycle 2's finding 1 in
+neutral terms, and told that finding 2 is an accepted residual not to re-report. A was barred from
+`spec/` (PLAN, TECH, META and REVIEW included) and from other contexts' scratch. A finding outside
+the diff counted only if the remediation caused it. The completeness sub-pass was skipped at the
+foreman's direction.
+
+Contract drift: none since cycle 1. `GOAL.md`'s only post-shape commits are still `edcc163` and
+`3ce7375`, the foreman's approved rulings. No R-ID is a committed artifact under `spec/`.
+
+### Cycle-2 findings: remediation (verified by O)
+
+O re-ran cycle 2's probes (`target/review1-tmp/O/c2/probes/`) and cycle 1's (`O/probes/`) against
+a fresh release build of `2acf8aa` in O's own export. The logs and O's new probe
+`c3_unreadable_dirs.sh` are in `target/review1-tmp/O/c3/`.
+
+| # | Finding | Ruling | Re-run evidence | Status |
+|---|---------|--------|-----------------|--------|
+| 1 | MEDIUM: same-filesystem `xdu-mv` refused a 0311 source directory or an existing 0333 destination directory | Fix | `b_p5b_rename_control.sh`: `Moved: 2`, both files at the destination, and the `mv -n` control then finds no source. `mv_0311_source.sh`: `Moved: 1`, rc 0. `c3_unreadable_dirs.sh`: a 0311 source directory and an existing 0333 destination directory together at `-j 4` give `Moved: 3`, rc 0, inodes kept; the dry run lists all three and writes nothing. A's `rename_route.sh` agrees (below) | ✅ remediated |
+| 2 | LOW: a directory left unflushed by an earlier killed run | Accepted residual, no code change | TECH.md, "Cycle-2 finding 2 — residual, accepted". `doc/xdu-mv.1.scd:204-208` states it beside the durability text. A checked the sentence against `open_or_create`: an existing directory is flushed only while this run's registry lists it as pending | ✅ recorded and stated |
+
+Regression probes, all as in cycle 2:
+
+- `blockround2.sh` and `blockround3.sh`: both tools skip the grown file (`Skipped: 1`), which
+  stays at its source.
+- `blockround.sh` still copies a file grown inside the crawl's second, the residual both man pages
+  state.
+- `hive.sh` and `hive2.sh`: the engine selects the true rows. `xdu-find` and `xdu-rm` keep their
+  pre-existing, seeded behaviour.
+- `xonly.sh`: `Copied: 2` and `Moved: 2` through a 0111 ancestor, rc 0.
+
+`c3_unreadable_dirs.sh` also shows two unchanged behaviours. `xdu-cp` into an existing 0333
+destination directory still fails the file, naming the directory, which is within the cycle-1
+ruling because the copy flushes it. With a 0333 `--into`, a file placed directly in it moves, and
+a file that needs a directory created under it fails and stays at its source.
+
+### Verification run
+
+**Reviewer A**, in its own export, as uid 501:
+
+- `cargo test --locked`: 347 passed, 0 failed, 53 ignored. The counts: lib 218, `cp_tests` 33,
+  `mv_tests` 21, `rm_tests` 19, crawl 25, find 9, version 6, `cli_version_tests` 1, offline 1,
+  view 1 + `xdu-view` 5, examples 4, s3 non-wire 4 (50 wire ignored), `mv_xfs_tests` 3 ignored.
+  The three new tests passed by name. `cargo clippy --locked --all-targets --all-features -- -D
+  warnings` and `cargo fmt --all -- --check` were clean.
+- Release binaries, `rename_route.sh`: a 0311 source directory, an existing 0333 destination
+  directory, both together, and a 0333 `--into` with files landing directly in it each give
+  `Moved: 2`, rc 0. A 0333 destination directory already holding the name gives `Existing: 1`,
+  keeps the old bytes and exits 1. The `mv -n` control moves. The dry run writes nothing.
+- An instrumented copy, built under A's scratch into its own target directory, traced each
+  directory open and flush, and forced `EXDEV` or the link route by an environment variable:
+  - **Rename route.** No directory is flushed except the parent of each directory the run
+    creates, before the rename: `mkdirat into/u`, `fsync into`, `mkdirat into/u/sub`,
+    `fsync into/u`, `renamex_np`. Into an existing directory the trace is a bare `renamex_np`.
+    Where a directory must be created under a 0333 parent, both files fail with the directory
+    named, stay at the source, and nothing is created.
+  - **`EXDEV` copy route.** Both directories are reopened for reading first. Then come the temp
+    file's `fsync`, the no-replace rename, the destination directory's `fsync`, the unlink, and
+    the source directory's `fsync`. A 0311 source or a 0333 destination fails the file, naming the
+    directory, before any copy; the source stays.
+  - **Link route.** `linkat`, the destination reopened for reading, its `fsync`, then the unlink.
+    A 0311 source directory moves, since this route never flushes it. A 0333 destination
+    directory withdraws the link and fails the file (finding 1).
+  - **Parent cache.** 11 files at `-j 3` on each route: no search-only handle reached a flush (0
+    `require_flushable` refusals), and every file moved. Every flush site (`atomic_fs.rs` 390,
+    406, 920, 1184, 1433) runs on a handle reopened for reading, or after `require_flushable` has
+    failed closed before any write.
+  - **Symlinks at the last walked component**, now opened search-only: a symlinked destination
+    directory is refused with nothing written to its target, and a swapped source parent is
+    skipped, not followed.
+- The man page and `AGENTS.md` text the diff changed match the traces, except finding 1.
+- Reviewer conduct: `git status --porcelain` was empty. The instrumentation lived only under
+  `A/c3/probes/inst`, with its own target directory, and A's release binaries were built from the
+  unmodified export. Every `chmod` was restored. O re-checked the export blob by blob after the
+  hand-back: 166 blobs, 0 mismatches, no extra files.
+
+**O**, in its own export: the fresh release build and the probes above.
+`relocate::tests::only_the_routes_that_flush_a_directory_need_to_read_it` passes there, and its
+link-route case asserts the unnamed message of finding 1.
+
+**Man-page literals.** A and O counted the CI needles in `doc/xdu-mv.1.scd`'s source with
+whitespace stripped: 2× `XDU_INDEX`, 2× `XDU_JOBS`, 1× `s3://BUCKET/PREFIX` and
+1× `/archive/carol/runs/r1.h5`, unchanged from `8a870f5`. That is the source, not CI's rendered
+count form. No `.scd` line begins with `.` or `'`.
+
+**Gates not observed locally:**
+
+- The S3 wire tier: there is no pinned httpfs here.
+- A real second filesystem: `hdiutil create` fails here ("Device not configured"). `EXDEV` was
+  driven only by forcing it, in A's instrumented copy and in the unit-test seam.
+- The Linux arm (`O_PATH`, `renameat2`) on `2acf8aa`: CI is running and the foreman owns the
+  rollup, so it is **not observed** here.
+- `hpccm` `make check`, and root-only paths.
+- **The man-page render was unavailable here** (`scdoc` is not installed). The rewritten
+  PERMISSIONS paragraph and the residual sentence in `xdu-mv`(1) were read in the `.scd` source
+  only. **Unclosed gap for the human:** install `scdoc` (`AGENTS.md`, Commands) and read the page,
+  or take the packaging job's literal step on `2acf8aa`.
+
+### Requirement → evidence matrix (cycle 3, scoped)
+
+| R-ID | Verified how (by whom) | Status |
+|------|------------------------|--------|
+| R5 | Rename route with 0311 and 0333 directories (A, O); `EXDEV` and link-route traces and their fail-closed cases (A); the route unit test (A, O); full `cargo test` (A) | ✅ every route keeps each file whole somewhere; finding 1 is a diagnostic, not a lost or misplaced file |
+| R10 | `xdu-mv`(1) PERMISSIONS and the residual sentence against the traces (A); needles in the source (A, O) | ⚠️ finding 1: the page promises a named directory that the link route does not print. Render not read locally |
+| R1–R4, R6–R9 | Not re-graded: the cycle is scoped to the remediation, which changes only `xdu-mv`'s routes. `cargo test` 347 passed, `cp_tests` and `rm_tests` included (A); cycle-1 and cycle-2 probes green (O) | carried from cycle 2 |
+
+Unmapped changes: none. The diff maps to cycle 2's finding 1 (R5) and to the residual's sentence
+(R10).
+
+### Findings (cycle 3)
+
+#### 1. [LOW/CONFIRMED] On the link route, an unreadable destination directory fails the file without naming it, and only after the link
+- **Where:**
+  - `src/atomic_fs.rs:920`: `link_route` runs `dp.readable(None)?.sync()?` after `linkat`.
+  - `doc/xdu-mv.1.scd:279-281`: "fails with the directory named on standard error".
+  - `src/relocate.rs:850` pins the unnamed text in the new unit test.
+- **Failure scenario:** a filesystem with no rename that refuses to replace (the link route, as
+  on NFS), and an existing destination directory the user cannot read, such as a 0333 drop box.
+  - Before this diff, the destination walk opened that directory `Access::Read`, so it was
+    refused before any write, with its name.
+  - Now `linkat` runs first. The reopen for reading fails, the link is withdrawn, and the file
+    fails with "cannot open the directory for reading (Permission denied (os error 13)), which
+    flushing it to stable storage needs".
+  - The line names no directory, and its source-path prefix points the operator at the source
+    directory, which this route never reads. The PERMISSIONS sentence this diff wrote promises
+    the directory's name.
+  - A kill between the link and its withdrawal leaves the file at both names (one inode), and a
+    re-run counts it Existing. That is still within R5 ("source, destination, or both").
+- **Evidence:**
+  - A: the instrumented copy with `XDU_PROBE_ROUTE=link`, `routes.sh` case 3. The trace is
+    `linkat`, then `reopen-read into/u/sub -> Permission denied (os error 13)`, then
+    `unlink into/u/sub/a.dat`. The stderr line is as above. The source is left, `Moved: 0`,
+    `Failed: 1`, exit 1.
+  - O: the unit test passes in O's export, and its link-route case asserts that the message
+    starts `cannot open the directory for reading (`.
+- **Not caused by this diff:** a 0333 `--into` whose files need a directory created in it prints
+  the same unnamed message on every route (O's `c3_unreadable_dirs.sh`, A's `EXDEV` case), and the
+  page before this diff made the same promise.
+- **One remediation that closes it:** on the link route, reopen the destination directory for
+  reading, with its name, before `linkat`, so the route fails before any write again; or narrow
+  the man-page sentence. Alternatively the human may accept it as a documented residual.
+- **Touches:** R5 and R10. `src/atomic_fs.rs` is on `invariants.md`'s high-blast list. No §2 or
+  §4 rule is broken: the file fails closed, nothing is lost, and the exit is non-zero.
+
+**Dropped or noted after refutation:**
+
+- **Dropped:**
+  - Empty destination directories left when an `EXDEV` move fails on an unreadable source
+    directory, since the read check follows the destination walk (A). Pruning directories is a
+    non-goal, R5 covers partial copies, and other cross-route failures already left them.
+  - `O_PATH` at the last walked component on Linux (A, by reading): every `*at` call it reaches
+    accepts an `O_PATH` descriptor, and intermediate components already use one on the Linux CI
+    leg. Not observable here.
+  - The `EXDEV` message is ambiguous when the source and destination directories share a
+    basename (A): this predates the diff.
+- **Hygiene, not findings:**
+  - The doc comment of `the_production_policy_routes_exdev_to_the_copy_path` now sits on the
+    inserted `running_as_root` helper (`src/relocate.rs:800-802`; A, O).
+  - The comment on `Anchors` (`src/relocate.rs:208-209`) still says a file landing directly in
+    `--into` makes the walk reopen it for reading, which `xdu-mv`'s rename route no longer does
+    (A, O).
+
+### Human-gate triggers (cycle 3)
+
+- **Triggered.** Finding 1 is CONFIRMED in `src/atomic_fs.rs`, which is on `invariants.md`'s
+  authoritative high-blast list. It is LOW and breaks no §2 or §4 rule: R5's traces held on every
+  route, and every refusal failed closed.
+- This was the last review the loop allows, and the verdict is not approved. **STOP: the foreman
+  takes it to the human; nothing was remediated.** The choice for finding 1 is a further build
+  pass, outside the loop's bound, or a ruling that accepts the message as a documented residual.
