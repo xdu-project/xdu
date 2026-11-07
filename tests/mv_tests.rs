@@ -920,34 +920,40 @@ fn mv_moves_through_search_only_ancestors() {
     assert!(fx.left().is_empty());
 }
 
-/// A move across filesystems flushes the source directory after removing the name, so
-/// `xdu-mv` opens every source directory for reading. One the caller may write but not read
-/// (0311) fails each file in it, naming the directory; the files stay where they are.
-#[test]
-fn mv_fails_closed_on_a_source_directory_it_cannot_read() {
+/// A rename on one filesystem flushes neither directory, so it needs only write and search
+/// permission on them, as `mv`(1) does. `mode` goes on the source directory (`src`) or on an
+/// existing destination directory.
+fn renames_with_an_unreadable_directory(src: bool, mode: u32) {
     if running_as_root() {
         eprintln!("skipped: root ignores permission bits; this runs as any other user");
         return;
     }
-    let fx = Fixture::new(&[("u/sub/a.dat", 1), ("v/b.dat", 2)]).build();
-    let unlock = Unlock(vec![fx.src("u/sub")]);
-    chmod(&fx.src("u/sub"), 0o311);
+    let fx = Fixture::new(&[("u/sub/a.dat", 1), ("u/sub/b.dat", 2)]).build();
+    fs::create_dir_all(fx.dest("u/sub")).unwrap();
+    let locked = if src {
+        fx.src("u/sub")
+    } else {
+        fx.dest("u/sub")
+    };
+    let unlock = Unlock(vec![locked.clone()]);
+    chmod(&locked, mode);
 
     let (out, err, ok) = run_mv(&fx.args(&["--force"]));
-    assert!(!ok, "a failed file exits non-zero");
-    let line = format!(
-        "xdu-mv: {}: cannot open directory sub for reading (",
-        fx.src("u/sub/a.dat").display()
-    );
-    assert!(err.contains(&line), "{err}");
-    assert_eq!(summary(&out), ["Moved: 1", "Failed: 1"], "{out}");
+    assert!(ok, "{err}");
+    assert_eq!(summary(&out), ["Moved: 2"], "{out}");
     drop(unlock);
-    assert_eq!(fx.left(), ["u/sub/a.dat"]);
-    assert_eq!(fx.moved(), ["v/b.dat"]);
-    assert!(
-        !fx.dest("u").exists(),
-        "nothing was created for the failed file"
-    );
+    assert_eq!(fx.moved(), ["u/sub/a.dat", "u/sub/b.dat"]);
+    assert!(fx.left().is_empty());
+}
+
+#[test]
+fn mv_renames_out_of_a_source_directory_it_cannot_read() {
+    renames_with_an_unreadable_directory(true, 0o311);
+}
+
+#[test]
+fn mv_renames_into_a_drop_box_it_cannot_read() {
+    renames_with_an_unreadable_directory(false, 0o333);
 }
 
 /// A directory `xdu-mv` creates is flushed into its parent before the file moves, so before

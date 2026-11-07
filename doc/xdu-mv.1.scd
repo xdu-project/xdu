@@ -201,9 +201,13 @@ differ within one filesystem. For each such file, *xdu-mv*:
 The source is removed only after both flushes have returned, so an
 interruption at any point (a crash, a power loss, a kill) leaves each file
 whole at its source, at its destination, or at both, never at neither and
-never partial at a final name. Each move to another filesystem waits for two
-flushes, a few milliseconds each on a local disk, so many small files move
-markedly slower across filesystems than within one.
+never partial at a final name. A destination directory that already exists
+is not flushed into its parent again: one created by an earlier run killed
+before its own flush, or by another program, is trusted as found, so a power
+loss soon after can still lose it on a filesystem that does not order a
+child's flush before its parent's entry. Each move to another filesystem
+waits for two flushes, a few milliseconds each on a local disk, so many small
+files move markedly slower across filesystems than within one.
 
 A source written while it was copied, or changed or replaced before its
 removal, is skipped and counted, its copy is removed, and it stays at its
@@ -264,18 +268,19 @@ and with the default *--root* of / the same file is moved to
 *xdu-mv* reaches each source and each destination one directory at a time,
 and needs only search (execute) permission on a directory it passes through:
 a directory of mode 0711 is no obstacle to a user other than its owner. The
-directory holding a source needs write and search permission, to remove the
-name, and read permission as well: after a move to another filesystem
-*xdu-mv* flushes that directory to stable storage, and a flush needs read
-permission, so it opens every source directory for reading. Each directory a
-file lands in is opened for reading for the same reason, and a directory
-*xdu-mv* creates is flushed into its parent, which must then be readable,
-before any file moves into it, so before any source is removed. Where such an
-open is refused, every file in or bound for that directory fails with the
-directory named on standard error and stays at its source, and the run exits
-non-zero. *--into* itself is opened for search only, so an *--into* this user
-cannot read is not refused up front: only the files placed directly in it, or
-in a directory created directly in it, fail.
+directory holding a source, and the directory it lands in, need write and
+search permission. A rename within one filesystem flushes neither, so neither
+needs read permission there: a source directory of mode 0311 or a drop box of
+mode 0333 is enough, as for *mv*(1). Read permission is needed only on a
+directory *xdu-mv* flushes to stable storage: the source directory and the
+destination directory of a move to another filesystem; the destination
+directory on a filesystem without a rename that refuses to replace; and the
+parent of each directory *xdu-mv* creates, before any file moves into it, so
+before any source is removed. Where such an open is refused, every file that
+needs it fails with the directory named on standard error and stays at its
+source, and the run exits non-zero. *--into* itself is opened for search
+only, so an *--into* this user cannot read is not refused up front: only the
+files that would need it read fail.
 
 # REFUSALS
 

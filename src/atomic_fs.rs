@@ -114,6 +114,14 @@ impl DirHandle {
         owned(fd).map(|fd| DirHandle::new(fd, Access::Read))
     }
 
+    /// This directory opened for reading, so it can be flushed: a clone when it already is,
+    /// else `.` reopened from it. A refusal names the directory (`name`, or "the directory"
+    /// for a walk's base) and says why it must be readable.
+    pub fn readable(&self, name: Option<&OsStr>) -> io::Result<DirHandle> {
+        self.reopen(Access::Read)
+            .map_err(|e| unreadable(e, name, Access::Read))
+    }
+
     /// Fail unless this handle can be flushed, before anything is written that would need it.
     pub fn require_flushable(&self) -> io::Result<()> {
         if self.readable {
@@ -907,7 +915,9 @@ fn link_route(
 
     let verified = (|| -> Result<(), Stop<NoReplace>> {
         step::<NoReplace>(hook, Step::Linked)?;
-        dp.sync()?;
+        // A rename on one filesystem walks the destination search-only; this route alone flushes
+        // it there, so it reads it here.
+        dp.readable(None)?.sync()?;
         let now = fstatat_nofollow(sp, sn);
         let still = matches!(&now, Ok(s) if s.same_object(&recorded));
         if !still {

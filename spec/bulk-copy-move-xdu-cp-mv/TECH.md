@@ -3,7 +3,7 @@ slug: bulk-copy-move-xdu-cp-mv
 title: 'Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine'
 kind: feature
 appetite: big
-status: blocked
+status: in_review
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
 current_phase: done
@@ -107,7 +107,7 @@ phases:
     then echo "P2: a replacing rename, copy or truncating open is in the new code"
     >&2; exit 1; fi; cargo test --locked --test mv_tests >target/p2-mv.log 2>&1; for
     t in mv_safe_skips_a_file_that_grew_past_the_bound_by_the_index_block_size mv_moves_through_search_only_ancestors
-    mv_fails_closed_on_a_source_directory_it_cannot_read; do grep -qF "test $t ...
+    mv_renames_out_of_a_source_directory_it_cannot_read; do grep -qF "test $t ...
     ok" target/p2-mv.log || { echo "P2: $t did not pass" >&2; exit 1; }; done; test
     "$(id -u)" -ne 0 || echo "P2: running as root, so the permission cases skipped;
     they run on any other user" >&2; if grep -nE "sync_durable\(" src/atomic_fs.rs
@@ -144,29 +144,34 @@ phases:
   verify: 'set -eu; mkdir -p target; cargo test --locked --lib >target/p3-lib.log
     2>&1; for t in relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source
     atomic_fs::tests::a_same_filesystem_move_keeps_the_inode atomic_fs::tests::a_same_filesystem_move_never_replaces
-    atomic_fs::tests::a_same_filesystem_move_by_the_link_route_never_replaces atomic_fs::tests::a_same_filesystem_move_skips_a_non_regular_object;
-    do grep -qF "test $t ... ok" target/p3-lib.log || { echo "P3: $t did not pass"
-    >&2; exit 1; }; done; cargo test --locked --test mv_tests >target/p3-mv.log 2>&1;
-    for t in mv_renames_on_one_filesystem_keeping_the_inode mv_never_replaces_an_existing_destination
+    atomic_fs::tests::a_same_filesystem_move_by_the_link_route_never_replaces atomic_fs::tests::a_same_filesystem_move_skips_a_non_regular_object
+    relocate::tests::only_the_routes_that_flush_a_directory_need_to_read_it; do grep
+    -qF "test $t ... ok" target/p3-lib.log || { echo "P3: $t did not pass" >&2; exit
+    1; }; done; cargo test --locked --test mv_tests >target/p3-mv.log 2>&1; for t
+    in mv_renames_on_one_filesystem_keeping_the_inode mv_never_replaces_an_existing_destination
     mv_dry_run_writes_nothing mv_dry_run_and_the_real_run_select_identical_rows_under_limit
     mv_refuses_an_s3_index_before_anything mv_refuses_a_path_outside_root_before_moving_anything
     mv_refuses_a_missing_into mv_declined_prompt_moves_nothing mv_empty_match_exits_zero
     mv_safe_skips_a_changed_file_and_leaves_it mv_skips_a_symlink_at_the_source_path
     mv_skips_a_directory_at_the_source_path mv_skips_a_fifo_at_the_source_path mv_summary_counts_and_exit_status
-    mv_accepts_every_xdu_find_filter; do grep -qF "test $t ... ok" target/p3-mv.log
+    mv_accepts_every_xdu_find_filter mv_renames_out_of_a_source_directory_it_cannot_read
+    mv_renames_into_a_drop_box_it_cannot_read; do grep -qF "test $t ... ok" target/p3-mv.log
     || { echo "P3: $t did not pass" >&2; exit 1; }; done; cargo test --locked --test
     cp_tests >target/p3-cp.log 2>&1; if grep -nE "fs::rename|fs::copy|libc::rename\(|libc::renameat\(|File::create|O_TRUNC|truncate\(true\)|fs::write"
     src/select.rs src/atomic_fs.rs src/relocate.rs src/bin/xdu-cp.rs src/bin/xdu-mv.rs
     | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//"; then echo "P3: a replacing rename,
     copy or truncating open is in the new code" >&2; exit 1; fi; test -f doc/xdu-mv.1.scd;
-    if grep -nE "^[[:space:]]*[.'']" doc/xdu-mv.1.scd; then echo "P3: roff control
-    line" >&2; exit 1; fi; .agents/factory/bin/temp_index.sh sh -c "set -eu; mkdir
-    dest; r=\$(cd tree && pwd -P); xdu-mv --into dest --root \"\$r\" -u bob -n >/dev/null;
-    test -f tree/bob/notes.txt; test ! -e dest/bob; xdu-mv --into dest --root \"\$r\"
-    -u bob --force >/dev/null; test -f dest/bob/notes.txt; test ! -e tree/bob/notes.txt";
-    cargo test --locked --test rm_tests >target/p3-rm.log 2>&1; git diff --quiet edcc163
-    -- src/bin/xdu-rm.rs tests/rm_tests.rs; cargo clippy --locked --all-targets --all-features
-    -- -D warnings; cargo fmt --all -- --check; echo P3-GATE-GREEN'
+    grep -qF "drop box of" doc/xdu-mv.1.scd; grep -qF "flushes neither" doc/xdu-mv.1.scd;
+    grep -qF "is trusted as found" doc/xdu-mv.1.scd; test "$(id -u)" -ne 0 || echo
+    "P3: running as root, so the permission cases skipped" >&2; if grep -nE "^[[:space:]]*[.'']"
+    doc/xdu-mv.1.scd; then echo "P3: roff control line" >&2; exit 1; fi; .agents/factory/bin/temp_index.sh
+    sh -c "set -eu; mkdir dest; r=\$(cd tree && pwd -P); xdu-mv --into dest --root
+    \"\$r\" -u bob -n >/dev/null; test -f tree/bob/notes.txt; test ! -e dest/bob;
+    xdu-mv --into dest --root \"\$r\" -u bob --force >/dev/null; test -f dest/bob/notes.txt;
+    test ! -e tree/bob/notes.txt"; cargo test --locked --test rm_tests >target/p3-rm.log
+    2>&1; git diff --quiet edcc163 -- src/bin/xdu-rm.rs tests/rm_tests.rs; cargo clippy
+    --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check;
+    echo P3-GATE-GREEN'
 - id: P4
   name: Man pages, README and packaging in lockstep
   status: done
@@ -848,6 +853,54 @@ is, with one sentence in each PERMISSIONS section. P5 reopens (R5's guarantee).
     are named in the new seed.
   - ~~`AGENTS.md` invariant 4 is still titled for `xdu-rm` alone.~~ Retitled at the
     foreman's ruling.
+
+## Remediation — review cycle 2 (foreman rulings, 2026-11-07)
+
+[`REVIEW.md`](REVIEW.md) cycle 2 (on `1ef271c`) returned changes-requested: one CONFIRMED
+MEDIUM in `src/relocate.rs` (human gate, signed off) and one PLAUSIBLE LOW. Rulings: fix the
+first with the review's recipe; accept the second as a residual, documented, with no code
+change. Cycle 3 is the last review the loop allows.
+
+| Finding | Ruling | Phase |
+|---------|--------|-------|
+| 1 (MEDIUM) same-filesystem `xdu-mv` refused a 0311 source directory or a 0333 destination directory | Walk both search-only; reopen for reading only on the `EXDEV` copy route, which flushes them; keep the message accurate where read is still needed; test both cases; narrow PERMISSIONS | P3 |
+| 2 (LOW) a directory left unflushed by an earlier killed run | Residual: record here and say so in `xdu-mv`(1) beside the durability text | — |
+
+### P3 — cycle-2 finding 1: a same-filesystem move needs no read permission
+- [x] `relocate::move_one` walks the source directory and the destination directory
+  `Access::Search`. On `CrossFs::Copy` after `EXDEV` it reopens each for reading from the held
+  handle (`DirHandle::readable`, `.` relative to it), failing the file with the PERMISSIONS
+  message on refusal; the per-worker `ParentCache` keeps the search-only handles. The link route
+  (no no-replace rename, e.g. NFS) flushes the destination directory even on one filesystem, so
+  `atomic_fs::link_route` reads it through `readable` too. Created directories keep their parent
+  flush. `xdu-cp` is unchanged: its source walk was already search-only (tested with 0311 in
+  `cp_copies_through_search_only_ancestors`), and it flushes every destination directory, so a
+  0333 drop box still fails it, within the cycle-1 ruling.
+- [x] Tests: `mv_renames_out_of_a_source_directory_it_cannot_read` (0311) and
+  `mv_renames_into_a_drop_box_it_cannot_read` (0333), both red with the engine at `8a870f5` and
+  green after. The cycle-1 pin `mv_fails_closed_on_a_source_directory_it_cannot_read`, which
+  asserted the refused behaviour on the plain route, is replaced; its fail-closed half moved to
+  the forced seam as `relocate::tests::only_the_routes_that_flush_a_directory_need_to_read_it`
+  (the `EXDEV` route with a 0311 source or 0333 destination fails naming the directory and
+  leaves the file; the link route with a 0333 destination fails; the link route with a 0311
+  source, and the plain rename with both, move). That test was red with the source walk put back
+  to `Access::Read`. P2's gate names the replacement mv test.
+- [x] `xdu-mv`(1) PERMISSIONS: read is needed only on directories it flushes (both, across
+  filesystems; the destination, on the link route; the parent of a created directory). `AGENTS.md`
+  records the rule. `xdu-cp`(1) is unchanged.
+- **Verify:** P3's gate plus the three tests and the page's new literals. Green on its first
+  run, as was the retuned P2 gate; full `cargo test` 347 passed, 0 failed, 53 ignored as
+  designed (S3 wire, cross-filesystem tier); clippy and fmt clean. Not root, so no permission
+  case skipped. `scdoc` is not installed here; CI renders the pages.
+
+### Cycle-2 finding 2 — residual, accepted
+A destination directory that already exists is opened with no parent flush. One created by an
+earlier run killed between its `mkdirat` and its flush, or by another program, is trusted as
+found; a move across filesystems into it then flushes the file and the directory but not the
+directory's entry in its parent, so a power loss soon after, on a filesystem that does not order
+a child's flush before its parent's entry, could leave that file at neither name. Not
+reproduced (it needs a crash); ext4 and XFS journal ordering covers it. `xdu-mv`(1) says so next
+to the durability text. No code change, by the ruling.
 
 ---
 

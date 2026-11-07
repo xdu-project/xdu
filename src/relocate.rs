@@ -326,9 +326,12 @@ pub const CROSSING_REFUSED: &str = "crossing filesystems is not supported by thi
 /// with `EXDEV` goes where `cross` says: under `Copy`, to `move_across`, which re-checks
 /// `--safe` against the `fstat` of the descriptor it copies from.
 ///
-/// The source directory is opened for reading: a move across filesystems flushes it after
-/// removing the source name. So is the destination directory, flushed after a copy's publish.
-/// Every directory above either needs only search permission.
+/// Both directories are walked search-only: a rename on one filesystem flushes neither, so a
+/// source directory or destination directory the caller cannot read (0311, a 0333 drop box)
+/// passes as it does for `mv`(1). Only the copy route after `EXDEV` flushes them, the source
+/// directory after removing the name and the destination directory after the publish, so it
+/// reopens each for reading from the held handle, and a refusal fails the file there. The
+/// cached handles stay search-only.
 fn move_one(
     anchors: &Anchors,
     worker: &mut Worker,
@@ -341,7 +344,7 @@ fn move_one(
         return Outcome::Failed("not a file path".to_string());
     };
     let walked = worker.source_parent.get(parent, || {
-        atomic_fs::walk_nofollow(&anchors.root, &components(parent), Access::Read)
+        atomic_fs::walk_nofollow(&anchors.root, &components(parent), Access::Search)
     });
     let source_dir = match walked {
         Ok(dir) => dir,
@@ -357,7 +360,7 @@ fn move_one(
             atomic_fs::walk_create_nofollow(
                 &anchors.into,
                 &components(rel_parent),
-                Access::Read,
+                Access::Search,
                 &anchors.created,
             )
         })
@@ -383,7 +386,7 @@ fn move_one(
                     atomic_fs::walk_create_nofollow(
                         &anchors.into,
                         &components(rel_parent),
-                        Access::Read,
+                        Access::Search,
                         &anchors.created,
                     )
                 });
@@ -391,10 +394,17 @@ fn move_one(
                     Ok(dir) => dir,
                     Err(e) => return Outcome::Failed(e.to_string()),
                 };
+                let flushable = source_dir
+                    .readable(parent.file_name())
+                    .and_then(|sp| Ok((sp, dest_dir.readable(rel_parent.file_name())?)));
+                let (source_dir, dest_dir) = match flushable {
+                    Ok(pair) => pair,
+                    Err(e) => return Outcome::Failed(e.to_string()),
+                };
                 let crossed = atomic_fs::move_across_with(
-                    source_dir,
+                    &source_dir,
                     name,
-                    dest_dir,
+                    &dest_dir,
                     name,
                     admit,
                     faults,
@@ -789,6 +799,114 @@ mod tests {
 
     /// The policy the binary ships takes a rename answered with `EXDEV` to the copy path: the
     /// file lands as a new inode with its bytes, and the source is gone.
+    /// Permission bits bind every caller but root.
+    fn running_as_root() -> bool {
+        // SAFETY: geteuid cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// The copy route after `EXDEV` flushes the source directory and the destination
+    /// directory, so it reopens each for reading; one the caller cannot read (0311 source,
+    /// 0333 destination) fails the file, naming it, and the file stays at its source. The
+    /// link route, taken where no no-replace rename exists, flushes the destination directory
+    /// even on one filesystem; the plain rename flushes neither.
+    #[test]
+    fn only_the_routes_that_flush_a_directory_need_to_read_it() {
+        if running_as_root() {
+            eprintln!("skipped: root ignores permission bits; this runs as any other user");
+            return;
+        }
+        let cross = Faults {
+            force_cross_device: true,
+            ..Faults::default()
+        };
+        let link = Faults {
+            force_link_route: true,
+            ..Faults::default()
+        };
+        // (faults, source directory mode, destination directory mode, the failure expected)
+        let cases: [(Faults, u32, u32, Option<&str>); 5] = [
+            (
+                cross,
+                0o311,
+                0o755,
+                Some("cannot open directory u for reading ("),
+            ),
+            (
+                cross,
+                0o755,
+                0o333,
+                Some("cannot open directory u for reading ("),
+            ),
+            (
+                link,
+                0o755,
+                0o333,
+                Some("cannot open the directory for reading ("),
+            ),
+            (link, 0o311, 0o755, None),
+            (Faults::default(), 0o311, 0o333, None),
+        ];
+        for (faults, src_mode, dest_mode, expected) in cases {
+            let t = tempfile::TempDir::new().unwrap();
+            let base = t.path().canonicalize().unwrap();
+            let source = base.join("src/u/f.dat");
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&source)
+                .unwrap()
+                .write_all(b"STAYS")
+                .unwrap();
+            let into = base.join("into");
+            fs::create_dir_all(into.join("u")).unwrap();
+            chmod(&base.join("src/u"), src_mode);
+            chmod(&into.join("u"), dest_mode);
+            let anchors = Anchors {
+                root: DirHandle::open_as(Path::new("/"), Access::Search).unwrap(),
+                into: DirHandle::open_as(&into, Access::Search).unwrap(),
+                created: CreatedDirs::default(),
+            };
+            let item = Planned {
+                source: source.clone(),
+                rel: PathBuf::from("u/f.dat"),
+                mtime: 0,
+            };
+            let got = move_one(
+                &anchors,
+                &mut Worker::default(),
+                &item,
+                None,
+                CROSS_FS,
+                faults,
+            );
+            chmod(&base.join("src/u"), 0o755);
+            chmod(&into.join("u"), 0o755);
+            let context = format!("{faults:?} {src_mode:o} {dest_mode:o}");
+            match expected {
+                Some(message) => {
+                    assert!(
+                        matches!(&got, Outcome::Failed(m) if m.starts_with(message)),
+                        "{context}: {got:?}"
+                    );
+                    assert_eq!(fs::read(&source).unwrap(), b"STAYS", "{context}");
+                    assert!(!into.join("u/f.dat").exists(), "{context}");
+                }
+                None => {
+                    assert!(matches!(got, Outcome::Done { .. }), "{context}: {got:?}");
+                    assert_eq!(fs::read(into.join("u/f.dat")).unwrap(), b"STAYS");
+                    assert!(!source.exists(), "{context}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_production_policy_routes_exdev_to_the_copy_path() {
         use std::os::unix::fs::MetadataExt;

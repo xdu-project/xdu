@@ -613,8 +613,10 @@ kept **in lockstep** with this section (this file wins if they drift). The `xdu-
   opened file (dev, ino, type, size, mtime, ctime); any earlier exit withdraws the copy, so a file
   is never at neither name. Never write the source's times there: that moves its ctime. Walks
   open each directory they pass search-only (`O_PATH` on Linux, `O_SEARCH` on macOS), so a 0711
-  ancestor passes as it does for `cp`(1); a directory that is flushed (each destination directory,
-  and `xdu-mv`'s source directory) is opened `Access::Read`, and `DirHandle::sync` refuses a
+  ancestor passes as it does for `cp`(1); a directory that is flushed is opened for reading
+  (`xdu-cp`'s destination directories; for `xdu-mv`, which walks both directories search-only
+  because a same-filesystem rename flushes neither, `DirHandle::readable` reopens them only on
+  the copy route after `EXDEV`, and the link route its destination), and `DirHandle::sync` refuses a
   search-only handle on every platform, because Linux's `fsync` on an `O_PATH` descriptor fails
   and macOS's does not. Held by
   `atomic_fs::tests::a_directory_that_must_be_flushed_is_opened_for_reading_or_fails_closed`.
