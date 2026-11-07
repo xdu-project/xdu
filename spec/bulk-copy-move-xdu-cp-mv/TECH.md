@@ -233,7 +233,8 @@ phases:
     atomic_fs::tests::move_across_carries_metadata relocate::tests::the_production_policy_routes_exdev_to_the_copy_path
     relocate::tests::a_cross_device_move_under_the_refuse_policy_keeps_the_source
     atomic_fs::tests::a_created_directory_is_flushed_into_its_parent_before_the_source_is_removed
-    atomic_fs::tests::a_directory_is_not_created_where_its_parent_cannot_be_flushed;
+    atomic_fs::tests::a_directory_is_not_created_where_its_parent_cannot_be_flushed
+    atomic_fs::tests::a_directory_another_worker_created_is_flushed_before_the_source_is_removed;
     do grep -qF "test $t ... ok" target/p5-lib.log || { echo "P5: $t did not pass"
     >&2; exit 1; }; done; test -f tests/xfs-wire.sh; test -f tests/mv_xfs_tests.rs;
     cargo test --locked --test mv_xfs_tests -- --list >target/p5-xfs-list.log 2>&1;
@@ -803,9 +804,19 @@ is, with one sentence in each PERMISSIONS section. P5 reopens (R5's guarantee).
   both pages' new sentences, the retitled invariant 4, and the predicate that `atomic_fs.rs`
   has one `mkdirat`, the flushed one. Green on its first run (full suite 343 passed, 0 failed,
   53 ignored as designed; clippy and fmt clean).
-- **Residual:** a worker that finds a directory another worker has just created, but not yet
-  flushed, does not flush it itself; that file's own placement is flushed, but its parent
-  chain rests on the creating worker's flush, which follows within microseconds.
+- [x] Foreman ruling, same day: a worker whose `mkdirat` answers `EEXIST` lost the race to a
+  worker that may not have flushed yet, so it flushes the parent itself before continuing (the
+  branch already fell through to the flush in `a09953b`; it is now tested). `Step::DirMissing`
+  is a hook point before `mkdirat`, where
+  `atomic_fs::tests::a_directory_another_worker_created_is_flushed_before_the_source_is_removed`
+  creates the directory as a racer would; the test asserts `ParentSynced` precedes
+  `SourceUnlinked` on both publish routes. Red with the `EEXIST` arm returning before the flush,
+  green with it.
+- **Still open (by the ruling, no flush on a plain open):** a worker whose first open *succeeds*
+  on a directory another worker created moments earlier, and has not yet flushed, does not
+  flush it; the walk cannot tell such a directory from one that existed before the run. Its own
+  file's placement is flushed; the parent chain rests on the creator's flush, which follows its
+  `mkdirat` directly.
 
 ### Remediation gates and notes for the foreman (2026-11-07)
 

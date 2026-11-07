@@ -305,24 +305,31 @@ fn open_or_create(
                 .map_err(|e| unreadable(e, parent_name, Access::Read))?;
             let c = c_name(name)?;
             let mode: libc::mode_t = 0o777;
+            walk_step(hook, Step::DirMissing)?;
             // SAFETY: `parent` is open and `c` a valid C string for the call.
             let made = check(unsafe { libc::mkdirat(parent.raw(), c.as_ptr(), mode) });
             match made {
                 Ok(()) => {}
-                // A racing worker made it; flushing again costs little and means no file is
-                // placed under it before its entry is durable.
+                // A racing worker made it between the open and here, and may not have flushed
+                // it yet; flush it here too, so no file is placed under it, and no source
+                // removed, before its entry is durable.
                 Err(e) if errno_is(&e, &[libc::EEXIST]) => {}
                 Err(e) => return Err(e),
             }
             flushable.sync()?;
-            match hook.at(Step::ParentSynced) {
-                HookAction::Continue => {}
-                HookAction::Fail(e) => return Err(e),
-                HookAction::Abandon => return Err(io::Error::other("walk abandoned")),
-            }
+            walk_step(hook, Step::ParentSynced)?;
             open_dir_nofollow(parent, name, access).map_err(refused)
         }
         Err(e) => Err(refused(e)),
+    }
+}
+
+/// A walk's step on the test seam, as an `io::Result`.
+fn walk_step(hook: &mut dyn StepHook, at: Step) -> io::Result<()> {
+    match hook.at(at) {
+        HookAction::Continue => Ok(()),
+        HookAction::Fail(e) => Err(e),
+        HookAction::Abandon => Err(io::Error::other("walk abandoned")),
     }
 }
 
@@ -578,7 +585,10 @@ pub enum Step {
     /// A cross-filesystem move removed the source name; only the best-effort flush of the
     /// source directory is left.
     SourceUnlinked,
-    /// A destination walk created a directory and flushed its entry into its parent.
+    /// A destination walk found a directory missing and has not yet created it.
+    DirMissing,
+    /// A destination walk created a directory, or lost the race to create it, and flushed its
+    /// entry into its parent.
     ParentSynced,
 }
 
@@ -2170,7 +2180,13 @@ mod tests {
             let mut steps = Steps::default();
             let made =
                 walk_create_nofollow_with(&anchor, &names, Access::Read, &mut steps).unwrap();
-            assert_eq!(steps.0, [Step::ParentSynced, Step::ParentSynced]);
+            let created = [
+                Step::DirMissing,
+                Step::ParentSynced,
+                Step::DirMissing,
+                Step::ParentSynced,
+            ];
+            assert_eq!(steps.0, created);
             let got = move_across_with(
                 &dir(&a.src),
                 OsStr::new("f"),
@@ -2211,8 +2227,76 @@ mod tests {
         let placed = copy_atomic_with(&src, &made, OsStr::new("f"), Faults::default(), &mut steps);
         assert!(matches!(placed, Ok(Placed::Done { .. })), "{placed:?}");
         let published = steps.0.iter().position(|s| *s == Step::Published).unwrap();
-        assert_eq!(&steps.0[..2], [Step::ParentSynced, Step::ParentSynced]);
-        assert!(2 < published);
+        assert_eq!(
+            steps.0.iter().filter(|s| **s == Step::ParentSynced).count(),
+            2
+        );
+        let flushed = steps
+            .0
+            .iter()
+            .rposition(|s| *s == Step::ParentSynced)
+            .unwrap();
+        assert!(flushed < published);
+    }
+
+    /// Creates the missing directory itself at `DirMissing`, as a racing worker would, so
+    /// the walk's own `mkdirat` answers `EEXIST`; records every step.
+    struct Racer {
+        dir: PathBuf,
+        steps: Vec<Step>,
+    }
+
+    impl StepHook for Racer {
+        fn at(&mut self, step: Step) -> HookAction {
+            if step == Step::DirMissing {
+                fs::create_dir(&self.dir).unwrap();
+            }
+            self.steps.push(step);
+            HookAction::Continue
+        }
+    }
+
+    /// A worker that loses the race to create a directory cannot know the winner has flushed
+    /// it, so it flushes the parent itself, before the move removes its source.
+    #[test]
+    fn a_directory_another_worker_created_is_flushed_before_the_source_is_removed() {
+        for (faults, _) in across_routes() {
+            let a = Across::new();
+            let anchor = DirHandle::open_as(&a.out, Access::Search).unwrap();
+            let mut racer = Racer {
+                dir: a.out.join("raced"),
+                steps: Vec::new(),
+            };
+            let raced = [OsStr::new("raced")];
+            let made =
+                walk_create_nofollow_with(&anchor, &raced, Access::Read, &mut racer).unwrap();
+            assert_eq!(racer.steps, [Step::DirMissing, Step::ParentSynced]);
+            let got = move_across_with(
+                &dir(&a.src),
+                OsStr::new("f"),
+                &made,
+                OsStr::new("f"),
+                admit_all,
+                faults,
+                &mut racer,
+            );
+            assert!(
+                matches!(got, Ok(Crossed::Done { .. })),
+                "{faults:?}: {got:?}"
+            );
+            let unlinked = racer
+                .steps
+                .iter()
+                .position(|s| *s == Step::SourceUnlinked)
+                .unwrap();
+            let flushed = racer
+                .steps
+                .iter()
+                .position(|s| *s == Step::ParentSynced)
+                .unwrap();
+            assert!(flushed < unlinked, "{faults:?}: {:?}", racer.steps);
+            assert_eq!(read(&a.out.join("raced/f")), a.bytes);
+        }
     }
 
     /// The parent of a directory to create must open for reading, to be flushed after. One the
