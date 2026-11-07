@@ -14,8 +14,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use common::{
-    binary_path, build_index, create_test_file, list_files_recursive, run_cp, run_find,
-    run_with_stdin, set_atime_days_ago, set_mtime_days_ago,
+    append_bytes, binary_path, build_index, build_index_block_size, create_test_file,
+    list_files_recursive, run_cp, run_find, run_with_stdin, set_atime_days_ago, set_mtime_days_ago,
 };
 
 struct Fixture {
@@ -1020,6 +1020,44 @@ fn cp_safe_skips_a_file_that_no_longer_matches_each_filter() {
             case.args
         );
     }
+}
+
+/// The review's probe. An index built with `--block-size 1M` does not record that measure,
+/// so `--safe` cannot recompute it: a file indexed at 900 KiB (one block, under
+/// `--max-size 1500K`) and since grown to 1.2 MB (two blocks) passes both live measures. Its
+/// mtime, moved since the crawl, is what skips it.
+#[test]
+fn cp_safe_skips_a_file_that_grew_past_the_bound_by_the_index_block_size() {
+    let fx = Fixture::new(&[("u/grew.dat", 921_600), ("u/kept.dat", 102_400)]);
+    for rel in ["u/grew.dat", "u/kept.dat"] {
+        set_mtime_days_ago(&fx.src(rel), 10).unwrap();
+    }
+    build_index_block_size(&fx.source, &fx.index, "1M");
+    let (out, err, ok) = run_cp(&fx.args(&["--max-size", "1500K", "-n"]));
+    assert!(ok, "{err}");
+    assert_eq!(dry_run_sources(&out).len(), 2, "{out}");
+
+    append_bytes(&fx.src("u/grew.dat"), 307_200);
+    let fresh = fx.index.with_file_name("fresh");
+    build_index_block_size(&fx.source, &fresh, "1M");
+    let kept = fx.src("u/kept.dat").display().to_string();
+    assert_eq!(
+        find_paths_with(&fresh, &["--max-size", "1500K"]),
+        [kept],
+        "by the index's own measure it no longer matches"
+    );
+
+    let (out, err, ok) = run_cp(&fx.args(&["--max-size", "1500K", "--safe", "--force", "-v"]));
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!(
+            "skipped (changed since the index was built): {}",
+            fx.src("u/grew.dat").display()
+        )),
+        "{out}"
+    );
+    assert_eq!(summary(&out), ["Copied: 1", "Skipped: 1"], "{out}");
+    assert_eq!(fx.copied(), ["u/kept.dat"]);
 }
 
 #[test]

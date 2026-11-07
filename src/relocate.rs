@@ -100,6 +100,8 @@ impl RootMap {
 pub struct Planned {
     pub source: PathBuf,
     pub rel: PathBuf,
+    /// The mtime the index recorded, which `--safe` compares with the live one.
+    pub mtime: i64,
 }
 
 /// Map every row before anything is written, refusing on the first row, in path order, that
@@ -110,6 +112,7 @@ pub fn check_whole_set(map: &RootMap, rows: &[Row]) -> Result<Vec<Planned>, Refu
             map.map(&row.path).map(|rel| Planned {
                 source: PathBuf::from(&row.path),
                 rel,
+                mtime: row.mtime,
             })
         })
         .collect()
@@ -257,7 +260,12 @@ fn copy_one(
         Err(e) => return Outcome::Failed(e.to_string()),
     };
     if let Some(check) = safe {
-        match holds_live(check.filters, check.size_mode, &live(source.stat())) {
+        match holds_live(
+            check.filters,
+            check.size_mode,
+            item.mtime,
+            &live(source.stat()),
+        ) {
             Verdict::Holds => {}
             Verdict::NotRegular => return Outcome::Skipped("not a regular file"),
             Verdict::Changed(reason) => return Outcome::Skipped(reason),
@@ -332,7 +340,7 @@ fn move_one(
     };
     let admit = |stat: &Stat| match safe {
         None => Ok(()),
-        Some(check) => match holds_live(check.filters, check.size_mode, &live(stat)) {
+        Some(check) => match holds_live(check.filters, check.size_mode, item.mtime, &live(stat)) {
             Verdict::Holds => Ok(()),
             Verdict::NotRegular => Err("not a regular file"),
             Verdict::Changed(reason) => Err(reason),
@@ -705,6 +713,7 @@ mod tests {
         let item = Planned {
             source: source.clone(),
             rel: PathBuf::from("u/f.dat"),
+            mtime: 0,
         };
         let exdev = Faults {
             force_cross_device: true,
@@ -777,6 +786,7 @@ mod tests {
             let item = Planned {
                 source: source.clone(),
                 rel: PathBuf::from("u/f.dat"),
+                mtime: 0,
             };
             let faults = Faults {
                 force_cross_device: true,

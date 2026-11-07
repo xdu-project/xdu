@@ -87,13 +87,27 @@ fn live_sizes(live: &Live, size_mode: Option<SizeMode>) -> Vec<i64> {
     }
 }
 
+/// The skip reason for a file whose content may have changed since the crawl.
+pub const CHANGED_SINCE_INDEXED: &str = "changed since the index was built";
+
 /// `--safe`'s re-check: every filter `to_conditions` writes as SQL, evaluated against the
 /// object's live metadata with the thresholds fixed when the filters were built.
 ///
 /// The path pattern and the partition hold by construction: the path is the row's own. The
 /// comparisons mirror the SQL exactly (`size >= min`, `atime < older`, `atime >= newer`, and
 /// so on), so a file whose metadata is unchanged since the crawl always holds.
-pub fn holds_live(filters: &QueryFilters, size_mode: Option<SizeMode>, live: &Live) -> Verdict {
+///
+/// A size filter on an index that does not state its measure needs one more condition. Both
+/// live measures can pass while the measure the index used does not: a file indexed at 900 KiB
+/// as one 1 MiB block, then grown to 1.2 MB, is two blocks by the index's own measure but
+/// under 1500K by length and by disk usage. So the live mtime must also equal
+/// `indexed_mtime`, the one the row recorded, or the file fails as changed since the crawl.
+pub fn holds_live(
+    filters: &QueryFilters,
+    size_mode: Option<SizeMode>,
+    indexed_mtime: i64,
+    live: &Live,
+) -> Verdict {
     if !live.regular {
         return Verdict::NotRegular;
     }
@@ -107,6 +121,10 @@ pub fn holds_live(filters: &QueryFilters, size_mode: Option<SizeMode>, live: &Li
         && sizes.iter().any(|size| *size > max)
     {
         return Verdict::Changed("no longer matches --max-size");
+    }
+    let sized = filters.min_size.is_some() || filters.max_size.is_some();
+    if sized && size_mode.is_none() && live.mtime != indexed_mtime {
+        return Verdict::Changed(CHANGED_SINCE_INDEXED);
     }
     if let Some(t) = filters.older_than
         && live.atime >= t
@@ -434,6 +452,9 @@ mod tests {
         assert_eq!(where_part, conditions.join(" AND "));
     }
 
+    /// The mtime `live` gives a file, and so the one its index row recorded.
+    const INDEXED_MTIME: i64 = 1_650_000_000;
+
     /// A regular file whose length and disk usage agree, so every size measure reads `size`.
     fn live(size: i64) -> Live {
         Live {
@@ -444,7 +465,7 @@ mod tests {
             gid: 20,
             mode: 0o644,
             atime: 1_650_000_000,
-            mtime: 1_650_000_000,
+            mtime: INDEXED_MTIME,
         }
     }
 
@@ -559,7 +580,7 @@ mod tests {
                 let mut row = live(0);
                 set(&mut row, v);
                 let sql = sql_holds(&conn, filters, &row);
-                let verdict = holds_live(filters, None, &row);
+                let verdict = holds_live(filters, None, row.mtime, &row);
                 assert_eq!(
                     verdict == Verdict::Holds,
                     sql,
@@ -599,7 +620,7 @@ mod tests {
                 row.mode = m;
                 let sql = sql_holds(&conn, &filters, &row);
                 assert_eq!(
-                    holds_live(&filters, None, &row) == Verdict::Holds,
+                    holds_live(&filters, None, row.mtime, &row) == Verdict::Holds,
                     sql,
                     "{pred} at {m:o}"
                 );
@@ -626,7 +647,7 @@ mod tests {
         base.atime = t - 1;
         base.mtime = t - 1000;
         assert!(sql_holds(&conn, &all, &base));
-        assert_eq!(holds_live(&all, None, &base), Verdict::Holds);
+        assert_eq!(holds_live(&all, None, base.mtime, &base), Verdict::Holds);
         let moves: [(Set, i64); 8] = [
             (set_size, 99),
             (set_size, 201),
@@ -642,7 +663,10 @@ mod tests {
             set(&mut row, v);
             assert!(!sql_holds(&conn, &all, &row), "{row:?}");
             assert!(
-                matches!(holds_live(&all, None, &row), Verdict::Changed(_)),
+                matches!(
+                    holds_live(&all, None, base.mtime, &row),
+                    Verdict::Changed(_)
+                ),
                 "{row:?}"
             );
         }
@@ -694,12 +718,12 @@ mod tests {
         ];
         for (mode, with_min, with_max) in cases {
             assert_eq!(
-                holds_live(&min, mode, &row),
+                holds_live(&min, mode, row.mtime, &row),
                 with_min,
                 "{mode:?} --min-size"
             );
             assert_eq!(
-                holds_live(&max, mode, &row),
+                holds_live(&max, mode, row.mtime, &row),
                 with_max,
                 "{mode:?} --max-size"
             );
@@ -715,8 +739,81 @@ mod tests {
             Some(SizeMode::DiskUsage),
             Some(SizeMode::ApparentSize),
         ] {
-            assert_eq!(holds_live(&wide, mode, &row), Verdict::Holds, "{mode:?}");
+            assert_eq!(
+                holds_live(&wide, mode, row.mtime, &row),
+                Verdict::Holds,
+                "{mode:?}"
+            );
         }
+    }
+
+    /// The review's probe: indexed with `--block-size 1M` at 900 KiB (one 1 MiB block, so
+    /// selected by `--max-size 1500K`), then grown to 1.2 MB (two blocks by that measure).
+    /// Both live measures are still under the bound, so only the moved mtime shows the change.
+    #[test]
+    fn an_unstated_size_measure_also_requires_the_indexed_mtime() {
+        let max = QueryFilters {
+            max_size: Some(1_536_000),
+            ..QueryFilters::default()
+        };
+        let grown = Live {
+            length: 1_228_800,
+            disk_usage: 1_228_800,
+            mtime: INDEXED_MTIME + 1,
+            ..live(0)
+        };
+        assert_eq!(
+            holds_live(&max, None, INDEXED_MTIME, &grown),
+            Verdict::Changed(CHANGED_SINCE_INDEXED)
+        );
+        // The index's own measure catches it without the mtime when the measure is stated.
+        assert_eq!(
+            holds_live(
+                &max,
+                Some(SizeMode::BlockRounded(1 << 20)),
+                INDEXED_MTIME,
+                &grown
+            ),
+            Verdict::Changed("no longer matches --max-size")
+        );
+        // An unchanged mtime holds as before, and so does a moved one with no size filter.
+        let unchanged = Live {
+            mtime: INDEXED_MTIME,
+            ..grown
+        };
+        assert_eq!(
+            holds_live(&max, None, INDEXED_MTIME, &unchanged),
+            Verdict::Holds
+        );
+        let min = QueryFilters {
+            min_size: Some(1),
+            ..QueryFilters::default()
+        };
+        assert_eq!(
+            holds_live(&min, None, INDEXED_MTIME, &grown),
+            Verdict::Changed(CHANGED_SINCE_INDEXED)
+        );
+        for no_size in [
+            QueryFilters::default(),
+            QueryFilters {
+                mode: Some(ModePredicate::Exact(0o644)),
+                ..QueryFilters::default()
+            },
+        ] {
+            assert_eq!(
+                holds_live(&no_size, None, INDEXED_MTIME, &grown),
+                Verdict::Holds
+            );
+        }
+        // A size filter that already fails reports the filter, not the mtime.
+        let tight = QueryFilters {
+            max_size: Some(1_000_000),
+            ..QueryFilters::default()
+        };
+        assert_eq!(
+            holds_live(&tight, None, INDEXED_MTIME, &grown),
+            Verdict::Changed("no longer matches --max-size")
+        );
     }
 
     #[test]
@@ -735,7 +832,7 @@ mod tests {
             ..live(0)
         };
         assert_eq!(
-            holds_live(&filters, None, &shrunk),
+            holds_live(&filters, None, INDEXED_MTIME, &shrunk),
             Verdict::Changed("no longer matches --min-size")
         );
         let emptied = Live {
@@ -744,10 +841,13 @@ mod tests {
             ..live(0)
         };
         assert_eq!(
-            holds_live(&filters, None, &emptied),
+            holds_live(&filters, None, INDEXED_MTIME, &emptied),
             Verdict::Changed("no longer matches --min-size")
         );
-        assert_eq!(holds_live(&filters, None, &live(4096)), Verdict::Holds);
+        assert_eq!(
+            holds_live(&filters, None, INDEXED_MTIME, &live(4096)),
+            Verdict::Holds
+        );
     }
 
     #[test]
@@ -764,12 +864,15 @@ mod tests {
             };
             for mode in [None, Some(SizeMode::ApparentSize)] {
                 assert_eq!(
-                    holds_live(&filters, mode, &row),
+                    holds_live(&filters, mode, INDEXED_MTIME, &row),
                     Verdict::NotRegular,
                     "{filters:?}"
                 );
             }
-            assert_eq!(holds_live(&filters, None, &live(4096)), Verdict::Holds);
+            assert_eq!(
+                holds_live(&filters, None, INDEXED_MTIME, &live(4096)),
+                Verdict::Holds
+            );
         }
     }
 

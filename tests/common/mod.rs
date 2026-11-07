@@ -296,6 +296,25 @@ pub fn build_index(source: &Path, index: &Path) {
     assert!(ok, "xdu build failed: {err}");
 }
 
+/// Build an index over `source` into `index` with sizes rounded up to `block` (the crawler's
+/// `--block-size`), asserting success. The index does not record that measure.
+pub fn build_index_block_size(source: &Path, index: &Path, block: &str) {
+    let (_out, err, ok) = run_xdu(&[
+        "--block-size",
+        block,
+        "-o",
+        index.to_str().unwrap(),
+        source.to_str().unwrap(),
+    ]);
+    assert!(ok, "xdu build failed: {err}");
+}
+
+/// Append `n` bytes to an existing file, which moves its mtime to now.
+pub fn append_bytes(path: &Path, n: usize) {
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(&vec![b'y'; n]).unwrap();
+}
+
 /// Run `xdu-find` with arbitrary args; returns (stdout, stderr, success).
 pub fn run_find(args: &[&str]) -> (String, String, bool) {
     let output = Command::new(binary_path("xdu-find"))

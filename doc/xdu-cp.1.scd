@@ -148,13 +148,24 @@ no longer matches, and counted.
 Size needs a measure. The indexed size is the disk usage of the file (its
 blocks times 512) by default, its length when the index was built with
 *--apparent-size*, or its length rounded up to a block with *--block-size*,
-and the index does not record which. So a size filter must hold for both
-live measures, the length and the disk usage, or the file is skipped. That
-fails closed: a file selected by *--min-size 2K* that has shrunk to 100 bytes
-is skipped whatever its block count. It also skips some unchanged files: a
-100-byte file in a 4 KiB block holds *--max-size 1K* by its length but not by
-its disk usage, so give *--max-size* a bound no smaller than the filesystem's
-block size when you combine it with *--safe*.
+and the index does not record which. So when *--min-size* or *--max-size* is
+given, two rules apply, and a file that fails either is skipped. First, the
+size filter must hold for both live measures, the length and the disk usage.
+Second, the file's modification time must still equal the one the index
+recorded, to the second, or the file is skipped as changed since the index
+was built. The second rule covers what the first cannot see: on an index built
+with *--block-size 1M*, a file indexed at 900 KiB (one block) and since grown
+to 1.2 MB (two blocks) passes *--max-size 1500K* by both live measures.
+
+Both rules fail closed. A file selected by *--min-size 2K* that has shrunk to
+100 bytes is skipped whatever its block count. They also skip some unchanged
+files: a 100-byte file in a 4 KiB block holds *--max-size 1K* by its length
+but not by its disk usage, so give *--max-size* a bound no smaller than the
+filesystem's block size when you combine it with *--safe*; and a file whose
+modification time was set after the crawl, by *touch*(1) say, is skipped
+though its bytes did not change. A change made within the same second as the
+modification time the index recorded leaves that time equal, and only the
+first rule then applies.
 
 Without *--safe*, the regular-file rule still holds: a symlink, directory,
 FIFO, socket or device at a selected path is never copied. Either way, a

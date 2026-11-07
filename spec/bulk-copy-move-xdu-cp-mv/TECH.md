@@ -681,14 +681,20 @@ P2 takes two findings in two commits; it is `done` only after the second.
   invariant 5 text and `invariants.md` §5, which quoted the statement as `read_parquet(?)`.
 
 ### P2 — finding 2: `--safe` size with an unrecorded size mode
-- [ ] `select::holds_live` takes the row's indexed mtime. With no recorded size mode and a
+- [x] `select::holds_live` takes the row's indexed mtime. With no recorded size mode and a
   `--min-size` or `--max-size` filter, a live mtime other than the indexed one fails as
-  `changed since the index was built`, after the both-measures size checks.
-- [ ] `relocate::Planned` carries the row's indexed mtime to both workers.
-- [ ] `doc/xdu-cp.1.scd` and `doc/xdu-mv.1.scd` SAFE MODE state the rule and its one-second
-  resolution.
-- [ ] Tests: the library's size cases with a moved mtime, and the review's `--block-size`
-  grew-past-the-bound probe for `xdu-cp` and `xdu-mv`, red before and green after.
+  `changed since the index was built` (`CHANGED_SINCE_INDEXED`), after the both-measures size
+  checks, so a file that already fails a size filter still reports that filter.
+- [x] `relocate::Planned` carries the row's indexed mtime to both workers.
+- [x] `doc/xdu-cp.1.scd` and `doc/xdu-mv.1.scd` SAFE MODE state the two rules, the probe's case,
+  what each skips that is unchanged (a small file in a large block; a touched file), and that a
+  change inside the recorded second leaves only the first rule.
+- [x] Tests: `select::tests::an_unstated_size_measure_also_requires_the_indexed_mtime`, and the
+  review's probe as `cp_safe_skips_a_file_that_grew_past_the_bound_by_the_index_block_size` and
+  `mv_safe_skips_a_file_that_grew_past_the_bound_by_the_index_block_size` (index with
+  `--block-size 1M`; a fresh index confirms the file no longer matches by that measure). All
+  three were red with the rule disabled and green with it. `tests/common` gains
+  `build_index_block_size` and `append_bytes`.
 
 ### P2 — finding 4: search-only ancestors
 - [ ] `atomic_fs`: a directory handle records whether it was opened for reading. Walks open every

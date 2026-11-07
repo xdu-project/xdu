@@ -16,8 +16,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use common::{
-    binary_path, build_index, create_test_file, list_files_recursive, run_find, run_mv,
-    run_with_stdin, set_atime_days_ago, set_mtime_days_ago,
+    append_bytes, binary_path, build_index, build_index_block_size, create_test_file,
+    list_files_recursive, run_find, run_mv, run_with_stdin, set_atime_days_ago, set_mtime_days_ago,
 };
 
 struct Fixture {
@@ -593,6 +593,41 @@ fn mv_safe_skips_a_changed_file_and_leaves_it() {
         assert!(out.contains("Moved: 1"), "{filter:?}: {out}");
         assert_eq!(fx.moved(), ["u/changed.dat", "u/kept.dat"], "{filter:?}");
     }
+}
+
+/// The review's probe, for a move: on a `--block-size 1M` index a file indexed at 900 KiB and
+/// grown to 1.2 MB passes both live measures of `--max-size 1500K`. Its moved mtime keeps it
+/// at its source.
+#[test]
+fn mv_safe_skips_a_file_that_grew_past_the_bound_by_the_index_block_size() {
+    let fx = Fixture::new(&[("u/grew.dat", 921_600), ("u/kept.dat", 102_400)]);
+    for rel in ["u/grew.dat", "u/kept.dat"] {
+        set_mtime_days_ago(&fx.src(rel), 10).unwrap();
+    }
+    build_index_block_size(&fx.source, &fx.index, "1M");
+    let (out, err, ok) = run_mv(&fx.args(&["--max-size", "1500K", "-n"]));
+    assert!(ok, "{err}");
+    assert_eq!(dry_run_sources(&out).len(), 2, "{out}");
+
+    append_bytes(&fx.src("u/grew.dat"), 307_200);
+    let fresh = fx.base.join("fresh");
+    build_index_block_size(&fx.source, &fresh, "1M");
+    let kept = fx.src("u/kept.dat").display().to_string();
+    assert_eq!(find_paths_with(&fresh, &["--max-size", "1500K"]), [kept]);
+
+    let (out, err, ok) = run_mv(&fx.args(&["--max-size", "1500K", "--safe", "--force", "-v"]));
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!(
+            "skipped (changed since the index was built): {}",
+            fx.src("u/grew.dat").display()
+        )),
+        "{out}"
+    );
+    assert_eq!(summary(&out), ["Moved: 1", "Skipped: 1"], "{out}");
+    assert_eq!(fx.moved(), ["u/kept.dat"]);
+    assert_eq!(fx.left(), ["u/grew.dat"]);
+    assert_eq!(meta(&fx.src("u/grew.dat")).len(), 1_228_800);
 }
 
 #[test]
