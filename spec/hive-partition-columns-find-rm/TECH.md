@@ -3,7 +3,7 @@ slug: hive-partition-columns-find-rm
 title: A key=value directory name reads like any other in xdu-find, xdu-rm, xdu-view
 kind: fix
 appetite: small
-status: in_review
+status: done
 branch: fix/hive-partition-columns-find-rm
 base: main
 current_phase: done
