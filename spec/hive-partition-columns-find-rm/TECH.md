@@ -72,10 +72,10 @@ phases:
     cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
     -- --check; echo P2-GATE-GREEN'
 review:
-  last_reviewed_commit: ''
-  verdict: none
+  last_reviewed_commit: bcb5b27affa571bc161512ba92308dc1afa6d6c3
+  verdict: approved
   blocked_reason: ''
-  cycle: 0
+  cycle: 1
 ---
 # TECH.md — A `key=value` directory name reads like any other in `xdu-find`, `xdu-rm`, `xdu-view`
 
