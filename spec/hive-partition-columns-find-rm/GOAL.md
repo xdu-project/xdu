@@ -54,8 +54,8 @@ the same shape, and a `key` matching no column adds one (reasoned, for `/xdu-pla
 Every reader `xdu-find`, `xdu-rm` and `xdu-view` use, for a local index and an `s3://` index alike,
 sees exactly the columns the crawler wrote. Naming a source directory, an index directory, or any
 directory above the index `key=value` changes nothing a user observes. The fix is small and
-self-contained enough to ship as a patch release on top of `v0.6.0` without the unreleased
-`xdu-cp`/`xdu-mv` work.
+self-contained enough to ship as a patch release on top of `v0.6.0` and #36 without the
+unreleased `xdu-cp`/`xdu-mv` work.
 
 ## Acceptance criteria (the contract)
 
@@ -96,26 +96,24 @@ index whose partition and index directories carry no `=`.
   with the fix. The `s3://` arm of `xdu-find` and `xdu-view` SHALL be covered in the existing S3
   wire harness (`tests/s3_tests.rs`) on the same terms as its siblings, with the `key=value`
   directory placed where the S3 writer admits it (in the prefix, if it refuses `=` in a partition
-  name).
-- **R6** — The fix's product code and tests SHALL be cherry-pickable onto the `v0.6.0` tag without
-  conflict and SHALL build and pass there, so a patch release `v0.6.1` can carry it without the
-  unreleased `xdu-cp`/`xdu-mv` work (#37). They SHALL NOT reference anything #37 introduced:
-  `src/select.rs`, `src/atomic_fs.rs`, `src/relocate.rs`, the `xdu-cp` and `xdu-mv` binaries and
-  their CLI structs, `cp_tests`/`mv_tests`/`mv_xfs_tests`, their docs, or the helpers #37 added to
-  `tests/common/mod.rs` (`build_index_block_size`, `append_bytes`, `run_cp`, `run_mv`,
-  `run_with_stdin`). They SHALL change as few lines that #37 also changed as practical. Any
-  documentation edit that names `xdu-cp`, `xdu-mv` or the select-act engine SHALL live in a commit
-  of its own on the branch, separable from the product code and tests.
-  [NEEDS CLARIFICATION: `v0.6.0..main` also carries #36 (the `xdu-view` code-point fix), which
-  rewrote part of `src/view_query.rs` and added view helpers to `tests/common/mod.rs` and S3 view
-  tests to `tests/s3_tests.rs`. Does `v0.6.1` carry #36 as well (cherry-picked before this fix), or
-  must this fix also apply cleanly to `v0.6.0` without it, and so avoid #36's helpers and the lines
-  #36 changed?]
+  name). The S3 wire tier runs in CI only (the pinned test extension is not present locally), so
+  CI evidence is acceptable for that arm.
+- **R6** — The patch release `v0.6.1` is `v0.6.0` plus #36 (`0547790`) plus this fix, cherry-picked
+  in that order, without the unreleased `xdu-cp`/`xdu-mv` work (#37). The landed change's diff,
+  restricted to product code and tests (`src/`, `tests/`, and any doc that exists at `v0.6.0`
+  without `xdu-cp`/`xdu-mv` text), SHALL apply without conflict onto `v0.6.0` with #36 applied, and
+  SHALL build and pass there. That restricted diff MAY rely on #36's `src/view_query.rs` changes,
+  its view helpers in `tests/common/mod.rs` and its S3 view tests. It SHALL NOT rely on anything #37
+  introduced: `src/select.rs`, `src/atomic_fs.rs`, `src/relocate.rs`, the `xdu-cp` and `xdu-mv`
+  binaries and their CLI structs, `cp_tests`/`mv_tests`/`mv_xfs_tests`, their docs, or the helpers
+  #37 added to `tests/common/mod.rs` (`build_index_block_size`, `append_bytes`, `run_cp`, `run_mv`,
+  `run_with_stdin`), and it SHALL change as few lines that #37 also changed as practical. The
+  `AGENTS.md` edit (R7) and the `spec/` and `issues/` files are main-only and are not backported.
 - **R7** — `AGENTS.md`'s *Project* paragraph SHALL say that every reader (`xdu-find`, `xdu-rm`,
   `xdu-view` and the select-act engine) turns DuckDB's Hive detection off, and SHALL drop the "do
-  not yet" pointer to the seed. This edit names the select-act engine, so R6's separate-commit rule
-  applies to it. The comment above `partitions_sql` SHALL no longer say a Hive reading "would
-  yield no partition column at all".
+  not yet" pointer to the seed. This edit is main-only: it is not part of R6's restricted diff and
+  is not backported. The comment above `partitions_sql` SHALL no longer say a Hive reading "would
+  yield no partition column at all"; it is in `src/`, so it is part of R6's diff and backports.
 
 ## Non-goals (no-gos)
 
@@ -150,7 +148,7 @@ index whose partition and index directories carry no `=`.
   work (#37). Product code and tests must not depend on anything #37 introduced and should touch as
   few lines shared with #37's changes as practical; documentation that mentions cp/mv goes in a
   separable place (R6, R7). Foreman ruling under the SC26 mandate; approved order relayed by the
-  director (resolved 2026-11-08).
+  director (resolved 2026-11-08). Refined by the release-scope rulings below.
 - **Q:** What is out of scope? — **A:** Moving `xdu-rm` onto the shared engine, the bound-parameters
   rewrite, any change to `src/select.rs`, and the release itself. Foreman ruling under the SC26
   mandate; approved order relayed by the director (resolved 2026-11-08).
@@ -163,9 +161,24 @@ index whose partition and index directories carry no `=`.
   and R3 cover every filter each tool has, and R5 names the age column per tool (resolved
   2026-11-08).
 - **Q:** Must the S3 arm have a test, or is reasoning enough? — **A:** A test, in the existing wire
-  harness on the same terms as its siblings (R5). A shaping choice consistent with the scope ruling
-  above, not itself a foreman ruling; the foreman may strike it at the GOAL gate (2026-11-08).
-- [NEEDS CLARIFICATION: does `v0.6.1` carry #36? See R6.]
+  harness on the same terms as its siblings (R5). Proposed at shaping and kept by the foreman, who
+  noted that the S3 wire tier currently runs in CI only (the pinned test extension is not present
+  locally), so CI evidence is acceptable for that arm. Foreman ruling; release scope per the
+  director's relayed answer of 2026-11-08 (resolved 2026-11-08).
+- **Q:** Does `v0.6.1` carry #36 (the `xdu-view` code-point fix), which `v0.6.0..main` also holds?
+  — **A:** Yes. The release is `v0.6.0` + #36 (`0547790`) + this fix, cherry-picked in that order,
+  so R6's base is `v0.6.0` with #36 applied: the fix may rely on #36's `src/view_query.rs` changes,
+  its `tests/common/mod.rs` view helpers and its S3 view tests, and still must not rely on anything
+  #37 added. Foreman ruling; release scope per the director's relayed answer of 2026-11-08
+  (resolved 2026-11-08).
+- **Q:** How is R6 measured, given that `/xdu-publish` squash-merges and a separate docs commit
+  does not survive? — **A:** On the landed change: its diff restricted to product code and tests
+  (`src/`, `tests/`, and any doc that exists at `v0.6.0` without `xdu-cp`/`xdu-mv` text) applies
+  without conflict onto `v0.6.0`+#36 and builds and passes there. The `AGENTS.md` *Project* edit
+  (R7) and the `spec/` and `issues/` files are main-only and are not backported; the
+  `partitions_sql` comment fix is in `src/` and backports. The "separate commit" mechanism is
+  dropped from R6 and R7. Foreman ruling; release scope per the director's relayed answer of
+  2026-11-08 (resolved 2026-11-08).
 
 ## Related materials
 
