@@ -25,7 +25,14 @@ the one credential resolver and the reader's bound `CREATE SECRET` + the one TLS
 the writer's `tls_certs_only` client) ·
 `src/view_query.rs` (every `xdu-view` statement) ·
 `src/engine.rs` (the one connection open, the extension load and `open_s3_connection`, with the
-reader's certificate-verification statements)
+reader's certificate-verification statements) ·
+`src/select.rs` (the select-act engine's one bound statement, its glob and partition refusals, and
+`holds_live`, the `--safe` re-check) ·
+`src/atomic_fs.rs` (the no-replace publish, the `O_NOFOLLOW` walks, the regular-file rule and
+`copy_atomic`'s temp-then-publish sequence) ·
+`src/relocate.rs` (the `--root` mapping, whole-set refusals, prompt and executor shared by `xdu-cp`
+and `xdu-mv`) ·
+`src/bin/xdu-mv.rs` (destructive at the source: a move removes the source name)
 
 ---
 
@@ -142,7 +149,7 @@ ordering is load-bearing:
   tail. Every reader goes through them; `xdu-find` and `xdu-view` by way of `lib::parquet_source`,
   which binds the S3 glob. Do not hand-build the glob in a reader.
 
-## 4. `xdu-rm` destructive safety — read before touching `src/bin/xdu-rm.rs`
+## 4. `xdu-rm`, `xdu-mv` and `xdu-cp` destructive safety — read before touching their bins
 
 - Default requires an interactive `y/N` confirmation (anything but `y`/`yes` aborts, deleting nothing);
   `--dry-run` performs **zero** deletions; `--force` skips the prompt; empty match set prints a
@@ -155,6 +162,21 @@ ordering is load-bearing:
 - **Any deletion (or previewable action) combined with `--limit` MUST carry a deterministic
   `ORDER BY`** so `--dry-run` and the real run select **identical** rows. A `LIMIT` without `ORDER BY`
   returns an arbitrary/unstable subset.
+- **`xdu-mv` and `xdu-cp` carry the same gates through the shared engine** (`src/relocate.rs`,
+  `src/select.rs`, `src/bin/xdu-mv.rs`, `src/bin/xdu-cp.rs`). `xdu-mv` removes the source name, so
+  it is destructive at the source; `xdu-cp` writes only under `--into` and never modifies or removes
+  a source. Default requires an interactive `y/N` confirmation on stderr (`relocate::confirm`:
+  anything but `y`/`yes` aborts, moving and writing nothing); `--dry-run` performs **zero** writes
+  and **zero** removals (no file, directory or temp file under `--into`); `--force` skips the
+  prompt; empty match set prints a message and exits 0. The whole selected set is mapped and its
+  refusals checked before the first write, dry run included.
+- Their `--safe` re-checks **every** filter against the live metadata immediately before acting
+  (`select::holds_live`) and skips the file when any no longer holds; without `--safe` too, only a
+  regular file is acted on. A size filter on an index that does not record its size measure must
+  hold under both live measures **and** the live mtime must equal the indexed one. Narrowing any of
+  these checks is a violation.
+- Their selection is **always** `ORDER BY path`, with or without `--limit`, and a limit reuses
+  `deterministic_limit_clause`, so `--dry-run` and the real run select **identical** rows.
 
 ## 5. DuckDB injection surface (all readers and the extension loader)
 
@@ -162,6 +184,21 @@ ordering is load-bearing:
   injection surface: `--pattern`, `--partition` (`-u`), and the index path. Today only `--pattern` is
   escaped (single-quote doubling); for a **local** index, partition names and index paths are
   interpolated **raw**, a known exception (binding them is a follow-up seed).
+- The select-act engine behind `xdu-cp` and `xdu-mv` is not under that exception.
+  `select::selection_sql` is pure and writes one statement whose local glob is a bound parameter
+  (`read_parquet(?, hive_partitioning = false)`), as is a `--regex` pattern
+  (`regexp_matches(path, ?)`). Hive detection is off because a `key=value` name that every globbed
+  path carries (a partition `size=0`, an index under `…/mtime=0/`) would otherwise become a column
+  shadowing the row's own; `cp_tests`' two `hive_style` cases and `mv_tests`' one hold it. The
+  other predicates come from `QueryFilters::to_conditions` and the order tail is `ORDER BY path`,
+  always. A bound glob
+  still globs, so `select::checked_glob` refuses, before any SQL, an index path holding a glob
+  metacharacter (`*`, `?`, `[`, `\`) and a partition name that is empty, `.` or `..`, or holds `/`
+  or a metacharacter. The unit tests `select::tests::the_selection_sql_binds_the_glob_and_the_pattern`,
+  `select::tests::an_index_path_with_glob_metacharacters_is_refused` and
+  `select::tests::a_partition_name_that_could_leave_the_index_is_refused` hold the rule, and the
+  integration test `cp_selects_the_right_rows_with_a_quote_in_the_index_and_partition` holds it with
+  a `'` in both. `xdu-rm`'s own statement is unchanged and still under the exception above.
 - For an **`s3://` index** nothing the locator or `-u` carries is interpolated. `lib::parquet_source`
   returns `read_parquet(?)` (or `read_parquet(?, filename=true)`) with the whole glob as the one bound
   value, built by `lib::index_glob_s3`, and `lib::read_completion_marker_s3` binds the URLs of its
@@ -290,7 +327,7 @@ ordering is load-bearing:
 ## 13. Project conventions (same-commit / packaging) — violations are HIGH, not CRITICAL
 
 - **Version is single-sourced from `Cargo.toml`** — never hardcode a version in `src/`; read it from
-  `CARGO_PKG_VERSION`. All four `#[command(...)]` blocks in `src/cli.rs` set `version`, so clap
+  `CARGO_PKG_VERSION`. All six `#[command(...)]` blocks in `src/cli.rs` set `version`, so clap
   derives `-V`/`--version` from `Cargo.toml` for every user-facing binary.
 - `share/` is a **generated** artifact (man via `scdoc` from `doc/*.scd`; completions via
   `gen-completions` from `src/cli.rs`), git-ignored, rebuilt in CI and by `/xdu-release`; CI asserts
@@ -324,7 +361,7 @@ ordering is load-bearing:
   hand** in the workflow's literal list — nothing standing re-derives it, so re-count when you touch a
   `.scd` carrying an asserted literal. (A feature's `spec/{slug}/verify/` harness can derive the counts
   during a build pass, but it is a record once the spec merges, not a gate.) Coverage of a *new* page
-  is likewise not automatic — the `check` list names four pages while the render step globs
+  is likewise not automatic — the `check` list names six pages while the render step globs
   `doc/*.scd`. Both gaps are the standing record in
   [`issues/manpage-gate-coverage-gaps.md`](../../issues/manpage-gate-coverage-gaps.md).
   `AGENTS.md`'s Commands section
@@ -332,9 +369,13 @@ ordering is load-bearing:
   predict CI however well it normalizes. Counting is also what makes the strip dangerous in the other
   direction: fusing two adjacent tokens is at worst a false *green* for presence but a false *red* for
   a count, so a counted needle must be specific enough that fusion cannot synthesize it
-  (`.partial suffix`, never bare `.partial`). Adding, removing or re-counting a literal carries the
-  same three-place same-commit obligation as the normalization above.
-- Release tarball layout — `bin/{xdu,xdu-find,xdu-view,xdu-rm}` +
+  (`.partial suffix`, never bare `.partial`). Besides names (`XDU_*`, `AWS_*`, `s3://BUCKET/PREFIX`)
+  and globs, `xdu-cp.1` and `xdu-mv.1` assert a **worked path**: the destination path of each page's
+  `--root`/`--into` example, counted once and different on the two pages, so a corrupted layout
+  example fails and each needle also identifies its page. Adding, removing or re-counting a literal,
+  or a class of literal, carries the same three-place same-commit obligation as the normalization
+  above.
+- Release tarball layout — `bin/{xdu,xdu-find,xdu-view,xdu-rm,xdu-cp,xdu-mv}` +
   `share/{man/man1/*.1, bash-completion/completions/*, zsh/site-functions/*}` +
   `lib/xdu/extensions/{name}.duckdb_extension` — matches `install.sh` extraction exactly; keep them
   in lockstep. The extensions land beside the *physical* install directory of the binaries

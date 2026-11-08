@@ -256,4 +256,4 @@ shared files:
 
 # SEE ALSO
 
-*xdu*(1), *xdu-find*(1), *xdu-rm*(1)
+*xdu*(1), *xdu-find*(1), *xdu-rm*(1), *xdu-cp*(1), *xdu-mv*(1)

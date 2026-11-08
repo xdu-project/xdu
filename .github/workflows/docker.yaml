@@ -6,7 +6,7 @@ name: Publish Image
 # list with `docker buildx imagetools create`. The published index is then signed and gets a
 # SLSA build-provenance attestation.
 #
-# Platforms are linux/amd64 + linux/arm64 ONLY. The image compiles the four xdu Rust binaries
+# Platforms are linux/amd64 + linux/arm64 ONLY. The image compiles the six xdu Rust binaries
 # from source, and the bundled DuckDB C++ (the `duckdb` crate `bundled` feature) is a heavy
 # C++ build — QEMU-emulating a foreign arch would push each build well past the runner timeout,
 # hence the native per-arch split. Those are the only two Linux arches GitHub offers native

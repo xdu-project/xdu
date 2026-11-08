@@ -226,10 +226,11 @@ is never mistaken for a partition, and its name is reserved as above, so a
 partition is never written over the marker.
 
 Paths are stored as UTF-8. A filename containing invalid UTF-8 is stored with
-replacement characters, so that row no longer names a real file and cannot be
-removed with *xdu-rm*(1). *xdu* reports the first such path in each partition
-and counts the remainder in its summary; storing the raw bytes would require an
-index format change and is not done here.
+replacement characters, so that row no longer names a real file: it cannot be
+removed with *xdu-rm*(1), copied with *xdu-cp*(1) or moved with *xdu-mv*(1),
+and those tools count it as missing. *xdu* reports the first such path in each
+partition and counts the remainder in its summary; storing the raw bytes would
+require an index format change and is not done here.
 
 # EXIT STATUS
 
@@ -255,12 +256,12 @@ The per-path diagnostics and the skipped/error counts in the summary are
 printed either way, and all such diagnostics go to standard error so piped
 output on standard output stays clean. Such a run still writes the completion
 marker, recording the tolerated-error count in it, so *xdu-find*(1),
-*xdu-view*(1) and *xdu-rm*(1) warn on standard error that results may be
-incomplete. Tolerance can also cost data on a re-index: a partition whose
+*xdu-view*(1), *xdu-rm*(1), *xdu-cp*(1) and *xdu-mv*(1) warn on standard error
+that results may be incomplete. Tolerance can also cost data on a re-index: a partition whose
 directory could not be read yields no files, and finalizing it prunes the
 chunks that partition previously held, so rows indexed by an earlier run are
 removed rather than kept.
 
 # SEE ALSO
 
-*xdu-find*(1), *xdu-view*(1), *xdu-rm*(1)
+*xdu-find*(1), *xdu-view*(1), *xdu-rm*(1), *xdu-cp*(1), *xdu-mv*(1)

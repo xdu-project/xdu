@@ -16,7 +16,7 @@ const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Every user-facing binary answers both version spellings with the package version.
 #[test]
 fn test_every_binary_reports_package_version() {
-    for binary in ["xdu", "xdu-find", "xdu-view", "xdu-rm"] {
+    for binary in ["xdu", "xdu-find", "xdu-view", "xdu-rm", "xdu-cp", "xdu-mv"] {
         for flag in ["--version", "-V"] {
             let output = Command::new(binary_path(binary))
                 .arg(flag)

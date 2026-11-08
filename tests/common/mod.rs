@@ -32,6 +32,8 @@ pub fn binary_path(name: &str) -> PathBuf {
         "xdu-find" => env!("CARGO_BIN_EXE_xdu-find").into(),
         "xdu-rm" => env!("CARGO_BIN_EXE_xdu-rm").into(),
         "xdu-view" => env!("CARGO_BIN_EXE_xdu-view").into(),
+        "xdu-cp" => env!("CARGO_BIN_EXE_xdu-cp").into(),
+        "xdu-mv" => env!("CARGO_BIN_EXE_xdu-mv").into(),
         other => panic!("unknown test binary: {other}"),
     }
 }
@@ -294,6 +296,25 @@ pub fn build_index(source: &Path, index: &Path) {
     assert!(ok, "xdu build failed: {err}");
 }
 
+/// Build an index over `source` into `index` with sizes rounded up to `block` (the crawler's
+/// `--block-size`), asserting success. The index does not record that measure.
+pub fn build_index_block_size(source: &Path, index: &Path, block: &str) {
+    let (_out, err, ok) = run_xdu(&[
+        "--block-size",
+        block,
+        "-o",
+        index.to_str().unwrap(),
+        source.to_str().unwrap(),
+    ]);
+    assert!(ok, "xdu build failed: {err}");
+}
+
+/// Append `n` bytes to an existing file, which moves its mtime to now.
+pub fn append_bytes(path: &Path, n: usize) {
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(&vec![b'y'; n]).unwrap();
+}
+
 /// Run `xdu-find` with arbitrary args; returns (stdout, stderr, success).
 pub fn run_find(args: &[&str]) -> (String, String, bool) {
     let output = Command::new(binary_path("xdu-find"))
@@ -313,6 +334,43 @@ pub fn run_rm(args: &[&str]) -> (String, String, bool) {
         .args(args)
         .output()
         .expect("failed to spawn xdu-rm");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
+/// Run `xdu-cp` with arbitrary args and no input; returns (stdout, stderr, success).
+pub fn run_cp(args: &[&str]) -> (String, String, bool) {
+    run_with_stdin("xdu-cp", args, None)
+}
+
+/// Run `xdu-mv` with arbitrary args and no input; returns (stdout, stderr, success).
+pub fn run_mv(args: &[&str]) -> (String, String, bool) {
+    run_with_stdin("xdu-mv", args, None)
+}
+
+/// Run a project binary with `input` on stdin, or with stdin closed when `input` is `None`;
+/// returns (stdout, stderr, success).
+///
+/// The prompt tests need both: an answer, and end of input with nothing typed.
+pub fn run_with_stdin(name: &str, args: &[&str], input: Option<&str>) -> (String, String, bool) {
+    use std::process::Stdio;
+    let mut child = Command::new(binary_path(name))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn {name}: {e}"));
+    {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        if let Some(text) = input {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+    }
+    let output = child.wait_with_output().expect("wait for child");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),

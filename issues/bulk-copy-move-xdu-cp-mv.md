@@ -1,5 +1,5 @@
 ---
-status: unshaped
+status: shaped on feature/bulk-copy-move-xdu-cp-mv (2026-11-06) — see spec/bulk-copy-move-xdu-cp-mv/GOAL.md
 kind: feature
 appetite: big
 ---
