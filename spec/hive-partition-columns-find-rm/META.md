@@ -19,3 +19,19 @@
 - **Recommended fix:** As F2 there: accept a detached `HEAD` equal to `origin/main` after the fetch
   as "on main", and branch from `HEAD` in that case.
 - **Confidence:** high · **Effort:** small
+
+## F2 — No guidance on who writes a phase's gate scripts, or where
+`origin=xdu-plan:step6 severity=low category=missing-guidance status=open target=.agents/skills/xdu-plan/SKILL.md`
+- **What happened:** Two gates here (red on `main`, and the backport onto `v0.6.0` + #36) need
+  scratch trees and a dozen checks each, too much for one `verify:` line. The previous fix cycle
+  kept such gates in `spec/{slug}/verify/*.sh`, but nothing says whether the plan or the build
+  writes them. This plan wrote and exercised them, so the build is graded by gates written before
+  its code.
+- **Skill cause:** Step 6 and the TECH template cover only the inline `verify:` string. A script
+  the build writes for its own gate can be shaped to its code, and the skill neither forbids nor
+  recommends that.
+- **Recommended fix:** In Step 6, name `spec/{slug}/verify/` as the home for multi-step gates. Say
+  that the plan writes them, each with a header stating its contract, and exercises them against a
+  probe where it can. Say that the build may amend one only in the phase commit, with the reason,
+  and never to weaken its header.
+- **Confidence:** med · **Effort:** small
