@@ -41,7 +41,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN
 - id: P2
   name: 'S3 wire tests (count 56); AGENTS.md; prove the backport onto v0.6.0 + #36'
-  status: pending
+  status: in_progress
   satisfies:
   - R1
   - R3
@@ -195,7 +195,7 @@ and each new test is shown to fail on `main`.
 siblings' terms. The docs say every reader turns Hive detection off. The product+test diff is
 shown to apply and pass on the patch-release base.
 
-- [ ] `tests/s3_tests.rs`: `find_key_value_names_read_as_bare_names` and
+- [x] `tests/s3_tests.rs`: `find_key_value_names_read_as_bare_names` and
       `view_key_value_names_read_as_bare_names` (PLAN §2.4). Each has `#[test]` and the
       siblings' exact `#[ignore = "…"]` reason. The S3 prefix carries `mtime=0` (find) or
       `atime=0` (view) and the local copy sits at a bare path. The tree has a `size=0`
@@ -204,26 +204,43 @@ shown to apply and pass on the patch-release base.
       the bodies (the wire script refuses an early one). A constructor taking a source builder
       may be added to `Parity`/`ViewParity`. Pad with `wide_source_tree` if `finish()` refuses a
       whole-object GET.
-- [ ] Wire count 54 → 56 in the same commit: `.github/workflows/test.yaml`
+- [x] Wire count 54 → 56 in the same commit: `.github/workflows/test.yaml`
       (`sh tests/s3-wire.sh "" 56`) and `AGENTS.md`
       (`XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 56`).
-- [ ] `AGENTS.md` *Project* paragraph (R7, main-only): every reader (`xdu-find`, `xdu-rm`,
+- [x] `AGENTS.md` *Project* paragraph (R7, main-only): every reader (`xdu-find`, `xdu-rm`,
       `xdu-view` and the select-act engine) reads with `hive_partitioning = false`, so a
       `key=value` name is read as a name. Drop "do not yet" and the seed pointer.
-- [ ] Lockstep, main-only: `invariants.md` §5. `parquet_source`'s text becomes
+- [x] Lockstep, main-only: `invariants.md` §5. `parquet_source`'s text becomes
       `read_parquet(?, hive_partitioning = false)` (or
       `read_parquet(?, hive_partitioning = false, filename=true)`). Its local pin is named as now
       carrying the option. The sentence on why Hive detection is off covers every reader, held
       also by this cycle's six local tests and two wire tests. §3 still says every reader goes
       through the index globs.
-- [ ] Deferral ledger: walk P1, P2 and PLAN for "not fixed here", "follow-up", "known
+- [x] Deferral ledger: walk P1, P2 and PLAN for "not fixed here", "follow-up", "known
       limitation" and "deferred". This plan defers nothing. Any deferral found while building gets
       its own `issues/` file (from `templates/ISSUE.md`) and a `ROADMAP.md` entry before this
       phase closes; never `META.md`. PLAN §5's README and site observation is a question for the
       foreman, not a deferral.
-- [ ] Run `verify/backport.sh` last, on the finished working tree (it is in the `verify:`). Do
+- [x] Run `verify/backport.sh` last, on the finished working tree (it is in the `verify:`). Do
       not touch any path it rejects as neither `src/`, `tests/` nor main-only; a man page or the
       README would need an explicit decision first.
+- **Built (run A, 2026-11-08):** both wire tests share `key_value_tree`: `varied_source_tree`'s
+  1400 files (sizes 1 to 1400 bytes, at most 140 days old) under the one partition `size=0`, plus
+  `big.bin` (5,000,000 bytes, accessed a minute ago, so the newest file). The bucket copies sit
+  under `kv/mtime=0/idx` (find) and `kv/atime=0/idx` (view); the local index sits at a bare path.
+  `Parity` gained `over` (as `ViewParity` has), so a test seeds its own tree; `Parity::new`
+  delegates to it. The 1401-row chunk is not padded with `wide_source_tree`: the siblings'
+  `finish()` already passes on `bob`'s 450-row chunk from the same generator, so a whole-object
+  GET is not expected (CI confirms). Distinct sizes keep `-f size` a total order. The absolute
+  assertions and the view's exact entry count (`7 * (1 + 2 * 1406)`) were checked on the local
+  arm with a scratch, uncommitted copy of each test against indexes stored under
+  `kv/mtime=0/idx` and `kv/atime=0/idx`: green with the fix, and red at the first assertion
+  (`-u size=0 --max-size 1K`) with `hive_partitioning = false` removed from `parquet_source`.
+  The ledger walk found no deferral; PLAN §5's README and site observation goes to the foreman.
+- **Status after run A:** code, docs and every local check are done and green; the phase stays
+  `in_progress` until CI shows the wire tier. **Left for run B:** the Tests workflow's "S3 tests"
+  step on both legs must print `s3-wire: '' 56 of 56 passed` with both new tests `ok` in its log,
+  and the rest of the workflow green on the pushed head; then mark P2 `done`.
 - **Verify:** the frontmatter `verify:`, in order:
   - 56 tests listed under `--include-ignored`; each new test carries the ignore reason and no
     `return`.

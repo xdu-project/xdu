@@ -20,11 +20,13 @@ administration (HPC / enterprise: hundreds of millions to billions of files) whe
 persistent, queryable **Parquet index partitioned by top-level subdirectory** once, then answers
 size/age/pattern questions instantly. The directory names are bare, not Hive `key=value` pairs, and
 partition scoping comes from the glob (`lib::index_glob`) rather than from partition metadata. Bare
-names are a convention, not a guarantee: DuckDB's Hive auto-detection still turns a `key=value` name
+names are a convention, not a guarantee: DuckDB's Hive auto-detection would turn a `key=value` name
 that every globbed path carries (a partition named `size=0`, an index under `…/mtime=0/`) into a
-column that shadows the row's own. The select-act engine reads with `hive_partitioning = false`
-(`src/select.rs`, held by `cp_tests`/`mv_tests`); `xdu-find`, `xdu-rm` and `xdu-view` do not yet
-(`issues/hive-partition-columns-find-rm.md`).
+column that shadows the row's own. So every reader (`xdu-find`, `xdu-rm`, `xdu-view` and the
+select-act engine) reads with `hive_partitioning = false`, and a `key=value` name is read as a name:
+`lib::parquet_source` for `xdu-find` and `xdu-view`, `xdu-rm`'s own selection statement, and
+`src/select.rs`. `find_tests`, `rm_tests` and `view_tests` hold it for the three tools (and the S3
+wire tier for `xdu-find` and `xdu-view` over `s3://`), `cp_tests`/`mv_tests` for the engine.
 
 Seven binaries (`Cargo.toml [[bin]]`), six user-facing plus one build helper:
 
@@ -219,7 +221,7 @@ assume `nightly` — use the pinned toolchain.
 cargo build --release                                   # all bins (bundled DuckDB C++ is the slow part)
 cargo test                                              # lib unit tests + tests/ integration
 cargo test --test rm_tests                              # one integration file
-XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 54   # S3 wire tier (see Testing)
+XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh "" 56   # S3 wire tier (see Testing)
 XDU_TEST_XFS_DIR=/dev/shm/xdu-xfs sh tests/xfs-wire.sh "" 3   # cross-filesystem tier (see Testing)
 cargo clippy --all-targets --all-features -- -D warnings   # lint gate (must be clean)
 cargo fmt --all -- --check                              # format gate
