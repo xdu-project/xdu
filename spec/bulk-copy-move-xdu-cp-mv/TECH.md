@@ -3,7 +3,7 @@ slug: bulk-copy-move-xdu-cp-mv
 title: 'Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine'
 kind: feature
 appetite: big
-status: blocked
+status: in_review
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
 current_phase: done
@@ -901,6 +901,31 @@ directory's entry in its parent, so a power loss soon after, on a filesystem tha
 a child's flush before its parent's entry, could leave that file at neither name. Not
 reproduced (it needs a crash); ext4 and XFS journal ordering covers it. `xdu-mv`(1) says so next
 to the durability text. No code change, by the ruling.
+
+## Remediation — review cycle 3 (human ruling, 2026-11-07)
+
+[`REVIEW.md`](REVIEW.md) cycle 3 (on `2acf8aa`, the last review the loop allows) returned
+changes-requested with one LOW/CONFIRMED finding at `src/atomic_fs.rs` `link_route`: on the link
+route (no no-replace rename), a destination directory the caller cannot read failed the file
+with "cannot open the directory for reading", unnamed, though `xdu-mv`(1) PERMISSIONS and every
+other route name the directory. **Geoffrey ruled: fix the message, change nothing else, and
+land it without a fourth review.**
+
+### P3 — cycle-3 finding: the link route names the directory it cannot read
+- [x] `DirHandle` keeps the name it was opened by under its parent (`None` for a directory the
+  operator named), carried through `try_clone` and `reopen`; `link_route` passes it to
+  `DirHandle::readable`, so the refusal reads "cannot open directory NAME for reading (…), which
+  flushing it to stable storage needs", as on the other routes. Nothing else changes.
+- [x] Test: `relocate::tests::only_the_routes_that_flush_a_directory_need_to_read_it`'s link-route
+  case now asserts `cannot open directory u for reading (`. Red before the fix (it got
+  `Failed("cannot open the directory for reading (Permission denied (os error 13)), …")`), green
+  after.
+- **Verify:** P3's gate, which names that test, plus the full suite, clippy and fmt: green (347
+  passed, 0 failed, 53 ignored as designed).
+- **FSM after the cap:** neither `xdu-build` nor `xdu-review` says where a human-approved fix
+  after the last allowed review leaves the FSM, so it is left at `in_review` with the cycle-3
+  verdict recorded; landing without a fourth review is the human's ruling above, for
+  `/xdu-publish` to act on (META F7).
 
 ---
 

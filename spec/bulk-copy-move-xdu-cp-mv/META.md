@@ -105,3 +105,14 @@
   (`git log --format=%h main..HEAD`), or strip remediation subjects, and say why in Step 2. This
   strengthens blindness and weakens no gate.
 - **Confidence:** med · **Effort:** small
+
+## F7 — No rule for the FSM after a human-approved fix past the review cap
+`origin=xdu-build:P3 severity=low category=missing-guidance status=open target=.agents/skills/xdu-build/SKILL.md`
+- **What happened:** after review cycle 3 (the cap) the human ruled a LOW fix should land without
+  a fourth review. Remediation mode only knows "reopen, fix, `--top-status in_review`", which
+  invites a review the loop no longer allows.
+- **Skill cause:** neither `xdu-build` nor `xdu-review` says what state a post-cap, human-approved
+  fix leaves, or how the approval is recorded for `/xdu-publish`.
+- **Recommended fix:** add a post-cap branch to Step 1.3: record the human ruling in TECH.md and
+  set a state (or `review.verdict`) that `/xdu-publish` accepts without another review.
+- **Confidence:** med · **Effort:** small

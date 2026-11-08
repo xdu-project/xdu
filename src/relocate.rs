@@ -847,7 +847,7 @@ mod tests {
                 link,
                 0o755,
                 0o333,
-                Some("cannot open the directory for reading ("),
+                Some("cannot open directory u for reading ("),
             ),
             (link, 0o311, 0o755, None),
             (Faults::default(), 0o311, 0o333, None),

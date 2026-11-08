@@ -26,6 +26,9 @@ pub struct DirHandle {
     /// Opened for reading, so it can be flushed. A search-only handle serves every `*at` call
     /// but not a flush.
     readable: bool,
+    /// The name it was opened by under its parent; `None` for a directory the operator named.
+    /// A refusal to read it names it.
+    name: Option<OsString>,
 }
 
 /// How a directory is opened.
@@ -83,6 +86,7 @@ impl DirHandle {
         DirHandle {
             fd,
             readable: access == Access::Read,
+            name: None,
         }
     }
 
@@ -94,6 +98,7 @@ impl DirHandle {
         Ok(DirHandle {
             fd: self.fd.try_clone()?,
             readable: self.readable,
+            name: self.name.clone(),
         })
     }
 
@@ -111,7 +116,10 @@ impl DirHandle {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
-        owned(fd).map(|fd| DirHandle::new(fd, Access::Read))
+        owned(fd).map(|fd| DirHandle {
+            name: self.name.clone(),
+            ..DirHandle::new(fd, Access::Read)
+        })
     }
 
     /// This directory opened for reading, so it can be flushed: a clone when it already is,
@@ -213,7 +221,10 @@ pub fn open_dir_nofollow(
             access.flag() | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
-    Ok(DirHandle::new(owned(fd)?, access))
+    Ok(DirHandle {
+        name: Some(name.to_os_string()),
+        ..DirHandle::new(owned(fd)?, access)
+    })
 }
 
 /// The `Normal` components of a path; a root, `.` or `..` contributes nothing.
@@ -917,7 +928,7 @@ fn link_route(
         step::<NoReplace>(hook, Step::Linked)?;
         // A rename on one filesystem walks the destination search-only; this route alone flushes
         // it there, so it reads it here.
-        dp.readable(None)?.sync()?;
+        dp.readable(dp.name.as_deref())?.sync()?;
         let now = fstatat_nofollow(sp, sn);
         let still = matches!(&now, Ok(s) if s.same_object(&recorded));
         if !still {
