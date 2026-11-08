@@ -1,5 +1,5 @@
 Name:           xdu
-Version:        0.4.2
+Version:        0.5.2
 Release:        1%{?dist}
 Summary:        High-performance file system indexer for large-scale storage administration
 License:        MIT
@@ -10,6 +10,9 @@ BuildRequires:       rust
 # The duckdb crate's `bundled` feature compiles DuckDB from C++ source; cc-rs
 # invokes a tool literally named `c++`, so plain gcc is not enough.
 BuildRequires:       gcc-c++
+
+# Disable debug package generation
+%global debug_package %{nil}
 
 %description
 Extreme-scale parallel "du" command with search and TUI viewer.
@@ -42,6 +45,9 @@ install -D -m 0755 target/release/xdu-mv %{buildroot}%{_bindir}/xdu-mv
 %{_bindir}/%{name}-view
 
 %changelog
+* Mon Sep 17 2026 Christopher Orr <chris.orr@gmail.com> - 0.5.2-1
+- RPM spec file requires version bump to match release version.
+- Disable debug package generation.
 * Mon Sep 07 2026 Geoffrey Lentner <glentner@purdue.edu> - 0.4.2-1
 - Build from packaged sources; require gcc-c++; correct the license
 * Wed Sep  02 2026 Geoffrey Lentner <glentner@purdue.edu> - 0.4.1-1
