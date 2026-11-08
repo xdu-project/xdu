@@ -3,10 +3,10 @@ slug: hive-partition-columns-find-rm
 title: A key=value directory name reads like any other in xdu-find, xdu-rm, xdu-view
 kind: fix
 appetite: small
-status: in_progress
+status: in_review
 branch: fix/hive-partition-columns-find-rm
 base: main
-current_phase: P2
+current_phase: done
 last_updated: '2026-11-08'
 phases:
 - id: P1
@@ -41,7 +41,7 @@ phases:
     -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN
 - id: P2
   name: 'S3 wire tests (count 56); AGENTS.md; prove the backport onto v0.6.0 + #36'
-  status: in_progress
+  status: done
   satisfies:
   - R1
   - R3
@@ -241,6 +241,15 @@ shown to apply and pass on the patch-release base.
   `in_progress` until CI shows the wire tier. **Left for run B:** the Tests workflow's "S3 tests"
   step on both legs must print `s3-wire: '' 56 of 56 passed` with both new tests `ok` in its log,
   and the rest of the workflow green on the pushed head; then mark P2 `done`.
+- **Closed (run B, 2026-11-08):** CI on `5ef684b` (draft PR #38) is green and quoted in
+  [`evidence/p2-ci.md`](evidence/p2-ci.md). Tests run 42526947270 (on the merge ref `bf7327e`,
+  whose tree is `5ef684b`'s): on both legs the "S3 tests" step printed both new tests `ok` and
+  `s3-wire: '' 56 of 56 passed`; Lint, both Test legs and Packaging passed. Release run
+  42526947295 (it ran because the diff touches `src/lib.rs`): Prepare and the four build legs
+  passed, both Linux legs at `GLIBC_2.28` at most, every leg `extension-check: ok`; publishing
+  was skipped, as on every pull request. The image workflow did not run: no changed path
+  matches its `pull_request` filter. The frontmatter `verify:` was re-run on the closing tree
+  (code unchanged since `5ef684b`) and printed `P2-GATE-GREEN`.
 - **Verify:** the frontmatter `verify:`, in order:
   - 56 tests listed under `--include-ignored`; each new test carries the ignore reason and no
     `return`.

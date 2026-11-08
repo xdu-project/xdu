@@ -46,3 +46,16 @@
   `spec/bulk-copy-move-xdu-cp-mv/META.md` F4, still open: the script hardcodes `bindir`.
 - **Recommended fix:** As there: derive `bindir` from `${CARGO_TARGET_DIR:-$root/target}/release`.
 - **Confidence:** high · **Effort:** small
+
+## F4 — xdu-build has no run B, though P2 closes on one · seen again
+`origin=xdu-build:P2 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-build/SKILL.md`
+- **What happened:** P2 was split into run A (local) and run B (CI logs) by its TECH body. Run B's
+  evidence path (`evidence/p2-ci.md`), its shape, the merge-ref reasoning, the Release-log lines to
+  quote and the choice to re-run the stored `verify:` were all taken from
+  `spec/s3-index-target/evidence/` and the dispatcher's brief, not from the skill.
+- **Skill cause:** Same as `spec/s3-index-target/META.md` F12, still open: Steps 4–7 assume a
+  phase's evidence is local, and the run A / run B split lives only in earlier cycles' files.
+- **Recommended fix:** As F12 there: a "Run B (close on CI evidence)" step naming
+  `spec/{slug}/evidence/p<n>-ci.md`, verbatim lines with run id, job, step and timestamp, the
+  merge ref's tree, a re-run of the stored `verify:`, and the close commit's subject.
+- **Confidence:** high · **Effort:** small
