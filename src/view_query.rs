@@ -1,10 +1,11 @@
 //! The index queries behind `xdu-view`'s list and tree views.
 //!
 //! Every statement takes its `FROM` from `parquet_source`, so a local index gets the text it
-//! always had and an S3 index gets `read_parquet(?)` with its glob bound. The one other value a
-//! statement draws from the index, the directory prefix a listing matches with `path LIKE`, is
-//! bound on the S3 arm as well. Each statement is built by a pure function returning its text
-//! and the values it binds, so a unit test can pin the local text without a connection.
+//! always had, with Hive detection turned off, and an S3 index gets `read_parquet(?, …)` with
+//! its glob bound. The one other value a statement draws from the index, the directory prefix
+//! a listing matches with `path LIKE`, is bound on the S3 arm as well. Each statement is built
+//! by a pure function returning its text and the values it binds, so a unit test can pin the
+//! local text without a connection.
 
 use anyhow::Result;
 use duckdb::{Connection, params_from_iter};
@@ -81,9 +82,10 @@ pub fn root_files(
 /// The statement listing every partition but `__root__`, with its bound values.
 ///
 /// The partition name is the directory holding the chunk, recovered from the `filename`
-/// pseudo-column. Not Hive partitioning: the layout uses bare directory names, so
-/// `hive_partitioning=true` would yield no partition column at all. When filters are active,
-/// only matching files are counted and summed, and a partition with none is left out.
+/// pseudo-column. Not Hive partitioning: the layout uses bare directory names, and
+/// `parquet_source` turns Hive detection off, so a partition or index directory named
+/// `key=value` reads as a name and adds no column. When filters are active, only matching
+/// files are counted and summed, and a partition with none is left out.
 pub fn partitions_sql(
     index: &IndexLocator,
     filters: &QueryFilters,
@@ -436,7 +438,8 @@ mod tests {
     use crate::{S3Locator, index_glob};
 
     // The statements xdu-view built before they moved here, copied from the binary unchanged
-    // but for `self`, so the local text each view sends is pinned byte for byte.
+    // but for `self` and the `, hive_partitioning = false` that `parquet_source` now puts after
+    // every glob, so the local text each view sends is pinned byte for byte.
 
     fn old_root_files_sql(index_path: &Path, filters: &QueryFilters) -> String {
         let glob = index_glob(index_path, Some(ROOT_PARTITION));
@@ -445,7 +448,7 @@ mod tests {
         format!(
             r#"
             SELECT path, size, atime
-            FROM read_parquet('{glob}')
+            FROM read_parquet('{glob}', hive_partitioning = false)
             {where_clause}
             "#,
             glob = glob,
@@ -481,7 +484,7 @@ mod tests {
                     SUM(CASE WHEN {filter} THEN size ELSE 0 END) as total_size,
                     MAX(CASE WHEN {filter} THEN atime ELSE 0 END) as latest_atime,
                     SUM(CASE WHEN {filter} THEN 1 ELSE 0 END) as file_count
-                FROM read_parquet('{glob}', filename=true)
+                FROM read_parquet('{glob}', hive_partitioning = false, filename=true)
                 GROUP BY partition
                 {having}
                 ORDER BY {order}
@@ -499,7 +502,7 @@ mod tests {
                     SUM(size) as total_size,
                     MAX(atime) as latest_atime,
                     COUNT(*) as file_count
-                FROM read_parquet('{glob}', filename=true)
+                FROM read_parquet('{glob}', hive_partitioning = false, filename=true)
                 GROUP BY partition
                 HAVING partition IS NOT NULL AND partition != '' AND partition != '{root}'
                 ORDER BY {order}
@@ -514,7 +517,7 @@ mod tests {
     fn old_partition_root_sql(index_path: &Path, partition: &str) -> String {
         let glob = index_glob(index_path, Some(partition));
         format!(
-            "SELECT path FROM read_parquet('{}') ORDER BY length(path) LIMIT 1",
+            "SELECT path FROM read_parquet('{}', hive_partitioning = false) ORDER BY length(path) LIMIT 1",
             glob
         )
     }
@@ -552,7 +555,7 @@ mod tests {
                     path,
                     size,
                     atime
-                FROM read_parquet('{glob}')
+                FROM read_parquet('{glob}', hive_partitioning = false)
                 WHERE {file_filter}
             ),
             components AS (
@@ -602,7 +605,7 @@ mod tests {
             r#"
             WITH files AS (
                 SELECT path, size, atime
-                FROM read_parquet('{glob}')
+                FROM read_parquet('{glob}', hive_partitioning = false)
                 WHERE {file_filter}
             ),
             components AS (
@@ -763,7 +766,7 @@ mod tests {
     #[test]
     fn s3_view_sql_binds_the_glob_and_the_directory_prefix() {
         // A quote in the prefix, the partition or a directory would end a literal; bound, none
-        // of them reaches the text.
+        // of them reaches the text. The one option the text gains is the constant Hive one.
         let index = IndexLocator::S3(S3Locator::parse(OsStr::new("s3://bucket/it's")).unwrap());
         let glob = |partition: &str| format!("s3://bucket/it's/{partition}/*.parquet");
         let values = ["it's", "o'brien", "/data/x'y"];
@@ -776,26 +779,35 @@ mod tests {
 
         for filters in filter_sets() {
             let (sql, params) = root_files_sql(&index, &filters);
-            assert!(sql.contains("FROM read_parquet(?)"), "{sql}");
+            assert!(
+                sql.contains("FROM read_parquet(?, hive_partitioning = false)"),
+                "{sql}"
+            );
             assert_eq!(params, vec![glob(ROOT_PARTITION)]);
             assert_bound(&sql);
 
             let (sql, params) = partition_root_sql(&index, "o'brien");
             assert_eq!(
                 sql,
-                "SELECT path FROM read_parquet(?) ORDER BY length(path) LIMIT 1"
+                "SELECT path FROM read_parquet(?, hive_partitioning = false) ORDER BY length(path) LIMIT 1"
             );
             assert_eq!(params, vec![glob("o'brien")]);
 
             for sort_mode in SortMode::ALL {
                 let (sql, params) = partitions_sql(&index, &filters, sort_mode);
-                assert!(sql.contains("FROM read_parquet(?, filename=true)"), "{sql}");
+                assert!(
+                    sql.contains("FROM read_parquet(?, hive_partitioning = false, filename=true)"),
+                    "{sql}"
+                );
                 assert_eq!(params, vec![glob("*")]);
                 assert_bound(&sql);
 
                 for build in [list_directory_sql, tree_directory_sql] {
                     let (sql, params) = build(&index, "o'brien", "/data/x'y", &filters, sort_mode);
-                    assert!(sql.contains("FROM read_parquet(?)"), "{sql}");
+                    assert!(
+                        sql.contains("FROM read_parquet(?, hive_partitioning = false)"),
+                        "{sql}"
+                    );
                     assert!(sql.contains("WHERE path LIKE ?"), "{sql}");
                     // The glob is the first placeholder and the prefix the second.
                     assert_eq!(params, vec![glob("o'brien"), "/data/x'y/%".to_string()]);

@@ -35,3 +35,14 @@
   probe where it can. Say that the build may amend one only in the phase commit, with the reason,
   and never to weaken its header.
 - **Confidence:** med · **Effort:** small
+
+## F3 — `temp_index.sh` drives `<cwd>/target/release` while its build honours `CARGO_TARGET_DIR` · seen again
+`origin=xdu-build:P1 severity=medium category=tooling status=open target=.agents/factory/bin/temp_index.sh`
+- **What happened:** P1's gate runs with `CARGO_TARGET_DIR` set to the cycle's warm target, so the
+  drive's own `cargo build --release --bins` compiled into that directory (3m26s) and then ran
+  `target/release`, which held whatever was there. The build pre-built `target/release` from the
+  final tree (a second full release build) so the drive measured the current code.
+- **Skill cause:** Same as `spec/s3-index-target/META.md` F13 and
+  `spec/bulk-copy-move-xdu-cp-mv/META.md` F4, still open: the script hardcodes `bindir`.
+- **Recommended fix:** As there: derive `bindir` from `${CARGO_TARGET_DIR:-$root/target}/release`.
+- **Confidence:** high · **Effort:** small

@@ -1,39 +1,82 @@
 ---
 slug: hive-partition-columns-find-rm
-title: "A key=value directory name reads like any other in xdu-find, xdu-rm, xdu-view"
+title: A key=value directory name reads like any other in xdu-find, xdu-rm, xdu-view
 kind: fix
 appetite: small
 status: in_progress
 branch: fix/hive-partition-columns-find-rm
 base: main
-current_phase: P1
-last_updated: "2026-11-08"
+current_phase: P2
+last_updated: '2026-11-08'
 phases:
-  - id: P1
-    name: "Hive detection off in every local reader; pins; six tests red on 052bbc7"
-    status: pending
-    satisfies: [R1, R2, R3, R4, R5, R7]
-    depends_on: []
-    parallel: false
-    hammerable: false
-    hill: crest
-    verify: "set -eu; mkdir -p target; cargo test --locked --lib >target/p1-lib.log 2>&1; for t in tests::test_parquet_source_keeps_local_sql_byte_for_byte tests::test_parquet_source_binds_the_s3_glob view_query::tests::local_view_sql_is_byte_for_byte_what_xdu_view_sent view_query::tests::s3_view_sql_binds_the_glob_and_the_directory_prefix; do grep -qF \"test $t ... ok\" target/p1-lib.log; done; cargo test --locked --test find_tests --test rm_tests --test view_tests >target/p1-it.log 2>&1; for t in find_reads_a_key_value_partition_as_a_bare_name find_reads_an_index_under_a_key_value_directory_as_a_bare_one rm_reads_a_key_value_partition_as_a_bare_name rm_reads_an_index_under_a_key_value_directory_as_a_bare_one view_reads_a_key_value_partition_as_a_bare_name view_reads_an_index_under_a_key_value_directory_as_a_bare_one; do grep -qF \"test $t ... ok\" target/p1-it.log; done; sh spec/hive-partition-columns-find-rm/verify/scope.sh; sh spec/hive-partition-columns-find-rm/verify/red.sh; .agents/factory/bin/temp_index.sh sh -c 'set -eu; mkdir mtime=0 atime=0; cp -R \"$XDU_INDEX\" mtime=0/idx; cp -R \"$XDU_INDEX\" atime=0/idx; test \"$(xdu-find --count)\" -gt 0; test -z \"$(xdu-find -i mtime=0/idx --mtime-older-than 3650)\"; test \"$(xdu-find -i mtime=0/idx --count)\" = \"$(xdu-find --count)\"; xdu-rm -i atime=0/idx --older-than 3650 -n | grep -qx \"No matching files found.\"'; cargo test --locked; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN"
-  - id: P2
-    name: "S3 wire tests (count 56); AGENTS.md; prove the backport onto v0.6.0 + #36"
-    status: pending
-    satisfies: [R1, R3, R5, R6, R7]
-    depends_on: [P1]
-    parallel: false
-    hammerable: false
-    hill: crest
-    verify: "set -eu; mkdir -p target; listed=$(cargo test --locked --test s3_tests -- --list --include-ignored 2>/dev/null | grep -c ': test$'); test \"$listed\" -eq 56; for t in find_key_value_names_read_as_bare_names view_key_value_names_read_as_bare_names; do grep -B1 \"^fn $t()\" tests/s3_tests.rs | grep -qF '#[ignore = \"needs the pinned httpfs'; if sed -n \"/^fn $t()/,/^}/p\" tests/s3_tests.rs | grep -qw return; then echo \"$t returns early\" >&2; exit 1; fi; done; grep -qF 'sh tests/s3-wire.sh \"\" 56' .github/workflows/test.yaml; grep -qF 'XDU_TEST_EXTENSION_DIR=target/test-ext sh tests/s3-wire.sh \"\" 56' AGENTS.md; if grep -nF 's3-wire.sh \"\" 54' .github/workflows/test.yaml AGENTS.md; then echo 'a stale wire count remains' >&2; exit 1; fi; sed -n '/^## Project/,/^Seven binaries/p' AGENTS.md | tr -s '[:space:]' ' ' >target/p2-project.txt; for w in xdu-find xdu-rm xdu-view 'select-act engine' 'hive_partitioning = false'; do grep -qF \"$w\" target/p2-project.txt; done; if grep -qE 'do not yet|issues/hive-partition-columns-find-rm' target/p2-project.txt; then echo 'the Project paragraph still says do not yet or points at the seed' >&2; exit 1; fi; tr -s '[:space:]' ' ' <.agents/factory/invariants.md | grep -qF 'read_parquet(?, hive_partitioning = false, filename=true)'; sh spec/hive-partition-columns-find-rm/verify/scope.sh; sh spec/hive-partition-columns-find-rm/verify/backport.sh; cargo test --locked; cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all -- --check; echo P2-GATE-GREEN"
+- id: P1
+  name: Hive detection off in every local reader; pins; six tests red on 052bbc7
+  status: done
+  satisfies:
+  - R1
+  - R2
+  - R3
+  - R4
+  - R5
+  - R7
+  depends_on: []
+  parallel: false
+  hammerable: false
+  hill: crest
+  verify: set -eu; mkdir -p target; cargo test --locked --lib >target/p1-lib.log 2>&1;
+    for t in tests::test_parquet_source_keeps_local_sql_byte_for_byte tests::test_parquet_source_binds_the_s3_glob
+    view_query::tests::local_view_sql_is_byte_for_byte_what_xdu_view_sent view_query::tests::s3_view_sql_binds_the_glob_and_the_directory_prefix;
+    do grep -qF "test $t ... ok" target/p1-lib.log; done; cargo test --locked --test
+    find_tests --test rm_tests --test view_tests >target/p1-it.log 2>&1; for t in
+    find_reads_a_key_value_partition_as_a_bare_name find_reads_an_index_under_a_key_value_directory_as_a_bare_one
+    rm_reads_a_key_value_partition_as_a_bare_name rm_reads_an_index_under_a_key_value_directory_as_a_bare_one
+    view_reads_a_key_value_partition_as_a_bare_name view_reads_an_index_under_a_key_value_directory_as_a_bare_one;
+    do grep -qF "test $t ... ok" target/p1-it.log; done; sh spec/hive-partition-columns-find-rm/verify/scope.sh;
+    sh spec/hive-partition-columns-find-rm/verify/red.sh; .agents/factory/bin/temp_index.sh
+    sh -c 'set -eu; mkdir mtime=0 atime=0; cp -R "$XDU_INDEX" mtime=0/idx; cp -R "$XDU_INDEX"
+    atime=0/idx; test "$(xdu-find --count)" -gt 0; test -z "$(xdu-find -i mtime=0/idx
+    --mtime-older-than 3650)"; test "$(xdu-find -i mtime=0/idx --count)" = "$(xdu-find
+    --count)"; xdu-rm -i atime=0/idx --older-than 3650 -n | grep -qx "No matching
+    files found."'; cargo test --locked; cargo clippy --locked --all-targets --all-features
+    -- -D warnings; cargo fmt --all -- --check; echo P1-GATE-GREEN
+- id: P2
+  name: 'S3 wire tests (count 56); AGENTS.md; prove the backport onto v0.6.0 + #36'
+  status: pending
+  satisfies:
+  - R1
+  - R3
+  - R5
+  - R6
+  - R7
+  depends_on:
+  - P1
+  parallel: false
+  hammerable: false
+  hill: crest
+  verify: 'set -eu; mkdir -p target; listed=$(cargo test --locked --test s3_tests
+    -- --list --include-ignored 2>/dev/null | grep -c '': test$''); test "$listed"
+    -eq 56; for t in find_key_value_names_read_as_bare_names view_key_value_names_read_as_bare_names;
+    do grep -B1 "^fn $t()" tests/s3_tests.rs | grep -qF ''#[ignore = "needs the pinned
+    httpfs''; if sed -n "/^fn $t()/,/^}/p" tests/s3_tests.rs | grep -qw return; then
+    echo "$t returns early" >&2; exit 1; fi; done; grep -qF ''sh tests/s3-wire.sh
+    "" 56'' .github/workflows/test.yaml; grep -qF ''XDU_TEST_EXTENSION_DIR=target/test-ext
+    sh tests/s3-wire.sh "" 56'' AGENTS.md; if grep -nF ''s3-wire.sh "" 54'' .github/workflows/test.yaml
+    AGENTS.md; then echo ''a stale wire count remains'' >&2; exit 1; fi; sed -n ''/^##
+    Project/,/^Seven binaries/p'' AGENTS.md | tr -s ''[:space:]'' '' '' >target/p2-project.txt;
+    for w in xdu-find xdu-rm xdu-view ''select-act engine'' ''hive_partitioning =
+    false''; do grep -qF "$w" target/p2-project.txt; done; if grep -qE ''do not yet|issues/hive-partition-columns-find-rm''
+    target/p2-project.txt; then echo ''the Project paragraph still says do not yet
+    or points at the seed'' >&2; exit 1; fi; tr -s ''[:space:]'' '' '' <.agents/factory/invariants.md
+    | grep -qF ''read_parquet(?, hive_partitioning = false, filename=true)''; sh spec/hive-partition-columns-find-rm/verify/scope.sh;
+    sh spec/hive-partition-columns-find-rm/verify/backport.sh; cargo test --locked;
+    cargo clippy --locked --all-targets --all-features -- -D warnings; cargo fmt --all
+    -- --check; echo P2-GATE-GREEN'
 review:
-  last_reviewed_commit: ""
+  last_reviewed_commit: ''
   verdict: none
-  blocked_reason: ""
+  blocked_reason: ''
   cycle: 0
 ---
-
 # TECH.md — A `key=value` directory name reads like any other in `xdu-find`, `xdu-rm`, `xdu-view`
 
 The **context engine and finite-state machine** for this fix. The YAML frontmatter above is the
@@ -103,35 +146,41 @@ experiment at plan time (PLAN §4.1); what remains is execution and proof.
 or ancestor has a `key=value` name exactly as a bare one. The statement pins carry the new text,
 and each new test is shown to fail on `main`.
 
-- [ ] `src/lib.rs::parquet_source`: insert `, hive_partitioning = false` after the glob in both
+- [x] `src/lib.rs::parquet_source`: insert `, hive_partitioning = false` after the glob in both
       arms, before the optional `, filename=true` (PLAN §2.1). Rewrite its doc comment to say both
       arms turn Hive detection off and why. Change nothing else; `scope.sh` allows only the
       option and comment lines.
-- [ ] `src/bin/xdu-rm.rs`: the selection statement reads
+- [x] `src/bin/xdu-rm.rs`: the selection statement reads
       `read_parquet('{}', hive_partitioning = false)`, and the comment above it says why. Nothing
       else in the binary changes.
-- [ ] `src/view_query.rs`: the comment above `partitions_sql` no longer says Hive partitioning
+- [x] `src/view_query.rs`: the comment above `partitions_sql` no longer says Hive partitioning
       "would yield no partition column at all". It says Hive detection is off in
       `parquet_source`, so a `key=value` name reads as a name. No statement change.
-- [ ] Pins (PLAN §2.2), updated by exactly the option:
+- [x] Pins (PLAN §2.2), updated by exactly the option:
       `tests::test_parquet_source_keeps_local_sql_byte_for_byte` and
       `tests::test_parquet_source_binds_the_s3_glob` (expected strings), the frozen `old_*_sql`
       builders in `view_query::tests` (each `read_parquet('{glob}'` / `read_parquet('{}'`), and
       `s3_view_sql_binds_the_glob_and_the_directory_prefix`'s needles and exact string. Update the
       comments that describe them. Do not loosen any comparison and do not rename the tests.
-- [ ] `tests/find_tests.rs`: `find_reads_a_key_value_partition_as_a_bare_name` and
+- [x] `tests/find_tests.rs`: `find_reads_a_key_value_partition_as_a_bare_name` and
       `find_reads_an_index_under_a_key_value_directory_as_a_bare_one` (PLAN §2.3).
-- [ ] `tests/rm_tests.rs`: `rm_reads_a_key_value_partition_as_a_bare_name` and
+- [x] `tests/rm_tests.rs`: `rm_reads_a_key_value_partition_as_a_bare_name` and
       `rm_reads_an_index_under_a_key_value_directory_as_a_bare_one` (PLAN §2.3). Every run under
       a `path=` index is `-n`.
-- [ ] `tests/view_tests.rs`: `view_reads_a_key_value_partition_as_a_bare_name` and
+- [x] `tests/view_tests.rs`: `view_reads_a_key_value_partition_as_a_bare_name` and
       `view_reads_an_index_under_a_key_value_directory_as_a_bare_one` (PLAN §2.3).
-- [ ] In every new test the **first** assertion is the GOAL's named case, and its message
+- [x] In every new test the **first** assertion is the GOAL's named case, and its message
       contains the token `red.sh` requires: `key=value partition:` for the two partition
       tests, `key=value index directory:` for the two index-directory tests. Layout I's key list
       is `path size uid gid mode atime mtime ctime partition k`. Every other comparison is
       against a bare twin built from the same tree, never against a value re-derived from a
       reader.
+- **Built (amendment):** two crawls of one tree need not store its rows in the same order, so
+  the tests compare output lines in printed order only where the flags give a total order
+  (`-f size`, `-f atime`, `--top` over fixture values that are all distinct; `SortMode::Name`
+  for the views) and as sorted lines or name-keyed entries otherwise. The partition layout's
+  twin is indexed from the same files before the directory is renamed `size-0` → `size=0`, so
+  every field but the name, `ctime` included, is identical. `red.sh` needed no change.
 - **Verify:** the frontmatter `verify:`. It requires the four pins and the six tests ok, then
   `scope.sh`, then `red.sh` (all six red on `052bbc7` with their tokens). Then a CLI drive in
   `temp_index.sh`: the throwaway index copied under `mtime=0/` and `atime=0/`;

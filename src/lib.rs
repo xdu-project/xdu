@@ -177,9 +177,16 @@ pub fn index_glob_s3(index: &S3Locator, partition: Option<&str>) -> String {
 /// The `read_parquet(...)` call a reader puts in its `FROM` clause, and the values it binds.
 ///
 /// For a local index the glob is written into the text as it always was, and nothing is
-/// bound. For an S3 index the text is `read_parquet(?)` and the glob, which carries the bucket,
-/// the prefix and any partition name, is the one bound value. `filename` adds the
+/// bound. For an S3 index the text is `read_parquet(?, …)` and the glob, which carries the
+/// bucket, the prefix and any partition name, is the one bound value. `filename` adds the
 /// `filename=true` column a per-partition query groups by.
+///
+/// Both arms turn DuckDB's Hive detection off. The layout's directory names are bare, but
+/// nothing stops one from reading `key=value`: a partition named `size=0`, or an index stored
+/// under `…/mtime=0/`. When every globbed path carries such a name, detection adds a column
+/// `key` holding `value` that shadows the row's own, so every row reports that value and every
+/// filter, sum and sort on the column reads it. The option is a constant: it puts no value in
+/// the text that was not there before.
 pub fn parquet_source(
     index: &IndexLocator,
     partition: Option<&str>,
@@ -188,11 +195,14 @@ pub fn parquet_source(
     let option = if filename { ", filename=true" } else { "" };
     match index {
         IndexLocator::Local(path) => (
-            format!("read_parquet('{}'{option})", index_glob(path, partition)),
+            format!(
+                "read_parquet('{}', hive_partitioning = false{option})",
+                index_glob(path, partition)
+            ),
             Vec::new(),
         ),
         IndexLocator::S3(locator) => (
-            format!("read_parquet(?{option})"),
+            format!("read_parquet(?, hive_partitioning = false{option})"),
             vec![index_glob_s3(locator, partition)],
         ),
     }
@@ -2244,19 +2254,21 @@ mod tests {
 
     #[test]
     fn test_parquet_source_keeps_local_sql_byte_for_byte() {
-        // The exact text every local reader statement carried before S3 indices existed.
+        // The exact text every local reader statement carried before S3 indices existed, with
+        // Hive detection turned off ahead of any `filename=true`.
         let local = IndexLocator::Local(PathBuf::from("/index/scratch"));
         assert_eq!(
             parquet_source(&local, None, false),
             (
-                "read_parquet('/index/scratch/*/*.parquet')".to_string(),
+                "read_parquet('/index/scratch/*/*.parquet', hive_partitioning = false)".to_string(),
                 vec![]
             )
         );
         assert_eq!(
             parquet_source(&local, Some("alice"), true),
             (
-                "read_parquet('/index/scratch/alice/*.parquet', filename=true)".to_string(),
+                "read_parquet('/index/scratch/alice/*.parquet', hive_partitioning = false, filename=true)"
+                    .to_string(),
                 vec![]
             )
         );
@@ -2270,12 +2282,15 @@ mod tests {
         assert_eq!(
             parquet_source(&index, None, false),
             (
-                "read_parquet(?)".to_string(),
+                "read_parquet(?, hive_partitioning = false)".to_string(),
                 vec!["s3://bucket/it's/*/*.parquet".to_string()]
             )
         );
         let (sql, params) = parquet_source(&index, Some("o'brien"), true);
-        assert_eq!(sql, "read_parquet(?, filename=true)");
+        assert_eq!(
+            sql,
+            "read_parquet(?, hive_partitioning = false, filename=true)"
+        );
         assert_eq!(
             params,
             vec!["s3://bucket/it's/o'brien/*.parquet".to_string()]

@@ -82,9 +82,11 @@ fn main() -> Result<()> {
     // unique key) so the preview and the real deletion always select identical rows.
     let limit_clause = deterministic_limit_clause(args.limit);
 
-    // Query for matching files
+    // Hive detection off: a `key=value` name every globbed path carries (a partition named
+    // `size=0`, an index under `atime=0/`) would otherwise become a column shadowing the row's
+    // own, and a size or age filter meant to spare a file would select it for deletion.
     let sql = format!(
-        "SELECT path, size, atime FROM read_parquet('{}') {} {}",
+        "SELECT path, size, atime FROM read_parquet('{}', hive_partitioning = false) {} {}",
         glob_pattern, where_clause, limit_clause
     );
 
