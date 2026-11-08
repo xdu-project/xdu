@@ -3,7 +3,7 @@ slug: bulk-copy-move-xdu-cp-mv
 title: 'Bulk copy and move: xdu-cp and xdu-mv over a shared select-act engine'
 kind: feature
 appetite: big
-status: in_review
+status: done
 branch: feature/bulk-copy-move-xdu-cp-mv
 base: main
 current_phase: done
