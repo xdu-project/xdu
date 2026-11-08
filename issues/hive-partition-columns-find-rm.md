@@ -1,5 +1,5 @@
 ---
-status: unshaped
+status: shaped on fix/hive-partition-columns-find-rm (2026-11-08) — see spec/hive-partition-columns-find-rm/GOAL.md
 kind: fix
 appetite: small
 ---
