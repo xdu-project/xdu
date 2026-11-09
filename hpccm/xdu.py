@@ -39,7 +39,7 @@ PROJECT = 'https://github.com/xdu-project/xdu'
 DIST = '/xdu-dist.tar.gz'      # the one file stage 0 hands to stage 1
 
 # Release tag to install; override with --userarg version=1.2.3
-VERSION = '0.6.0'
+VERSION = '0.6.1'
 
 # First release whose tarball carries lib/xdu/extensions/. Older releases
 # build without the extension check, so version= can still point at them.
