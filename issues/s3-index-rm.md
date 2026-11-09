@@ -4,7 +4,7 @@ kind: feature
 appetite: big
 ---
 
-# `xdu-rm` against an index in S3
+# `xdu-rm`, `xdu-cp` and `xdu-mv` against an index in S3
 
 > **Pre-shaped candidate, not a contract.** `/xdu-feature` promotes this into `spec/{slug}/GOAL.md`,
 > where appetite, non-goals and the R-IDs get negotiated. Do not copy it verbatim.
@@ -17,6 +17,14 @@ refuses right after argument parsing, before any query or deletion, with `xdu-rm
 yet supported by xdu-rm`, and exits non-zero (`src/bin/xdu-rm.rs`; `tests/rm_tests.rs` covers both
 routes and asserts nothing else ran). An operator who keeps one central index therefore needs a
 local copy of it to run a guarded bulk delete, which defeats the point of the central copy.
+
+`xdu-cp` and `xdu-mv` (#37) refuse an `s3://` index too, through `select::refuse_s3`
+(`src/select.rs`), before the index, the extension directory, the destination or any query is
+touched (`tests/cp_tests.rs`, `tests/mv_tests.rs`). Their cycle kept that refusal so the select-act
+engine has one S3 posture, and folded the reader-side wiring it would need (a bound S3 glob, the
+marker read over S3, the credential resolver) into this seed
+(`spec/bulk-copy-move-xdu-cp-mv/GOAL.md`, Non-goals and Clarifications). Their copies and moves stay
+local as well.
 
 The deletions themselves stay local: `xdu-rm` unlinks files on the host's filesystem, and the index
 only selects them. What changes is the read side, and `xdu-rm` reads more than the other readers.
@@ -31,11 +39,15 @@ files, and the pilot's appetite had no room to review it properly. The refusal (
 landed instead, so the gap fails loud. Pre-existing in the sense that `xdu-rm` never read anything
 but a local index; the refusal is new.
 
+`xdu-cp` and `xdu-mv` joined it as a GOAL non-goal of `bulk-copy-move-xdu-cp-mv`, which was local
+only to fit its calendar. Pre-existing for them in the same sense: both were born refusing.
+
 ## Outcome / vision
 
 `xdu-rm -i s3://bucket/prefix …` selects and deletes exactly what it would select and delete from a
 local copy of the same index, with every gate unchanged, and reads the index the way `xdu-find`
-does: in place, by ranged reads, with the locator and partition names bound.
+does: in place, by ranged reads, with the locator and partition names bound. `xdu-cp` and `xdu-mv`
+do the same for a copy or a move.
 
 ## Sketch of the acceptance criteria
 
@@ -48,11 +60,17 @@ does: in place, by ranged reads, with the locator and partition names bound.
   locator and partition names bound, credentials only through the bound `CREATE SECRET`.
 - **R4** — IF the index cannot be read (endpoint, credentials, bucket, prefix, marker), THEN
   `xdu-rm` SHALL exit non-zero having deleted nothing.
+- **R5** — R1 to R4 SHALL hold for `xdu-cp` and `xdu-mv` as for `xdu-rm`, with "copied" or "moved"
+  for "deleted", through the select-act engine's one S3 read path rather than a copy per tool.
 
 ## Notes
 
 - Related: `spec/s3-index-target/` (GOAL non-goals, R8; the reader flow in PLAN §2.6 and the
   loopback test endpoint `tests/common/s3.rs` this would reuse);
   [`local-reader-bound-parameters.md`](local-reader-bound-parameters.md), since `xdu-rm`'s local SQL
-  still interpolates the partition and index path.
-- Found by: `s3-index-target` (GOAL, pilot split).
+  still interpolates the partition and index path; `spec/bulk-copy-move-xdu-cp-mv/` (GOAL
+  non-goals and Clarifications, the reader-side wiring);
+  [`xdu-rm-on-shared-engine.md`](xdu-rm-on-shared-engine.md), which would put `xdu-rm` on that same
+  engine and so give all three tools one S3 read.
+- Found by: `s3-index-target` (GOAL, pilot split). Widened to `xdu-cp` and `xdu-mv` when the seed of
+  `bulk-copy-move-xdu-cp-mv` retired, 2026-11-09, as that GOAL's non-goals record.

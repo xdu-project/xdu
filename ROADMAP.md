@@ -27,7 +27,9 @@ extensions xdu cannot link statically, pinned to its engine version under `lib/x
 nothing downloads at runtime (record in `spec/duckdb-extension-distribution/`). An index can live in
 S3 as well: `xdu -o s3://bucket/prefix` builds straight into a bucket, and `xdu-find` and `xdu-view`
 query it in place over ranged reads, with no local copy (record in `spec/s3-index-target/`).
-Everything below builds on that baseline.
+`xdu-cp` and `xdu-mv` copy or move exactly the set an index query selects, under `xdu-rm`'s
+dry-run, confirmation and `--safe` model, through one select-act engine in `lib` (record in
+`spec/bulk-copy-move-xdu-cp-mv/`). Everything below builds on that baseline.
 
 ---
 
@@ -44,15 +46,16 @@ no atime — the Unix-only/no-atime assumption no longer holds for every backend
 *Horizon: long-term · Depends on: crawler-source abstraction; expect dedicated research + sub-phases · Refs: —*
 **Seed:** [`issues/s3-crawl-source.md`](issues/s3-crawl-source.md)
 
-## `xdu-rm` against an index in S3
+## `xdu-rm`, `xdu-cp` and `xdu-mv` against an index in S3
 
 The S3 pilot builds an index into a bucket and lets `xdu-find` and `xdu-view` query it in place, but
-`xdu-rm` refuses an `s3://` locator before it reads anything. An operator who keeps one central index
-still needs a local copy of it to run a guarded bulk delete. The deletions stay local; what is missing
-is reading the index in place under every one of `xdu-rm`'s destructive gates unchanged, which is
-high-blast work on the one tool that deletes files.
+`xdu-rm` refuses an `s3://` locator before it reads anything, and `xdu-cp` and `xdu-mv` refuse it
+the same way so that the select-act engine has one S3 posture. An operator who keeps one central
+index still needs a local copy of it to run a guarded bulk delete, copy or move. The file operations
+stay local; what is missing is reading the index in place under every one of the destructive gates
+unchanged, which is high-blast work on the tools that delete and move files.
 
-*Horizon: mid-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (GOAL non-goals, R8)*
+*Horizon: mid-term · Depends on: S3 as an index target — met, on `main` since #33 · Refs: `spec/s3-index-target/` (GOAL non-goals, R8); `spec/bulk-copy-move-xdu-cp-mv/` (GOAL non-goals)*
 **Seed:** [`issues/s3-index-rm.md`](issues/s3-index-rm.md)
 
 ## S3 credentials beyond environment variables and the shared files
@@ -202,31 +205,18 @@ failure that leaves no readable-but-wrong index.
 *Horizon: mid-term · Depends on: the self-describing marker; S3 as an index target, for the remote side (met, on `main` since #33) · Refs: —*
 **Seed:** [`issues/xdu-repack.md`](issues/xdu-repack.md)
 
-## Bulk operations: `xdu-cp` and `xdu-mv` over a shared select-act engine
-
-First of the bulk-operations theme, whose entries land in file order: copy/move, then archives,
-then diffing. `xdu-rm` proved the pattern: select a set with an index query, act on exactly that
-set, with dry-run, confirmation, `--safe` re-stat, and deterministic ordering under `--limit`.
-This entry lifts that path into one `lib` implementation behind `rm`, `cp`, and `mv` instead of a
-fourth copy of `rm`'s `main`, turning "move everything untouched in two years to cold storage"
-and "copy this user's stale logs to a staging prefix" into single safe commands — and the staging
-copy is the primitive the archive entry builds on. Sequenced after richer search and the schema
-work so both tools are born with the final filter surface and columns rather than retrofitted.
-
-*Horizon: mid-term · Depends on: search + schema entries (sequencing) · Refs: #1*
-**Seed:** [`issues/bulk-copy-move-xdu-cp-mv.md`](issues/bulk-copy-move-xdu-cp-mv.md)
-
 ## Bulk operations: `xdu-tar` slice archives for backup
 
-Second in the theme, on the engine above. There is no way to archive a slice of a tree — "all
-files older than X", "everything changed since the last backup" — with the structure preserved.
-`xdu-find | xargs tar` inherits every `xargs` failure and assembles ten thousand appends where
-tape wants one ordered stream. `xdu-tar` archives exactly the matched set as one reproducible
-stream to file or stdout: a full slice today, an incremental slice once the diff entry below
-supplies the selection. Staging through the copy entry's semantics versus streaming the archive
-directly is the planning decision, weighed on scratch cost against tape behavior.
+Second in the theme, after `xdu-cp` and `xdu-mv`, and built on their select-act engine, on `main`
+since #37. There is no way to archive a slice of a tree — "all files older than X", "everything
+changed since the last backup" — with the structure preserved. `xdu-find | xargs tar` inherits every
+`xargs` failure and assembles ten thousand appends where tape wants one ordered stream. `xdu-tar`
+archives exactly the matched set as one reproducible stream to file or stdout: a full slice today,
+an incremental slice once the diff entry below supplies the selection. Staging through `xdu-cp`'s
+semantics versus streaming the archive directly is the planning decision, weighed on scratch cost
+against tape behavior.
 
-*Horizon: mid-term · Depends on: copy/move engine above · Refs: #1*
+*Horizon: mid-term · Depends on: the copy/move engine — met, on `main` since #37 · Refs: #1*
 **Seed:** [`issues/xdu-tar-slice-archive.md`](issues/xdu-tar-slice-archive.md)
 
 ## Bulk operations: index diffing for incremental selection
@@ -243,25 +233,25 @@ guaranteed present by the schema now delivered on `main` (record in `spec/richer
 
 ## Bulk operations: `xdu-rm` on the shared select-act engine
 
-The copy/move entry builds its engine for `xdu-cp` and `xdu-mv` and leaves `xdu-rm` on its own
+The copy/move cycle (#37) built its engine for `xdu-cp` and `xdu-mv` and left `xdu-rm` on its own
 copy, gaps included: `--safe` re-checks only atime and maximum size though its man page claims
 more, the selection writes the index path and partition name into SQL text, and failed unlinks
 exit 0. Moving `xdu-rm` onto the engine closes all three in the tool that deletes, and makes every
 later engine fix land in every select-act tool at once.
 
-*Horizon: near-term · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (GOAL-gate ruling)*
+*Horizon: near-term · Depends on: the copy/move engine — met, on `main` since #37 · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (GOAL-gate ruling)*
 **Seed:** [`issues/xdu-rm-on-shared-engine.md`](issues/xdu-rm-on-shared-engine.md)
 
 ## Bulk operations: the site lists `xdu-cp` and `xdu-mv` at their release
 
-The copy/move entry adds two binaries but leaves `www/` alone, because the site deploys on every push
-to `main` and would advertise tools no release yet ships. Until the release that carries them, the
-site's tools table and its "all four" count omit them, and its roadmap still lists them as `† v0.8`
-with a sentence that puts `rm` on the shared engine, which it is not until the entry above lands.
-At that release the site moves both tools into its table, counts six, and says what the engine
-serves.
+The copy/move cycle (#37) added two binaries but left `www/` alone, because the site deploys on
+every push to `main` and would advertise tools no release yet ships. Until the release that carries
+them, the site's tools table and its "all four" count omit them, and its roadmap still lists them as
+`† v0.8` with a sentence that puts `rm` on the shared engine, which it is not until the entry above
+lands. At that release the site moves both tools into its table, counts six, and says what the
+engine serves.
 
-*Horizon: near-term, at the release that ships the tools · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P4)*
+*Horizon: near-term, at the release that ships the tools · Depends on: the copy/move engine — met, on `main` since #37 · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P4)*
 **Seed:** [`issues/www-cp-mv-at-release.md`](issues/www-cp-mv-at-release.md)
 
 ## Bulk operations: `xdu-mv` removes only the file it copied
@@ -271,7 +261,7 @@ the name, two system calls apart. A file renamed onto that name in between is re
 place. Renaming the source to a private name first, checking that name's inode, and removing only
 it closes the window; the man page lists the race until then.
 
-*Horizon: near-term · Depends on: copy/move engine above · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P5)*
+*Horizon: near-term · Depends on: the copy/move engine — met, on `main` since #37 · Refs: `spec/bulk-copy-move-xdu-cp-mv/` (P5)*
 **Seed:** [`issues/xdu-mv-quarantine-unlink.md`](issues/xdu-mv-quarantine-unlink.md)
 
 ## Bulk operations: `xdu-find` and `xdu-rm` read only the columns the crawler wrote

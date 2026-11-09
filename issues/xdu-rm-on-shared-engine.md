@@ -11,21 +11,21 @@ appetite: small
 
 ## Problem
 
-`bulk-copy-move-xdu-cp-mv` builds a library select-then-act engine for `xdu-cp` and `xdu-mv`: the
-gates, a bound-parameter selection, deterministic `ORDER BY path` under `--limit`, dry-run and
-confirmation, a `--safe` re-stat that `lstat`s and re-checks every filter given, and counted
-outcomes. `xdu-rm`, whose `main` the pattern came from, stays on its own copy, with the gaps the
-engine closes. Confirmed against `7689a92`:
+`bulk-copy-move-xdu-cp-mv` built a library select-then-act engine for `xdu-cp` and `xdu-mv`, on
+`main` since #37: the gates, a bound-parameter selection, deterministic `ORDER BY path` under
+`--limit`, dry-run and confirmation, a `--safe` re-stat that `lstat`s and re-checks every filter
+given, and counted outcomes. `xdu-rm`, whose `main` the pattern came from, stays on its own copy,
+with the gaps the engine closes. Confirmed against `7689a92`; line numbers re-read at `5d551a0`:
 
 - `--safe` re-checks only atime (`--older-than`) and size (`--max-size`)
-  (`src/bin/xdu-rm.rs:159-191`); `--min-size` and `--newer-than` are unchecked, as invariant §4
+  (`src/bin/xdu-rm.rs:161-193`); `--min-size` and `--newer-than` are unchecked, as invariant §4
   records. The man page claims more (`doc/xdu-rm.1.scd:64-67`), and its own example
   `xdu-rm --min-size 1G --safe` (`:105`) re-checks nothing. The re-stat is `fs::metadata`, which
   follows a symlink planted at the path.
 - The selection writes the local glob, index path and partition name into a SQL string literal
-  (`src/bin/xdu-rm.rs:86`), §5's raw-interpolation exception in the one tool that deletes: a `'`
+  (`src/bin/xdu-rm.rs:88`), §5's raw-interpolation exception in the one tool that deletes: a `'`
   in either fails the query, and the text after it is SQL.
-- `xdu-rm` exits 0 after failed unlinks (`:244`).
+- `xdu-rm` exits 0 after failed unlinks (`:246`).
 - Its flag set stops at pattern, partition, size and atime (`src/cli.rs:210-243`), while
   `xdu-find`, `xdu-cp` and `xdu-mv` also filter by owner, group, mode and mtime.
 
