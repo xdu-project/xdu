@@ -53,7 +53,8 @@ selection.
 
 ## Notes
 
-- Second of the bulk-operations theme, after `issues/bulk-copy-move-xdu-cp-mv.md`; incremental
-  selection arrives with `issues/index-diff-incremental-select.md`.
+- Second of the bulk-operations theme, after `xdu-cp` and `xdu-mv`, whose select-act engine is on
+  `main` since #37 (record in `spec/bulk-copy-move-xdu-cp-mv/`); incremental selection arrives with
+  `issues/index-diff-incremental-select.md`.
 - Related: GitHub issue #1.
 - Found by: backup-vision scoping 2026-09-07; split from `xdu-mv-and-xdu-tar.md`.

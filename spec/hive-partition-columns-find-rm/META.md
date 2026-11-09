@@ -93,3 +93,27 @@
 - **Recommended fix:** As F9 there: one brief file assembled verbatim by `cat` from the committed
   files at the reviewed head, kept outside `spec/` and recorded in `REVIEW.md`.
 - **Confidence:** med · **Effort:** small
+
+## F7 — xdu-release has no mode for a maintenance branch cut from an older tag
+`origin=xdu-release:Step3 severity=medium category=missing-guidance status=open target=.agents/skills/xdu-release/SKILL.md`
+- **What happened:** v0.6.1 was cut from `release/v0.6.x`, a maintenance branch made from tag
+  v0.6.0, as a one-time approved departure. Every step that names a branch had to be re-read for
+  it. `test.yaml` triggers only on pushes to `main` and pull requests into `main`, so no CI ran on
+  the branch. A CI-only draft PR into `main` conflicted (`AGENTS.md`, and `hpccm/xdu.def` and
+  `hpccm/xdu.docker`, which git treats as binary), so GitHub never started CI. The fix was a
+  `[ci]` commit on the release branch adding `release/**` to `push.branches`, which put the tag on
+  that commit instead of on the bump. After publish, Step 9's anonymous ghcr token probe returned
+  `UNAUTHORIZED`, and `gh` lacks `read:packages`, so the image tags had to be read from the
+  Publish Image run log.
+- **Skill cause:** The skill assumes `main` throughout. Step 1 compares `main` with `origin/main`,
+  Step 2 detaches at `main`, Step 3 works in place on `main` ("no release branch"), Step 6 tags the
+  bump as `main`'s HEAD, and Step 8 pushes `main`. Nothing says how CI reaches a commit that is not
+  on `main`, and Step 9 has one way to read ghcr and no fallback.
+- **Recommended fix:** Add an explicit `--base release/vX.Y.x` mode. Pre-flight compares that
+  branch with its own origin; the dry run detaches at it; Step 3 stays on it; Step 8 pushes it; the
+  bump never merges into `main`. Step 7 states that ghcr `:latest`, `{{major}}` and
+  `{{major}}.{{minor}}`, and GitHub "Latest", move only when the version is the highest tag. Carry
+  `release/**` in `test.yaml`'s push trigger on `main`, so every future maintenance branch
+  inherits it and the tag stays on the bump. Give Step 9 a fallback for the ghcr check: the Publish
+  Image run log, or `docker buildx imagetools inspect`.
+- **Confidence:** high · **Effort:** medium

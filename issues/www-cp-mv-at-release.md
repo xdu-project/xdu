@@ -20,7 +20,7 @@ appetite: small
 
 ## Problem
 
-`xdu-cp` and `xdu-mv` exist on `main` once `bulk-copy-move-xdu-cp-mv` lands, with man pages,
+`xdu-cp` and `xdu-mv` exist on `main` since `bulk-copy-move-xdu-cp-mv` landed (#37), with man pages,
 completions and a place in the release tarball, `install.sh` and the container recipes. The site
 still describes them as future work, and part of that description is wrong:
 
