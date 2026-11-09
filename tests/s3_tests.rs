@@ -32,7 +32,7 @@ use common::create_test_file;
 use common::s3::{
     ACCESS_KEY, BUCKET, EXTENSION_DIR_VAR, Hermetic, ProxyRecord, READ_ONLY_ACCESS_KEY,
     READ_ONLY_SECRET_KEY, REFUSED_PARTITION, SECRET_KEY, SESSION_TOKEN, TestS3, WRONG_SECRET_KEY,
-    assert_no_secret, encoded_index, output_of, padded_marker, resolve_settings,
+    assert_no_secret, encoded_index, output_of, padded_marker, resolve_settings, set_times,
     test_extension_dir, varied_source_tree, wide_source_tree,
 };
 use xdu::engine::open_s3_connection_from;
@@ -714,6 +714,11 @@ impl Parity {
         varied_source_tree(&source);
         build_index(&source, &index);
         s3.seed_index(&index, prefix);
+        Parity::over(s3, work, index, prefix)
+    }
+
+    /// A local index already seeded under `prefix`, and the directory that holds it.
+    fn over(s3: TestS3, work: TempDir, index: PathBuf, prefix: &str) -> Parity {
         Parity {
             locator: s3.url(prefix),
             s3,
@@ -1191,6 +1196,116 @@ fn find_prefix_with_a_quote_matches_local() {
         "no listing of the quoted prefix reached the endpoint: {:#?}",
         parity.s3.requests()
     );
+    parity.finish();
+}
+
+/// What `key_value_tree` builds: every file's path under the canonical source root with its
+/// size, the canonical `size=0` directory, and the newest access time in the tree.
+struct KeyValueTree {
+    files: BTreeMap<String, i64>,
+    partition: String,
+    newest_atime: i64,
+}
+
+/// A source tree whose one top-level directory, and so the index's one partition, is named
+/// `size=0`: `varied_source_tree`'s 1400 files, sized 1 to 1400 bytes and at most 140 days old,
+/// and `big.bin`, 5,000,000 bytes, accessed and modified a minute ago and so the newest file.
+///
+/// Read as a Hive partition, the name would become a column `size` holding 0 that shadows every
+/// row's own; the cases below also store the bucket copy under a prefix naming a time column.
+fn key_value_tree(source: &Path) -> KeyValueTree {
+    let partition = source.join("size=0");
+    varied_source_tree(&partition);
+    let big = partition.join("big.bin");
+    create_test_file(&big, 5_000_000).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    set_times(&big, now - 60, now - 60);
+    let root = source.canonicalize().unwrap().to_str().unwrap().to_string();
+    let files = common::list_files_recursive(source)
+        .into_iter()
+        .map(|file| {
+            let rel = file.strip_prefix(source).unwrap().to_str().unwrap();
+            let size = fs::metadata(&file).unwrap().len() as i64;
+            (format!("{root}/{rel}"), size)
+        })
+        .collect();
+    KeyValueTree {
+        files,
+        partition: format!("{root}/size=0"),
+        newest_atime: now - 60,
+    }
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn find_key_value_names_read_as_bare_names() {
+    // The bucket copy's one partition is `size=0` and its prefix holds `mtime=0`; the local copy
+    // sits at a bare path. Each name reads as a name, never as a column.
+    const KV_PREFIX: &str = "kv/mtime=0/idx";
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    let index = work.path().join("index");
+    let tree = key_value_tree(&source);
+    build_index(&source, &index);
+    s3.seed_index(&index, KV_PREFIX);
+    let parity = Parity::over(s3, work, index, KV_PREFIX);
+
+    // Over S3 first, against the fixture, so a failure here is the S3 arm's own.
+    let small: Vec<&str> = tree
+        .files
+        .iter()
+        .filter(|(_, size)| **size <= 1024)
+        .map(|(file, _)| file.as_str())
+        .collect();
+    assert_eq!(small.len(), 1024, "the fixture's files of at most 1K");
+    let (out, err, ok) = parity.remote(&["-u", "size=0", "--max-size", "1K"]);
+    assert!(ok, "S3 xdu-find -u size=0 --max-size 1K failed: {err}");
+    let mut listed: Vec<&str> = out.lines().collect();
+    listed.sort();
+    assert!(
+        listed == small,
+        "-u size=0 --max-size 1K over S3 listed {} paths (big.bin among them: {}), not the {} \
+         files of at most 1K",
+        listed.len(),
+        out.contains("/size=0/big.bin"),
+        small.len()
+    );
+    let (out, err, ok) = parity.remote(&["--min-size", "1M"]);
+    assert!(ok, "S3 xdu-find --min-size 1M failed: {err}");
+    assert_eq!(
+        out,
+        format!("{}/big.bin\n", tree.partition),
+        "--min-size 1M"
+    );
+    let (out, err, ok) = parity.remote(&["--count"]);
+    assert!(ok, "S3 xdu-find --count failed: {err}");
+    assert_eq!(out.trim(), tree.files.len().to_string(), "--count");
+    let (out, err, ok) = parity.remote(&["--mtime-older-than", "3650"]);
+    assert!(ok, "S3 xdu-find --mtime-older-than 3650 failed: {err}");
+    assert!(
+        out.is_empty(),
+        "under mtime=0, --mtime-older-than 3650 over S3 matched {} files at most 140 days old",
+        out.lines().count()
+    );
+
+    for args in [
+        &[][..],
+        &["--count"],
+        &["--top", "5"],
+        &["-f", "csv"],
+        &["-u", "size=0"],
+        &["-u", "size=0", "-f", "size"],
+        &["--max-size", "1K"],
+        &["--min-size", "1M"],
+        &["--mtime-older-than", "50"],
+        &["--mtime-newer-than", "20"],
+    ] {
+        parity.assert_same(args);
+    }
     parity.finish();
 }
 
@@ -2618,6 +2733,85 @@ fn view_non_ascii_directories_list_full_names() {
         compared += parity.compare(&["p"], &dirs, &QueryFilters::new(), sort_mode);
     }
     assert!(compared > 0);
+    parity.finish();
+}
+
+#[test]
+#[ignore = "needs the pinned httpfs; set XDU_TEST_EXTENSION_DIR and run with --include-ignored (CI does)"]
+fn view_key_value_names_read_as_bare_names() {
+    // The bucket copy's one partition is `size=0` and its prefix holds `atime=0`; the local copy
+    // sits at a bare path. Each name reads as a name, never as a column.
+    const KV_PREFIX: &str = "kv/atime=0/idx";
+    let s3 = TestS3::start();
+    let work = TempDir::new().unwrap();
+    let source = work.path().join("source");
+    let index = work.path().join("index");
+    let tree = key_value_tree(&source);
+    build_index(&source, &index);
+    s3.seed_index(&index, KV_PREFIX);
+    let parity = ViewParity::over(s3, work, &index, KV_PREFIX);
+
+    // Over S3 first, against the fixture, so a failure here is the S3 arm's own.
+    let listed = view_query::partitions(
+        &parity.remote_conn,
+        &parity.remote,
+        &QueryFilters::new(),
+        SortMode::Name,
+    )
+    .unwrap_or_else(|e| panic!("the partition list over S3: {e:#}"));
+    let want = DirEntry {
+        name: "size=0".to_string(),
+        path: "size=0".to_string(),
+        is_dir: true,
+        total_size: tree.files.values().sum(),
+        file_count: tree.files.len() as i64,
+        latest_atime: tree.newest_atime,
+    };
+    assert_eq!(listed, vec![want], "the partition list over S3");
+    let old = QueryFilters::new().with_older_than(Some(3650));
+    let listed = view_query::partitions(&parity.remote_conn, &parity.remote, &old, SortMode::Name)
+        .unwrap_or_else(|e| panic!("the partitions older than 3650 days over S3: {e:#}"));
+    assert!(
+        listed.is_empty(),
+        "under atime=0, partitions older than 3650 days over S3: {listed:?}"
+    );
+    let root = view_query::partition_root(&parity.remote_conn, &parity.remote, "size=0")
+        .unwrap_or_else(|e| panic!("the root of size=0 over S3: {e:#}"));
+    assert_eq!(root, tree.partition, "the root of size=0 over S3");
+    let top = view_query::list_directory(
+        &parity.remote_conn,
+        &parity.remote,
+        "size=0",
+        &tree.partition,
+        &QueryFilters::new(),
+        SortMode::SizeDesc,
+    )
+    .unwrap_or_else(|e| panic!("listing size=0 over S3: {e:#}"));
+    assert_eq!(
+        top.first()
+            .map(|e| (e.name.as_str(), e.total_size, e.latest_atime)),
+        Some(("big.bin", 5_000_000, tree.newest_atime)),
+        "the largest entry of size=0 over S3"
+    );
+
+    let dirs: Vec<(&str, String)> = ["", "/alice", "/alice/a", "/alice/b", "/alice/b/c", "/bob"]
+        .iter()
+        .map(|dir| ("size=0", format!("{}{dir}", tree.partition)))
+        .collect();
+    let mut compared = 0;
+    for sort_mode in SortMode::ALL {
+        compared += parity.compare(&["size=0"], &dirs, &QueryFilters::new(), sort_mode);
+    }
+    // The partition, then each directory's entries in both views: size=0 holds alice, bob,
+    // big.bin and 250 loose files; alice holds a and b; b holds c; a, c and bob hold 400, 300
+    // and 450 files.
+    assert_eq!(compared, 7 * (1 + 2 * (253 + 2 + 400 + 1 + 300 + 450)));
+    for filters in view_filter_sets() {
+        for sort_mode in [SortMode::Name, SortMode::AgeAsc] {
+            let n = parity.compare(&["size=0"], &dirs, &filters, sort_mode);
+            assert!(n > 0, "{filters:?} matched nothing locally");
+        }
+    }
     parity.finish();
 }
 

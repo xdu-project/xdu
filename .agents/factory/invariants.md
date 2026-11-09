@@ -187,33 +187,43 @@ ordering is load-bearing:
 - The select-act engine behind `xdu-cp` and `xdu-mv` is not under that exception.
   `select::selection_sql` is pure and writes one statement whose local glob is a bound parameter
   (`read_parquet(?, hive_partitioning = false)`), as is a `--regex` pattern
-  (`regexp_matches(path, ?)`). Hive detection is off because a `key=value` name that every globbed
-  path carries (a partition `size=0`, an index under `…/mtime=0/`) would otherwise become a column
-  shadowing the row's own; `cp_tests`' two `hive_style` cases and `mv_tests`' one hold it. The
-  other predicates come from `QueryFilters::to_conditions` and the order tail is `ORDER BY path`,
-  always. A bound glob
+  (`regexp_matches(path, ?)`). The other predicates come from `QueryFilters::to_conditions` and
+  the order tail is `ORDER BY path`, always. A bound glob
   still globs, so `select::checked_glob` refuses, before any SQL, an index path holding a glob
   metacharacter (`*`, `?`, `[`, `\`) and a partition name that is empty, `.` or `..`, or holds `/`
   or a metacharacter. The unit tests `select::tests::the_selection_sql_binds_the_glob_and_the_pattern`,
   `select::tests::an_index_path_with_glob_metacharacters_is_refused` and
   `select::tests::a_partition_name_that_could_leave_the_index_is_refused` hold the rule, and the
   integration test `cp_selects_the_right_rows_with_a_quote_in_the_index_and_partition` holds it with
-  a `'` in both. `xdu-rm`'s own statement is unchanged and still under the exception above.
+  a `'` in both. `xdu-rm`'s own statement is still under the exception above.
+- **Every reader turns DuckDB's Hive detection off** (`hive_partitioning = false`):
+  `lib::parquet_source` in both arms, `xdu-rm`'s own selection statement, and
+  `select::selection_sql`. A `key=value` name that every globbed path carries (a partition
+  `size=0`, an index under `…/mtime=0/`) would otherwise become a column shadowing the row's own,
+  and every filter, sum and sort on that column would read the name's value. The option is a
+  constant and puts no value into the text. The six local tests
+  `*_reads_a_key_value_partition_as_a_bare_name` and
+  `*_reads_an_index_under_a_key_value_directory_as_a_bare_one` in `find_tests`, `rm_tests` and
+  `view_tests`, the wire tests `find_key_value_names_read_as_bare_names` and
+  `view_key_value_names_read_as_bare_names`, and `cp_tests`' two `hive_style` cases and
+  `mv_tests`' one hold it. A new reader statement carries the option.
 - For an **`s3://` index** nothing the locator or `-u` carries is interpolated. `lib::parquet_source`
-  returns `read_parquet(?)` (or `read_parquet(?, filename=true)`) with the whole glob as the one bound
+  returns `read_parquet(?, hive_partitioning = false)` (or
+  `read_parquet(?, hive_partitioning = false, filename=true)`) with the whole glob as the one bound
   value, built by `lib::index_glob_s3`, and `lib::read_completion_marker_s3` binds the URLs of its
   `glob(?)` and `read_blob(?)` statements. The unit test
-  `tests::test_parquet_source_keeps_local_sql_byte_for_byte` pins the local text, and the wire test
-  `find_prefix_with_a_quote_matches_local` holds the S3 rule with a `'` in the prefix. Any new
-  reader statement over an S3 index takes its source from `parquet_source` on the same terms.
+  `tests::test_parquet_source_keeps_local_sql_byte_for_byte` pins the local text, the option
+  included, and the wire test `find_prefix_with_a_quote_matches_local` holds the S3 rule with a
+  `'` in the prefix. Any new reader statement over an S3 index takes its source from
+  `parquet_source` on the same terms.
 - `xdu-view`'s statements live in `lib::view_query`, each built by a pure `*_sql` function. They
   take their source from `parquet_source` too, and the S3 arm also binds the directory prefix a
   listing matches with `path LIKE ?`; the local arm keeps the prefix in a `LIKE` literal, as
   before.
   The unit test `view_query::tests::local_view_sql_is_byte_for_byte_what_xdu_view_sent` pins every
-  local statement against a frozen copy of the binary's old builders, and the wire test
-  `view_quotes_in_the_prefix_and_a_directory_match_local` holds the S3 rule with a `'` in both the
-  prefix and a listed directory.
+  local statement against a frozen copy of the binary's old builders, each carrying the option,
+  and the wire test `view_quotes_in_the_prefix_and_a_directory_match_local` holds the S3 rule
+  with a `'` in both the prefix and a listed directory.
 - Route all such values through **one** validated escaping/quoting helper (or bound parameters). Numeric
   filters (`i64`) are injection-safe by type. Forbid raw `format!` of a partition name / index path
   into SQL — in the destructive `xdu-rm` a quote or `../`/glob-meta could escape the intended partition.
