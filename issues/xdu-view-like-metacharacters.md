@@ -40,9 +40,10 @@ damage depends on name lengths. Selecting a phantom entry such as `g1` under `a_
 ## Why it was deferred
 
 Found while planning `xdu-view-prefix-bytes-vs-chars`, whose GOAL lists it as a non-goal and whose
-foreman ruling sends it here if it reproduces. That fix changes only the offset the cut uses; it
-does not touch the pattern, so it neither closes nor widens this. **Pre-existing**: the unescaped
-`LIKE` dates from the views' first commits and is present on `main` at `7689a92`.
+foreman ruling sends it here if it reproduces. That fix, on `main` since #36, changed only the
+offset the cut uses; it did not touch the pattern, so it neither closed nor widened this.
+**Pre-existing**: the unescaped `LIKE` dates from the views' first commits and is present on `main`
+at `7689a92`, and still at `5d551a0`.
 
 ## Outcome / vision
 
@@ -68,6 +69,6 @@ holds.
   that literal; this could ride with it. The `'`-in-a-directory-name failure is that seed's, not
   this one's.
 - No other reader uses `LIKE` on a path: `xdu-find` and `xdu-rm` filter through `QueryFilters`.
-- Related: [`xdu-view-prefix-bytes-vs-chars.md`](xdu-view-prefix-bytes-vs-chars.md) (the other
-  defect in the same statement).
+- Related: `spec/xdu-view-prefix-bytes-vs-chars/` (the other defect in the same statement, fixed
+  in #36).
 - Found by: `xdu-view-prefix-bytes-vs-chars` `/xdu-plan`, 2026-11-06.

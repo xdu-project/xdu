@@ -527,19 +527,6 @@ after. One change to one file, best done together with the `strip_ansi` lift abo
 *Horizon: near-term · Depends on: — · Refs: —*
 **Seed:** [`issues/xdu-view-terminal-safety.md`](issues/xdu-view-terminal-safety.md)
 
-## `xdu-view` truncates child names under a non-ASCII directory
-
-Both views cut the next path component out of each row with `substr(path, <prefix length> + 1)`,
-where the length is the prefix's Rust byte count and DuckDB's `substr` counts characters. Every
-non-ASCII character anywhere in the absolute path costs each child name its leading characters:
-measured on a local index, `données/{alpha,beta}` lists as `lpha` and `eta`, and entering one lands
-in a directory that matches no rows, so the subtree is unreachable. Pre-existing, and the trigger
-includes the crawled root itself, so an accented home directory breaks every listing. A one-line
-offset fix, plus moving the unit test that pins the local statement text.
-
-*Horizon: near-term · Depends on: — · Refs: the terminal-safety entry above (the other multibyte defect in these views)*
-**Seed:** [`issues/xdu-view-prefix-bytes-vs-chars.md`](issues/xdu-view-prefix-bytes-vs-chars.md)
-
 ## `xdu-view` lists a sibling's files under a directory named with `_` or `%`
 
 Both views select a directory's rows with `path LIKE '<dir>/%'` and never escape the directory, so
