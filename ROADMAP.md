@@ -480,6 +480,18 @@ can ever be asserted and already mis-measured the `groff` work above. Deriving t
 *Horizon: near-term, low priority · Depends on: — · Refs: the two entries above; `issues/ci-gates-are-advisory.md` (a gate that binds nothing is the wider version)*
 **Seed:** [`issues/manpage-gate-coverage-gaps.md`](issues/manpage-gate-coverage-gaps.md)
 
+## The README's raw DuckDB queries read a `key=value` directory name as a column
+
+Every xdu reader reads an index with `hive_partitioning = false` since #38, so a directory named
+`size=0`, or an index stored under `…/mtime=0/`, no longer shadows the row's own column. The
+README's hand-written DuckDB examples still read with DuckDB's default, so the same name changes
+what they select, and the site calls the index "Hive-partitioned", which invites exactly that
+query. Documentation only: the examples should read such a name as a name, or say why not, and
+the site should stop promising Hive semantics xdu does not apply.
+
+*Horizon: near-term, low priority · Depends on: — · Refs: `spec/hive-partition-columns-find-rm/` (PLAN §5)*
+**Seed:** [`issues/raw-query-hive-shadowing.md`](issues/raw-query-hive-shadowing.md)
+
 ## Piping `xdu-find` into `head` exits 1 with a broken-pipe error
 
 Rust starts with `SIGPIPE` ignored, so when the reader exits early the next
